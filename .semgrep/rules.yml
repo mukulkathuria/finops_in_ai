@@ -1,0 +1,54 @@
+# Project rules from spec section 12: ban string-built SQL, eval, shell with user data and
+# disabled TLS verification. Run: semgrep scan --config .semgrep/rules.yml
+rules:
+  - id: finops-no-string-built-sql
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL must be a constant string with bind parameters. Building SQL from f-strings,
+      concatenation or format() enables injection (spec section 10).
+    patterns:
+      - pattern-either:
+          - pattern: sqlalchemy.text(f"...")
+          - pattern: sqlalchemy.text($A + $B)
+          - pattern: sqlalchemy.text("...".format(...))
+          - pattern: sqlalchemy.text("..." % $X)
+          - pattern: $CONN.execute(f"...", ...)
+          - pattern: $CONN.execute(f"...")
+          - pattern: $CONN.execute($A + $B, ...)
+          - pattern: $CONN.execute("...".format(...), ...)
+          - pattern: $CONN.exec_driver_sql(f"...", ...)
+          - pattern: $CONN.exec_driver_sql(f"...")
+          - pattern: fetch_one($C, f"...", ...)
+          - pattern: fetch_one($C, f"...")
+          - pattern: fetch_all($C, f"...", ...)
+          - pattern: fetch_all($C, f"...")
+  - id: finops-no-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval and exec are banned (spec section 12).
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+  - id: finops-no-shell
+    languages: [python]
+    severity: ERROR
+    message: Never run a shell, and never with user data. Pass an argument list without shell=True.
+    pattern-either:
+      - pattern: subprocess.$F(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+  - id: finops-no-tls-verify-off
+    languages: [python]
+    severity: ERROR
+    message: TLS verification must never be disabled.
+    pattern-either:
+      - pattern: $C(..., verify=False, ...)
+      - pattern: ssl._create_unverified_context(...)
+  - id: finops-yaml-safe-load-only
+    languages: [python]
+    severity: ERROR
+    message: Use yaml.safe_load; yaml.load can construct arbitrary objects.
+    patterns:
+      - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=yaml.SafeLoader)
