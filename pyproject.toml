@@ -21,6 +21,7 @@ dependencies = [
     "argon2-cffi>=25.1",
     "pyjwt[crypto]>=2.15",
     "cryptography>=50",
+    "anthropic>=2.4.0",
 ]
 
 [dependency-groups]
