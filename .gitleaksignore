@@ -1,0 +1,3 @@
+# Verified false positives only (gitleaks fingerprint: commit:file:rule:line).
+# c325aec: a parameter type annotation in a test helper matched generic-api-key; no secret.
+c325aec0b0f7d7b281dc51674eed47afbb8ba0fe:tests/unit/test_tokens.py:generic-api-key:22
