@@ -16,6 +16,7 @@ from control_plane.api import (
     audit,
     auth,
     budgets,
+    guardrails,
     invitations,
     providers,
     teams,
@@ -93,6 +94,7 @@ def create_app(
     app.include_router(budgets.router)
     app.include_router(budgets.requests_router)
     app.include_router(webhooks.router)
+    app.include_router(guardrails.router)
     app.include_router(whoami.router)
     app.include_router(usage.router)
     app.include_router(openai.router)

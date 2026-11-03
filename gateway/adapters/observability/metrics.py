@@ -76,6 +76,12 @@ class GatewayMetrics:
         self.budget_alerts = Counter(
             "finops_budget_soft_alerts", "Soft-threshold budget alerts fired.", registry=r
         )
+        self.guardrail_decisions = Counter(
+            "finops_guardrail_decisions",
+            "Guardrail decisions by stage, check, action and backend (never the matched text).",
+            ("stage", "check", "action", "backend"),
+            registry=r,
+        )
         self.idempotent_replays = Counter(
             "finops_idempotent_replays",
             "Responses replayed for a repeated Idempotency-Key.",

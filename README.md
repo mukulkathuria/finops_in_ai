@@ -95,6 +95,34 @@ the first response (`idempotent-replayed: true`) instead of being charged again.
 compose service (`python -m worker`) returns budget holds of crashed requests, rebuilds counters
 from the ledger and purges old idempotency keys.
 
+## Guardrails (PII, secrets, prompt injection)
+
+Every chat and embedding request is inspected after its budget hold and before the provider
+sees it; answers are inspected on the way back, streams included.
+
+| Check | Default | Other settings |
+| --- | --- | --- |
+| PII (email, phone, card with Luhn, IBAN, SSN, Aadhaar, PAN, IP) | `redact`: `[EMAIL_1]`, the same value keeps its number | `block`, `off` |
+| Secrets (cloud, GitHub, OpenAI, Anthropic, Slack, Stripe keys, JWTs, private keys, gateway keys) | `block` | `redact` (`[REDACTED_SECRET]`) |
+| Prompt injection (rules first, then the classifier) | `block` at probability 0.8 | `flag` (recorded only), `off`; `injection_threshold` 0.5 to 0.99 |
+| Classifier unavailable | `closed`: 503 `guardrail_unavailable` | `open` (recorded as `failed_open`) |
+| Model output | `redact` secrets and PII | `off` |
+| Hosted classifier (Jev) may see prompt text | `true` | `false`: the check is skipped and recorded |
+
+`GET`/`PUT /v1/admin/guardrails` reads and changes the org policy (admins change it, auditors
+read it; every change is audited). Obfuscation is handled: zero-width characters, fullwidth
+digits, base64 payloads, leetspeak, text hidden in Unicode tag characters, and English, French,
+Spanish, Portuguese, German, Russian, Chinese and Hindi phrasings. A blocked request gets
+`400 guardrail_blocked` naming the rules, or `400 prompt_injection`; it is recorded in the ledger
+as `blocked` and never charged. Each decision is logged and stored in the ledger row's
+`flags.guardrails` with its rule, backend and version, never the matched text; the metric is
+`finops_guardrail_decisions_total`.
+
+Classifier backend (`.env`): `CLASSIFIER_BACKEND=rules|laya|jev`. Laya runs locally
+(`pip install "laya[serve]"`, then `laya-serve` on port 8000; set `LAYA_BASE_URL`); the dev stack
+points at the mock provider's stand-in. Jev is hosted and needs `JEV_API_KEY` (the gateway refuses
+to start with `jev` and no key). Deterministic rules always run first and always win.
+
 ## Repository layout
 
 | Path | Purpose |

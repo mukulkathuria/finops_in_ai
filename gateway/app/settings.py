@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     master_previous_keys: SecretStr = SecretStr("")
     provider_adapter_default: Literal["native", "litellm"] = "native"
 
+    # Classifiers (US-11, US-12, US-20): rules | laya | jev. Laya speaks the SystemOne
+    # protocol locally; Jev is hosted and needs JEV_API_KEY (selecting it without one fails).
+    classifier_backend: Literal["rules", "laya", "jev"] = "laya"
+    laya_base_url: str = "http://laya:8000"
+    laya_api_key: SecretStr | None = None
+    jev_base_url: str = "https://routellm.abacus.ai"
+    jev_api_key: SecretStr | None = None
+    jev_model: str = "jev-latest"
+    classifier_timeout_ms: int = Field(default=2000, ge=50, le=30_000)
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"

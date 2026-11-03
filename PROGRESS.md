@@ -23,6 +23,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-09 own usage and remaining budget equal to the ledger | `663f03c` | `tests/integration/test_us09_own_usage.py` |
 | US-10 zero overshoot under 500 parallel requests, Idempotency-Key, janitor | `15fd84a` | `tests/integration/test_us10_concurrency.py`, `tests/unit/test_idempotency.py` |
 | US-29 liveness/readiness, Prometheus metrics, one trace per request with stage spans | `51565ac` | `tests/integration/test_us29_observability.py`, `tests/unit/test_metrics_guard.py` |
+| US-11 PII and secrets blocked or redacted per policy, logged without values; US-12 injection corpus blocked, benign corpus under 2% false positives | `feat(US-11, US-12)` | `tests/integration/test_us11_us12_guardrails.py`, `tests/unit/test_detectors.py`, `tests/unit/test_output_filter.py`, `tests/contract/test_classifier_contract.py` |
 
 Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
 tier-safe price bound) on every applicable budget with an ordered upsert, so `committed + reserved`
@@ -46,11 +47,20 @@ regression test and re-reviewed; no open Critical or High finding. See
 Phase 1 also delivered: the basic dashboard (`web/`, `67109b9`; verified in a real browser) and
 the transactional outbox with signed alert webhooks (`tests/integration/test_outbox_webhooks.py`).
 
-## Next: Phase 2 (US-11..US-16: classifiers, guardrails, file validation, OCR, parse cache, ACL retrieval)
+Guardrails in one paragraph: a `Classifier` port with three backends (`rules`, `laya`, `jev`;
+Laya and Jev share one SystemOne client). Input checks run after the budget hold: PII and
+secrets by pattern plus checksum on the text as written, or on a cleaned form when cleaning
+reveals more (zero-width characters, NFKC, base64); injection by rules first, then the
+classifier over overlapping windows. Rules always win; a classifier failure follows the org's
+policy (closed by default). Answers are filtered too; streams are released only where no value
+can be cut in two, tool-call arguments included. Detection is linear in the text and the number
+of findings, and inputs over 64 KiB are scanned off the event loop.
+
+## Next: Phase 2 (US-13..US-16: file validation, OCR, parse cache, ACL retrieval)
 
 ## Remaining stories
 
-Phase 2 US-11..US-16; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
+Phase 2 US-13..US-16; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
 US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 
 ## Findings and deviations from the spec
@@ -70,6 +80,9 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-11 | An attempt that fails or is cancelled after partial output is billed for it and frees its Idempotency-Key, so a retry with that key runs (and is billed) again; only a completed request replays without a charge | The provider billed the partial attempt; replaying a truncated answer would be worse |
 | D-12 | When the org timezone changes, current counters are rebuilt from the ledger for the new periods; a one-time grant stays with the period it was granted in | `docs/audits/2026-11-03-phase1-review.md` (M5) |
 | D-13 | Members of several teams must send `X-FinOps-Team` on model calls (422 `team_required`); team and member budgets key on the team | Review finding C1 |
+| D-14 | The `rules` backend uses native patterns with checksums (Luhn, IBAN mod-97, Verhoeff, SSN rules) instead of Presidio | Presidio's recognizers need spaCy language models (hundreds of MB) in the gateway image; the seeded PII and secrets are covered at lower latency. A Presidio adapter fits behind the same port |
+| D-15 | Streamed answers are released at line or sentence ends (in long runs, at a separator 64 characters back), never inside a value; redaction placeholders are not mapped back to the original values in answers | `tests/unit/test_output_filter.py`; a value split across two output chunks can never leak |
+| D-16 | For untrusted text over 100,000 characters the classifier sees overlapping windows, at most 8 (the first 4 and the last 4); the rules read all of it | Bounds classifier cost and latency on very long prompts |
 
 ## Blocked
 

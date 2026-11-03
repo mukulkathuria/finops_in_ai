@@ -23,9 +23,10 @@ import logging
 import random
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Protocol, TypeVar
+from typing import Any, Final, NoReturn, Protocol, TypeVar
 from uuid import UUID, uuid7
 
 from opentelemetry.trace import Span
@@ -41,7 +42,7 @@ from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
-from gateway.domain.errors import NotFound, Unavailable
+from gateway.domain.errors import DomainError, NotFound, Unavailable
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
     CanonicalChunk,
@@ -56,6 +57,7 @@ from gateway.domain.llm import (
     Usage,
 )
 from gateway.domain.pricing import ModelKind, ModelPrice
+from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
 from gateway.ports.llm import LLMAdapter
 
@@ -133,6 +135,8 @@ class _Call:
     hold: str
     started: float
     idem: Idempotency | None
+    # Guardrail decisions for the ledger row; every exit path settles through `_end`.
+    decisions: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def origin(self) -> Origin:
@@ -188,8 +192,13 @@ class _Relay:
         upstream: AsyncIterator[CanonicalChunk],
         outcome: list[StreamOutcome],
         on_end: Callable[[_StreamEnd], None],
+        output: OutputFilter | None = None,
     ) -> None:
         self._call = call
+        self._output = output
+        self._text = output.stream() if output is not None else None
+        self._arguments: dict[int, OutputStream] = {}  # tool-call index -> its filtered stream
+        self._exhausted = False
         self._req = req
         self._next = first
         self._upstream = upstream
@@ -208,7 +217,7 @@ class _Relay:
     async def __anext__(self) -> CanonicalChunk:
         if self._settled:
             raise StopAsyncIteration
-        if self._started:
+        if self._started and not self._exhausted:
             try:
                 self._next = await anext(self._upstream, None)
             except asyncio.CancelledError:
@@ -217,13 +226,53 @@ class _Relay:
             except Exception:
                 self._settle("error")
                 raise
+        elif self._exhausted:
+            self._next = None
         self._started = True
         chunk = self._next
         if chunk is None:
+            self._exhausted = True
+            if (tail := self._held()) is not None:  # output the guardrail was still holding back
+                self._track(tail)
+                return tail
             self._settle("ok")
             raise StopAsyncIteration
+        chunk = self._filtered(chunk)
         self._track(chunk)
         return chunk
+
+    def _filtered(self, chunk: CanonicalChunk) -> CanonicalChunk:
+        output, text = self._output, self._text
+        if output is None or text is None:
+            return chunk
+        content = text.feed(chunk.content or "")
+        deltas: list[ToolCallDelta] = []
+        for d in chunk.tool_calls:
+            if d.index not in self._arguments:
+                self._arguments[d.index] = output.stream()
+            deltas.append(replace(d, arguments=self._arguments[d.index].feed(d.arguments)))
+        final = chunk.finish_reason is not None or chunk.usage is not None
+        # Nothing may follow the final chunk: it carries everything still held back.
+        if final and (tail := self._held()) is not None:
+            content += tail.content or ""
+            held = {d.index: d.arguments for d in tail.tool_calls}
+            deltas = [replace(d, arguments=d.arguments + held.pop(d.index, "")) for d in deltas]
+            deltas += [ToolCallDelta(i, arguments=rest) for i, rest in held.items()]
+        return replace(chunk, content=content or None, tool_calls=tuple(deltas))
+
+    def _held(self) -> CanonicalChunk | None:
+        """What the output guardrail still holds back, as one chunk (None when nothing is)."""
+        if self._text is None:
+            return None
+        content = self._text.flush()
+        deltas = tuple(
+            ToolCallDelta(i, arguments=rest)
+            for i, stream in sorted(self._arguments.items())
+            if (rest := stream.flush())
+        )
+        if not content and not deltas:
+            return None
+        return CanonicalChunk(content=content or None, tool_calls=deltas)
 
     async def aclose(self) -> None:
         self._settle("cancelled")  # a no-op once the stream has ended
@@ -278,6 +327,7 @@ class ChatService:
         self,
         *,
         db: Database,
+        guardrails: Guardrails,
         catalog: CatalogCache,
         adapters: Mapping[str, LLMAdapter],
         usage: UsageRepository,
@@ -296,6 +346,7 @@ class ChatService:
         self._budgets = budgets
         self._idempotency = idempotency
         self._telemetry = telemetry
+        self._guardrails = guardrails
         self.default_max_tokens = default_max_tokens
         self._retries = retries
         self._background: set[asyncio.Task[None]] = set()
@@ -428,7 +479,10 @@ class ChatService:
             cost_micro_usd=cost,
             status=status,
             latency_ms=int((time.perf_counter() - call.started) * 1000),
-            flags=dict(flags or {}),
+            flags={
+                **(flags or {}),
+                **({"guardrails": list(call.decisions)} if call.decisions else {}),
+            },
             ts=who.at,
             hold=call.hold,
         )
@@ -485,6 +539,38 @@ class ChatService:
         cancelled meanwhile (disconnect, shutdown), the settlement still completes."""
         await asyncio.shield(self._spawn(work))
 
+    @asynccontextmanager
+    async def _settles_on_failure(
+        self, call: _Call, usage: Usage | None = None, cost: int = 0
+    ) -> AsyncIterator[None]:
+        """If the block fails, settle the request: release the hold or, once the provider has
+        answered (`usage` given), charge what it cost. Either way the failure is recorded."""
+        spent, charged = usage or Usage(), usage is not None
+        try:
+            yield
+        except asyncio.CancelledError:
+            self._spawn(self._end_quietly(call, spent, cost, "cancelled", charged=charged))
+            raise
+        except Exception:
+            await self._settle(self._end_quietly(call, spent, cost, "error", charged=charged))
+            raise
+
+    async def _block(self, call: _Call, error: DomainError) -> NoReturn:
+        """Release the hold of a request the guardrails stopped, record why, and refuse it."""
+        await self._settle(self._end_quietly(call, Usage(), 0, "blocked", charged=False))
+        raise error
+
+    async def _inspect(self, call: _Call, req: CanonicalRequest) -> Inspection:
+        """Spec section 4, stage 5: input guardrails, after the budget hold (stage 4)."""
+        async with self._settles_on_failure(call):
+            inspection = await self._guardrails.inspect_chat(
+                call.who.org_id, req, request_id=call.who.request_id
+            )
+        call.decisions.extend(inspection.decisions)
+        if inspection.blocked is not None:
+            await self._block(call, inspection.blocked)
+        return inspection
+
     async def _call_provider(self, call: _Call, attempt: Callable[[], Awaitable[T]]) -> T:
         """Run the provider call with retries; any failure releases the hold and is recorded."""
         try:
@@ -509,6 +595,8 @@ class ChatService:
         call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem)
         if isinstance(call, bytes):
             return ChatResult(*load_chat(call))
+        inspection = await self._inspect(call, req)
+        req = inspection.request
         with self._telemetry.provider_call(
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
@@ -523,6 +611,11 @@ class ChatService:
                 )
             cost = r.entry.cost(usage)
             self._telemetry.annotate(span, usage, cost, response.finish_reason)
+        async with self._settles_on_failure(call, usage, cost):  # the provider has charged
+            response, output = await self._guardrails.filter_response(
+                inspection.policy, response, request_id=who.request_id
+            )
+        call.decisions.extend(output)
         stored = dump_chat(call.origin, cost, response) if idem is not None else None
         await self._settle(self._end(call, usage, cost, "ok", charged=True, result=stored))
         return ChatResult(response, cost, call.origin)
@@ -542,6 +635,8 @@ class ChatService:
         if isinstance(call, bytes):
             response, cost, origin = load_chat(call)
             return StreamResult(_replay_stream(response, cost, outcome), origin)
+        inspection = await self._inspect(call, req)
+        req = inspection.request
         current: list[AsyncIterator[CanonicalChunk]] = []
 
         async def open_stream() -> CanonicalChunk | None:
@@ -557,10 +652,15 @@ class ChatService:
             span.end()
             raise
 
+        output = self._guardrails.output_filter(inspection.policy)
+
         def on_end(end: _StreamEnd) -> None:
+            if output is not None and (decisions := output.decisions()):
+                call.decisions.extend(decisions)
+                self._guardrails.record_output(decisions, who.request_id)
             self._spawn(self._finish_stream(call, current[0], end, span))
 
-        relay = _Relay(call, req, first, current[0], outcome, on_end)
+        relay = _Relay(call, req, first, current[0], outcome, on_end, output)
         return StreamResult(relay, call.origin)
 
     async def _finish_stream(
@@ -596,6 +696,14 @@ class ChatService:
         call = await self._begin(who, r, "embed", embed_demand(r.entry, req), idem)
         if isinstance(call, bytes):
             return EmbedResult(*load_embed(call))
+        async with self._settles_on_failure(call):
+            inputs, decisions, blocked = await self._guardrails.inspect_inputs(
+                who.org_id, req.inputs, request_id=who.request_id
+            )
+        call.decisions.extend(decisions)
+        if blocked is not None:
+            await self._block(call, blocked)
+        req = replace(req, inputs=inputs)
         with self._telemetry.provider_call("embeddings", r.entry.provider, r.entry.model) as span:
             response = await self._call_provider(call, lambda: r.adapter.embed(req))
             cost = r.entry.cost(response.usage)

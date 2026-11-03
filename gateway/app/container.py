@@ -8,16 +8,19 @@ from datetime import timedelta
 
 import httpx2
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import SecretStr
 
 from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.authz import Authorizer
 from control_plane.services.budgets import BudgetService
+from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
+from gateway.adapters.classifiers.registry import build_classifier
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.observability.telemetry import Telemetry
@@ -30,6 +33,7 @@ from gateway.adapters.postgres.credentials import CredentialRepository, org_key_
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
+from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
@@ -41,6 +45,7 @@ from gateway.app.gateway_config import load_gateway_config
 from gateway.app.observability import Observability, build_observability
 from gateway.app.settings import Settings
 from gateway.pipeline.chat import HOLD_TTL, ChatService
+from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.usage import UsageReporter
 
 log = logging.getLogger(__name__)
@@ -68,6 +73,7 @@ class Container:
     provider_key_service: ProviderKeyService
     envelope: Envelope
     webhook_service: WebhookService
+    guardrail_service: GuardrailService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     metrics: GatewayMetrics
@@ -112,6 +118,11 @@ def build_envelope(settings: Settings) -> Envelope:
     return Envelope(LocalKeyManager(keys, active))
 
 
+def _secret(value: SecretStr | None) -> str | None:
+    """An empty value in .env (for example `JEV_API_KEY=`) means unset."""
+    return value.get_secret_value() or None if value is not None else None
+
+
 def build_container(
     settings: Settings,
     *,
@@ -144,6 +155,18 @@ def build_container(
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
     budgets = BudgetRepository()
+    classifier = build_classifier(
+        settings.classifier_backend,
+        http=http,
+        laya_base_url=settings.laya_base_url,
+        laya_api_key=_secret(settings.laya_api_key),
+        jev_base_url=settings.jev_base_url,
+        jev_api_key=_secret(settings.jev_api_key),
+        jev_model=settings.jev_model,
+        timeout_s=settings.classifier_timeout_ms / 1000,
+    )
+    policies = PolicyRepository()
+    policy_cache = PolicyCache(db, policies)
     usage = UsageRepository()
     authz = Authorizer(db=db, audit=audit)
     sessions = SessionService(
@@ -196,6 +219,9 @@ def build_container(
         owns_http=http_client is None,
         chat_service=ChatService(
             db=db,
+            guardrails=Guardrails(
+                classifier=classifier, policies=policy_cache, telemetry=observability.telemetry
+            ),
             catalog=CatalogCache(db, CatalogRepository()),
             adapters=adapters,
             usage=usage,
@@ -221,6 +247,9 @@ def build_container(
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,
+        guardrail_service=GuardrailService(
+            db=db, repo=policies, cache=policy_cache, audit=audit, authz=authz
+        ),
         webhook_service=WebhookService(
             db=db,
             repo=WebhookRepository(),

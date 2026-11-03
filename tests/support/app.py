@@ -26,6 +26,7 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "signup_mode": "open",
         "auth_rate_limit_per_minute": 100_000,  # tests share one client address
         "db_pool_size": 10,
+        "laya_base_url": "http://mock-llm:8000",  # the mock provider speaks SystemOne too
         "log_level": "WARNING",
     }
     values.update(overrides)

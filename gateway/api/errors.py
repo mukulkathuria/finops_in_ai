@@ -30,6 +30,7 @@ _STATUS_BY_KIND = {
     "rate_limit": 429,
     "too_large": 413,
     "budget_exceeded": 429,
+    "blocked": 400,
     "unavailable": 503,
 }
 _TYPE_BY_STATUS = {

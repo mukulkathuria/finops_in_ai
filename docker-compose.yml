@@ -30,6 +30,15 @@ x-app-env: &app-env
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-1.0}
   METRICS_TOKEN: ${METRICS_TOKEN:-}
+  # Classifier: the dev stack answers with the mock provider's SystemOne stand-in. For the real
+  # Laya model run `laya-serve` (pip install "laya[serve]", port 8000) and point LAYA_BASE_URL at it.
+  CLASSIFIER_BACKEND: ${CLASSIFIER_BACKEND:-laya}
+  LAYA_BASE_URL: ${LAYA_BASE_URL:-http://mock-llm:8000}
+  LAYA_API_KEY: ${LAYA_API_KEY:-}
+  JEV_API_KEY: ${JEV_API_KEY:-}
+  JEV_BASE_URL: ${JEV_BASE_URL:-https://routellm.abacus.ai}
+  JEV_MODEL: ${JEV_MODEL:-jev-latest}
+  CLASSIFIER_TIMEOUT_MS: ${CLASSIFIER_TIMEOUT_MS:-2000}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 

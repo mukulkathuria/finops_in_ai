@@ -6,7 +6,9 @@ tests, so they measure the gateway and the database, not a real provider (spec s
 Faults are requested in the prompt itself, so they pass through the gateway untouched:
 `[[mock:rate_limit]]`, `[[mock:server_error]]`, `[[mock:timeout]]`, `[[mock:content_filter]]`,
 `[[mock:ctx_overflow]]`, `[[mock:auth]]`, `[[mock:malformed_stream]]`, `[[mock:tool_call]]`,
-`[[mock:no_usage]]` (stream without a usage chunk), `[[mock:slow:<ms>]]`.
+`[[mock:no_usage]]` (stream without a usage chunk), `[[mock:slow:<ms>]]`,
+`[[mock:leak]]` (the answer carries a fake cloud key) and `[[mock:classifier_down]]` (the
+SystemOne stand-in at /v1/systemone answers 503).
 """
 
 import asyncio
@@ -121,6 +123,8 @@ async def chat_completions(request: Request) -> Response:
         (_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), ""
     )
     reply = f"Mock answer from {model}: {last_user[:160]}"
+    if "leak" in faults:  # output guardrail tests: a key-shaped canary, assembled at runtime
+        reply += " canary " + "AK" + "IA" + "MOCKLEAKEDKEY123"
     finish = "stop"
     limit = body.get("max_completion_tokens") or body.get("max_tokens")
     if isinstance(limit, int) and tokens(reply) > limit:
@@ -276,3 +280,66 @@ async def images(request: Request) -> Response:
     n = int(body.get("n") or 1)
     data = [{"b64_json": base64.b64encode(_PNG_1X1).decode()} for _ in range(n)]
     return _json({"created": int(time.time()), "data": data})
+
+
+# Deterministic stand-in for Laya and Jev (the SystemOne protocol): keyword heuristics, not a model.
+_INJECTION_HINTS = re.compile(
+    r"no restrictions|without restrictions|no limits|without limits|new persona|system override"
+    r"|secret instructions|hidden prompt|jailbreak|ignore (?:all |the )?previous instructions",
+    re.IGNORECASE,
+)
+
+
+@app.post("/v1/systemone", response_model=None)
+async def systemone(request: Request) -> Response:
+    body = orjson.loads(await request.body())
+    state = body.get("state")
+    text = state if isinstance(state, str) else orjson.dumps(state).decode()
+    faults = {m.group(1): m.group(2) for m in _FAULT.finditer(text)}
+    if "classifier_down" in faults:
+        return _error(503, "server_error", "Service temporarily unavailable", "server_error")
+    await _latency(int(faults.get("slow") or 0))
+    questions = body.get("questions")
+    if not isinstance(questions, dict) or not 1 <= len(questions) <= 10:
+        return _error(
+            400, "invalid_request_error", "1 to 10 questions are required", "invalid_request_error"
+        )
+    answers: dict[str, Any] = {}
+    for name, question in questions.items():
+        kind = question.get("type") if isinstance(question, dict) else None
+        if kind == "noul":
+            about_injection = "inject" in str(question.get("instructions", "")).lower()
+            hit = about_injection and _INJECTION_HINTS.search(text) is not None
+            answers[name] = {"type": "noul", "noul": 0.96 if hit else 0.03}
+        elif kind == "choice":
+            options = list(question.get("criteria") or [])
+            first = options[0] if options else None
+            answers[name] = {
+                "type": "choice",
+                "choice": first,
+                "probabilities": {o: 1.0 if o == first else 0.0 for o in options},
+                "confidence": 0.9,
+            }
+        elif kind == "score":
+            levels = list(question.get("criteria") or [])
+            answers[name] = {
+                "type": "score",
+                "score": 0.0,
+                "legend": {str(i): level for i, level in enumerate(levels)},
+                "probabilities": {"0": 1.0},
+                "confidence": 0.9,
+            }
+        else:
+            return _error(
+                400, "invalid_request_error", f"unknown type for {name}", "invalid_request_error"
+            )
+    return _json(
+        {
+            "id": f"systemone-{uuid.uuid4().hex}",
+            "object": "systemone.classification",
+            "created": int(time.time()),
+            "model": "laya-mock-0.3",
+            "answers": answers,
+            "usage": {"input_tokens": tokens(text), "output_tokens": len(answers)},
+        }
+    )

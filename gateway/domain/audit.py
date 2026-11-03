@@ -49,8 +49,15 @@ def _check_details(details: Mapping[str, Any]) -> None:
         lowered = key.lower()
         if any(word in lowered for word in _FORBIDDEN_DETAIL_KEYS):
             raise ValueError(f"audit details must not carry secret or prompt fields: {key!r}")
-        if isinstance(value, Mapping):
-            _check_details(value)
+        _check_value(value)
+
+
+def _check_value(value: Any) -> None:
+    if isinstance(value, Mapping):
+        _check_details(value)
+    elif isinstance(value, list | tuple):  # a list of mappings must not slip past the check
+        for item in value:
+            _check_value(item)
 
 
 @dataclass(frozen=True, slots=True)
