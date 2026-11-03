@@ -20,13 +20,13 @@ for key, value in dotenv_values(ROOT / ".env").items():
         os.environ.setdefault(key, value)
 
 
-def pytest_asyncio_loop_factories(
-    config: pytest.Config, item: pytest.Item
-) -> Mapping[str, Any] | None:
-    # psycopg's async mode cannot run on Windows' default Proactor loop.
-    if sys.platform == "win32":
+if sys.platform == "win32":
+    # psycopg's async mode cannot run on the default Proactor loop. pytest-asyncio rejects a hook
+    # that returns None, so the hook only exists where it is needed.
+    def pytest_asyncio_loop_factories(
+        config: pytest.Config, item: pytest.Item
+    ) -> Mapping[str, Any]:
         return {"selector": asyncio.SelectorEventLoop}
-    return None
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

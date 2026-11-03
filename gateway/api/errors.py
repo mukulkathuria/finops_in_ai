@@ -7,7 +7,7 @@ go to the log with the request id, never to the client.
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -77,8 +77,8 @@ def error_response(
     )
 
 
-async def _domain_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, DomainError)
+async def _domain_error(_: Request, raw: Exception) -> JSONResponse:
+    exc = cast(DomainError, raw)  # registered for DomainError only
     status = _STATUS_BY_KIND.get(exc.kind, 400)
     headers = {"retry-after": str(exc.retry_after_s)} if isinstance(exc, RateLimited) else None
     return error_response(
@@ -86,16 +86,16 @@ async def _domain_error(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
-async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, RequestValidationError)
+async def _validation_error(_: Request, raw: Exception) -> JSONResponse:
+    exc = cast(RequestValidationError, raw)  # registered for RequestValidationError only
     first = exc.errors()[0] if exc.errors() else {}
     loc = [str(p) for p in first.get("loc", ()) if p not in ("body", "query", "path", "header")]
     message = str(first.get("msg", "request is not valid"))
     return error_response(422, message, code="invalid_request", param=".".join(loc) or None)
 
 
-async def _http_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, StarletteHTTPException)
+async def _http_error(_: Request, raw: Exception) -> JSONResponse:
+    exc = cast(StarletteHTTPException, raw)  # registered for HTTPException only
     return error_response(
         exc.status_code, str(exc.detail), code=f"http_{exc.status_code}", headers=exc.headers
     )

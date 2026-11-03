@@ -19,7 +19,9 @@ from gateway.adapters.security.tokens import (
 from gateway.domain.errors import Unauthenticated
 
 
-def _service(signer: Ed25519PrivateKey | None = None, kid: str = "k1", **kw: object) -> TokenService:
+def _service(
+    signer: Ed25519PrivateKey | None = None, kid: str = "k1", **kw: object
+) -> TokenService:
     return TokenService(
         signing_key=signer or Ed25519PrivateKey.generate(),
         key_id=kid,
