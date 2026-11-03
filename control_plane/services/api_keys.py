@@ -66,6 +66,21 @@ class ApiKeyService:
                 "key name must be 1-100 characters", code="invalid_key_name", param="name"
             )
         await self._require_team(principal, team_id, meta)
+        if (
+            user_id is not None
+            and user_id != principal.user_id
+            and not principal.can(Permission.USERS_MANAGE)
+        ):
+            # A key bound to someone else bills their budget: only org admins may do that.
+            await self._authz.deny(
+                principal,
+                [Permission.USERS_MANAGE],
+                target=f"team:{team_id}",
+                meta=meta,
+                team_id=team_id,
+                message="team leads may bind a key only to themselves",
+                code="key_owner_forbidden",
+            )
         ctx = TenantContext(principal.org_id, principal.user_id)
         key, prefix = new_api_key()
         expires = datetime.now(UTC) + timedelta(days=expires_in_days) if expires_in_days else None

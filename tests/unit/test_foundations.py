@@ -26,7 +26,9 @@ def test_production_refuses_placeholder_database_url() -> None:
 
 
 def test_dev_accepts_placeholders_and_hides_secret_in_repr() -> None:
-    s = _settings(database_url=SecretStr("postgresql://a:CHANGE_ME@h/d"))
+    s = _settings(
+        environment=Environment.DEV, database_url=SecretStr("postgresql://a:CHANGE_ME@h/d")
+    )
     assert "CHANGE_ME" not in repr(s)
     assert not s.is_production_like
 
@@ -142,3 +144,12 @@ def test_init_env_preserves_comments() -> None:
     assert "# comment line" in out
     assert "# host port" in out
     assert "5432/finops" in out
+
+
+def test_an_unset_environment_means_production_and_refuses_missing_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("ENVIRONMENT", "JWT_SIGNING_KEY", "MASTER_KEY"):  # conftest loads .env
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="JWT_SIGNING_KEY"):
+        Settings(_env_file=None, database_url=SecretStr("postgresql://a:b@h/d"))  # type: ignore[call-arg]

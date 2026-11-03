@@ -126,6 +126,7 @@ class BudgetService:
         first, so concurrent changes to one team's limits are checked one after another."""
         if change.team_id is None:
             return
+        await self._budgets.lock_allocation(conn, change.team_id, change.period, change.unit)
         strict = (await self._budgets.settings(conn)).allocation == "strict"
         cap = await self._budgets.team_cap(conn, change.team_id, change.period, change.unit)
         if change.scope_type == "member":
@@ -281,6 +282,10 @@ class BudgetService:
                     )
             if new != old:
                 await self._budgets.update_settings(conn, new)
+                if new.timezone != old.timezone:  # periods moved: counters follow the ledger
+                    now = datetime.now(UTC)
+                    for budget_id in await self._budgets.budget_ids(conn):
+                        await self._budgets.rebuild_current(conn, budget_id, now)
                 await self._audit.append(
                     conn,
                     self._event(

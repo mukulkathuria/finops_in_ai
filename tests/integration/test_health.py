@@ -9,7 +9,10 @@ from tests.support.database import DisposableDatabase
 
 
 async def _get(database_url: str, path: str) -> httpx2.Response:
-    app = create_app(Settings(_env_file=None, database_url=SecretStr(database_url)))  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, environment="test", database_url=SecretStr(database_url)
+    )
+    app = create_app(settings)
     async with app.router.lifespan_context(app):
         transport = httpx2.ASGITransport(app=app)
         async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:

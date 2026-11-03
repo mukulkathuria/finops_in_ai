@@ -78,10 +78,10 @@ async def test_lockout_after_repeated_failures_then_backoff_expires(
     email = admin["user"]["email"]
     for _ in range(5):
         assert (await _login(client, email, "Wrong-Password-123")).status_code == 401
-    locked = await _login(client, email)  # even the right password waits out the lock
-    assert locked.status_code == 429
-    assert locked.json()["error"]["code"] == "account_locked"
-    assert 1 <= int(locked.headers["retry-after"]) <= 61
+    locked = await _login(client, email)  # even the right password waits out the lock, and
+    # the answer is the one for a wrong password: a lock reveals no account (review finding M3)
+    assert locked.status_code == 401
+    assert locked.json()["error"]["code"] == "invalid_credentials"
     actions = await _audit_actions(client, admin["access_token"])
     assert actions.count("auth.login_failed") == 5
     assert "auth.login_locked" in actions

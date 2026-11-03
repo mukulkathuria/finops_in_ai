@@ -78,6 +78,15 @@ class TeamRepository:
             await fetch_one(conn, "SELECT 1 FROM users WHERE id = :u", {"u": user_id}) is not None
         )
 
+    async def is_lead(self, conn: AsyncConnection, team_id: UUID, user_id: UUID) -> bool:
+        row = await fetch_one(
+            conn,
+            "SELECT 1 FROM role_assignments WHERE team_id = :t AND user_id = :u"
+            " AND role = 'team_lead'",
+            {"t": team_id, "u": user_id},
+        )
+        return row is not None
+
     async def is_member(self, conn: AsyncConnection, team_id: UUID, user_id: UUID) -> bool:
         row = await fetch_one(
             conn,

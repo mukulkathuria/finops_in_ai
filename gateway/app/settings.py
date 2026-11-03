@@ -24,7 +24,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True
     )
 
-    environment: Environment = Environment.DEV
+    # Unset means production: a deployment that forgets ENVIRONMENT fails fast on missing
+    # secrets instead of running with ephemeral keys and public docs.
+    environment: Environment = Environment.PRODUCTION
     log_level: str = "INFO"
     service_name: str = "finops-gateway"
     config_path: Path = Path("config/gateway.yaml")

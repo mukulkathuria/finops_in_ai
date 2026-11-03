@@ -261,6 +261,19 @@ RETURNING old.committed AS was_committed, old.reserved AS was_reserved,
           new.committed AS committed, new.reserved AS reserved
 """
 
+# One team cap at a time: serialises allocation checks even before the team budget row exists.
+_LOCK_ALLOCATION = """
+SELECT 1 AS locked FROM (SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))) x
+"""
+
+_CURRENT_PERIOD = """
+SELECT budget_period_start(b.period, :at, o.timezone) AS period_start
+  FROM budgets b JOIN orgs o ON o.id = b.org_id
+ WHERE b.id = :id
+"""
+
+_BUDGET_IDS = "SELECT id FROM budgets ORDER BY id"
+
 
 @dataclass(frozen=True, slots=True)
 class BudgetAlert:
@@ -577,9 +590,24 @@ class BudgetRepository:
 
     async def seed(self, conn: AsyncConnection, budget_id: UUID, at: datetime) -> None:
         """A new budget starts from the spending already made in its current period."""
-        row = await fetch_one(conn, _ENSURE_ROW, {"id": budget_id, "at": at})
+        await self.rebuild_current(conn, budget_id, at)
+
+    async def rebuild_current(self, conn: AsyncConnection, budget_id: UUID, at: datetime) -> None:
+        """Make the counter of the period containing `at` (org timezone) match the ledger and
+        the live holds, creating it if needed (a new budget, a changed org timezone)."""
+        await fetch_one(conn, _ENSURE_ROW, {"id": budget_id, "at": at})
+        row = await fetch_one(conn, _CURRENT_PERIOD, {"id": budget_id, "at": at})
         if row is not None:
             await self.reconcile_row(conn, budget_id, row["period_start"])
+
+    async def lock_allocation(
+        self, conn: AsyncConnection, team_id: UUID, period: str, unit: str
+    ) -> None:
+        """Serialise limit changes for one team cap until the transaction ends."""
+        await fetch_one(conn, _LOCK_ALLOCATION, {"key": f"budget-cap:{team_id}:{period}:{unit}"})
+
+    async def budget_ids(self, conn: AsyncConnection) -> list[UUID]:
+        return [cast(UUID, r["id"]) for r in await fetch_all(conn, _BUDGET_IDS)]
 
     async def reconcile_row(
         self, conn: AsyncConnection, budget_id: UUID, period_start: date

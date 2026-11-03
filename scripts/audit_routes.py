@@ -31,7 +31,11 @@ def find_unmarked(app: FastAPI) -> list[str]:
 
 
 def main() -> int:
-    settings = Settings(database_url=SecretStr("postgresql://audit:audit@localhost/audit"))
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        environment="test",
+        database_url=SecretStr("postgresql://audit:audit@localhost/audit"),
+    )
     problems = find_unmarked(create_app(settings))
     for p in problems:
         print(f"UNPROTECTED ROUTE: {p}")

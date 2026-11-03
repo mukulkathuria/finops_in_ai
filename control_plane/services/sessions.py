@@ -14,7 +14,7 @@ from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService
 from gateway.domain.audit import AuditAction, AuditEvent, RequestMeta
-from gateway.domain.errors import InvalidInput, RateLimited, Unauthenticated
+from gateway.domain.errors import InvalidInput, Unauthenticated
 from gateway.domain.identity import normalize_email
 from gateway.domain.secrets import digest, new_secret
 
@@ -111,15 +111,13 @@ class SessionService:
                 await set_lookup(conn, "email", normalized)
                 user = await self._sessions.find_login(conn, normalized)
         now = datetime.now(UTC)
-        if user is not None and user.locked_until is not None and user.locked_until > now:
-            wait = int((user.locked_until - now).total_seconds()) + 1
-            raise RateLimited(
-                "too many failed attempts; try again later",
-                retry_after_s=wait,
-                code="account_locked",
-            )
-        valid = await self._hasher.verify(user.password_hash if user else None, password)
-        if user is None:
+        # A locked account answers exactly like a wrong password (same hashing work, same error),
+        # so the lock reveals neither that the account exists nor that the password was right.
+        locked = user is not None and user.locked_until is not None and user.locked_until > now
+        valid = await self._hasher.verify(
+            user.password_hash if user is not None and not locked else None, password
+        )
+        if user is None or locked:
             raise Unauthenticated(_BAD_LOGIN, code="invalid_credentials")
         ctx = TenantContext(user.org_id, user.id)
         if not valid:

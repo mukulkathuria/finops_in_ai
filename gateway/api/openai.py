@@ -6,20 +6,20 @@ streams end with an SSE comment carrying the cost because headers leave before i
 
 import base64
 import struct
-from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncGenerator
+from contextlib import aclosing, suppress
 from typing import Annotated, Any, Literal, Protocol
 
 import orjson
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.types import Receive, Scope, Send
 
 from gateway.api.caller import Caller, ModelCaller
 from gateway.domain.errors import InvalidInput, MalformedRequest
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
-    CanonicalChunk,
     CanonicalRequest,
     EmbedRequest,
     ImagePart,
@@ -29,7 +29,7 @@ from gateway.domain.llm import (
     ToolSpec,
 )
 from gateway.domain.pricing import usd
-from gateway.pipeline.chat import Attribution, ChatService, StreamOutcome
+from gateway.pipeline.chat import Attribution, ChatService, ChunkStream, StreamOutcome
 from gateway.pipeline.idempotency import Origin
 
 router = APIRouter(tags=["data-plane"])
@@ -246,8 +246,8 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
             resolved.entry.public_name,
             include_usage,
         )
-        return StreamingResponse(
-            frames, media_type="text/event-stream", headers={**headers, "cache-control": "no-store"}
+        return _SettlingStream(
+            frames, stream.chunks, headers={**headers, "cache-control": "no-store"}
         )
     result = await chat.complete(who, resolved, req, idem)
     response, cost = result.response, result.cost
@@ -278,14 +278,35 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
     return Response(orjson.dumps(payload), media_type="application/json", headers=headers)
 
 
+class _SettlingStream(StreamingResponse):
+    """Closes the frames and the relay however the response ends: completed, disconnected,
+    cancelled, or never started (Starlette skips the body when its first send already fails),
+    so every stream settles its budget hold and ledger row exactly once."""
+
+    def __init__(
+        self, frames: AsyncGenerator[bytes], chunks: ChunkStream, *, headers: dict[str, str]
+    ) -> None:
+        super().__init__(frames, media_type="text/event-stream", headers=headers)
+        self._frames = frames
+        self._chunks = chunks
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with suppress(RuntimeError):  # still running elsewhere: it closes itself
+                await self._frames.aclose()
+            await self._chunks.aclose()
+
+
 async def _sse(
-    chunks: AsyncGenerator[CanonicalChunk],
+    chunks: ChunkStream,
     outcome: list[StreamOutcome],
     completion_id: str,
     created: int,
     model: str,
     include_usage: bool,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes]:
     def frame(delta: dict[str, Any], finish: str | None = None) -> bytes:
         event = {
             "id": completion_id,
@@ -296,8 +317,8 @@ async def _sse(
         }
         return b"data: " + orjson.dumps(event) + b"\n\n"
 
-    yield frame({"role": "assistant", "content": ""})
     async with aclosing(chunks):  # closing the frames always settles the stream
+        yield frame({"role": "assistant", "content": ""})
         async for chunk in chunks:
             delta: dict[str, Any] = {}
             if chunk.content:

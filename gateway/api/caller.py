@@ -16,7 +16,7 @@ from gateway.adapters.postgres.database import TenantContext, set_lookup, set_te
 from gateway.api.deps import GatewayServices, bearer_token
 from gateway.api.markers import authz_dependency
 from gateway.domain.api_keys import api_key_digest, looks_like_api_key
-from gateway.domain.errors import Forbidden, Unauthenticated
+from gateway.domain.errors import Forbidden, InvalidInput, Unauthenticated
 from gateway.domain.policy import Permission
 
 
@@ -40,6 +40,9 @@ class Caller:
     api_key_id: UUID | None
     permissions: frozenset[str]
     auth_method: Literal["api_key", "jwt"]
+    # A JWT user in several teams who sent no X-FinOps-Team: fine for self-inspection, but a
+    # model call must say which team pays (team and member budgets key on the team).
+    team_ambiguous: bool = False
 
     def can(self, permission: Permission) -> bool:
         return permission.value in self.permissions
@@ -98,6 +101,7 @@ async def _from_jwt(services: CallerServices, token: str, team_header: str | Non
         api_key_id=None,
         permissions=permissions,
         auth_method="jwt",
+        team_ambiguous=team_id is None and len(user.team_ids) > 1,
     )
 
 
@@ -128,6 +132,12 @@ async def require_caller(caller: Annotated[Caller, Depends(current_caller)]) -> 
 async def require_model_access(caller: Annotated[Caller, Depends(current_caller)]) -> Caller:
     if not caller.can(Permission.MODELS_USE):
         raise Forbidden("this credential may not call models", code="forbidden")
+    if caller.team_ambiguous:
+        raise InvalidInput(
+            "you belong to several teams: send X-FinOps-Team with the id of the team that pays",
+            code="team_required",
+            param="X-FinOps-Team",
+        )
     return caller
 
 

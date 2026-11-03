@@ -10,7 +10,10 @@ from scripts.audit_routes import find_unmarked
 
 
 def _app():  # type: ignore[no-untyped-def]
-    return create_app(Settings(_env_file=None, database_url=SecretStr("postgresql://a:b@h/d")))  # type: ignore[call-arg]
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, environment="test", database_url=SecretStr("postgresql://a:b@h/d")
+    )
+    return create_app(settings)
 
 
 def test_all_shipped_routes_are_marked() -> None:

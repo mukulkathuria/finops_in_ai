@@ -130,6 +130,19 @@ class TeamService:
             target=f"team:{team_id}",
             meta=meta,
         )
+        if user_id != principal.user_id and not principal.can(Permission.USERS_MANAGE):
+            async with self._db.transaction(self._ctx(principal)) as conn:
+                lead = await self._teams.is_lead(conn, team_id, user_id)
+            if lead:
+                await self._authz.deny(
+                    principal,
+                    [Permission.USERS_MANAGE],
+                    target=f"team:{team_id}",
+                    meta=meta,
+                    team_id=team_id,
+                    message="only org admins remove a team lead",
+                    code="lead_protected",
+                )
         async with self._db.transaction(self._ctx(principal)) as conn:
             if not await self._teams.remove_member(conn, team_id=team_id, user_id=user_id):
                 raise NotFound("user is not a member of this team", code="member_not_found")

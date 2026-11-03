@@ -71,14 +71,7 @@ class InvitationService:
         email = normalize_email(email)
         if (team_id is None) != (team_role is None):
             raise InvalidInput("team_id and team_role go together", code="invalid_team_assignment")
-        ctx = TenantContext(principal.org_id, principal.user_id)
-        async with self._db.transaction(ctx) as conn:
-            if team_id and not await self._teams.team_exists(conn, team_id):
-                raise NotFound("team not found", code="team_not_found")
-            if await self._teams.email_in_org(conn, email):
-                raise Conflict(
-                    "this person already has an account", code="email_taken", param="email"
-                )
+        # Authorise first, so a caller without the right learns nothing about teams or accounts.
         # Org admins invite anyone; team leads may only invite plain members into their team.
         if not principal.can(Permission.USERS_MANAGE):
             if team_id is None or org_role != "member" or team_role != "member":
@@ -92,6 +85,14 @@ class InvitationService:
                 target=f"team:{team_id}",
                 meta=meta,
             )
+        ctx = TenantContext(principal.org_id, principal.user_id)
+        async with self._db.transaction(ctx) as conn:
+            if team_id and not await self._teams.team_exists(conn, team_id):
+                raise NotFound("team not found", code="team_not_found")
+            if await self._teams.email_in_org(conn, email):
+                raise Conflict(
+                    "this person already has an account", code="email_taken", param="email"
+                )
         token = new_secret()
         async with self._db.transaction(ctx) as conn:
             await self._invitations.supersede_pending(conn, email)

@@ -35,6 +35,7 @@ class UsageEvent:
     route_tier: str | None = None
     flags: dict[str, Any] = field(default_factory=dict)
     ts: datetime | None = None  # the request clock; the database time when absent
+    hold: str | None = None  # the budget hold: makes the insert idempotent when retried
 
 
 # One user's ledger totals for the day, week and month that contain `:at`, in the org timezone.
@@ -60,6 +61,27 @@ SELECT p.period, p.period_start, budget_period_end(p.period, p.period_start) AS 
  ORDER BY p.ord
 """
 
+# Typed casts throughout: an INSERT ... SELECT cannot infer parameter types from the target.
+_RECORD = """
+INSERT INTO usage_events (org_id, team_id, user_id, api_key_id, request_id, kind, provider, model,
+  adapter, catalog_version, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
+  reasoning_tokens, images, cost_micro_usd, baseline_micro_usd, overhead_micro_usd, cache_hit,
+  route_tier, status, estimated, latency_ms, flags, ts)
+SELECT CAST(%(org)s AS uuid), CAST(%(team)s AS uuid), CAST(%(user)s AS uuid),
+  CAST(%(key)s AS uuid), CAST(%(rid)s AS text), CAST(%(kind)s AS text),
+  CAST(%(provider)s AS text), CAST(%(model)s AS text), CAST(%(adapter)s AS text),
+  CAST(%(cv)s AS bigint), CAST(%(inp)s AS bigint), CAST(%(out)s AS bigint),
+  CAST(%(cached)s AS bigint), CAST(%(cw)s AS bigint), CAST(%(reason)s AS bigint),
+  CAST(%(images)s AS bigint), CAST(%(cost)s AS bigint), CAST(%(base)s AS bigint),
+  CAST(%(over)s AS bigint), CAST(%(hit)s AS text), CAST(%(tier)s AS text),
+  CAST(%(status)s AS text), CAST(%(est)s AS boolean), CAST(%(lat)s AS integer),
+  CAST(%(flags)s AS jsonb), COALESCE(CAST(%(ts)s AS timestamptz), now())
+WHERE CAST(%(hold)s AS text) IS NULL OR NOT EXISTS (
+  SELECT 1 FROM usage_events
+   WHERE org_id = CAST(%(org)s AS uuid) AND request_id = CAST(%(rid)s AS text)
+     AND ts = CAST(%(ts)s AS timestamptz) AND flags ->> 'hold' = CAST(%(hold)s AS text))
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PeriodUsage:
@@ -77,17 +99,11 @@ class PeriodUsage:
 
 class UsageRepository:
     async def record(self, conn: AsyncConnection, e: UsageEvent) -> None:
+        """Append one ledger row. With a hold the insert is idempotent: a settlement retried
+        after an unacknowledged commit finds its own row and writes nothing (one charge)."""
+        flags = {**e.flags, "hold": e.hold} if e.hold else e.flags
         await conn.exec_driver_sql(
-            "INSERT INTO usage_events (org_id, team_id, user_id, api_key_id, request_id, kind,"
-            " provider, model, adapter, catalog_version, input_tokens, output_tokens,"
-            " cached_tokens,"
-            " cache_write_tokens, reasoning_tokens, images, cost_micro_usd, baseline_micro_usd,"
-            " overhead_micro_usd, cache_hit, route_tier, status, estimated, latency_ms, flags, ts)"
-            " VALUES (%(org)s, %(team)s, %(user)s, %(key)s, %(rid)s, %(kind)s, %(provider)s,"
-            " %(model)s,"
-            " %(adapter)s, %(cv)s, %(inp)s, %(out)s, %(cached)s, %(cw)s, %(reason)s, %(images)s,"
-            " %(cost)s, %(base)s, %(over)s, %(hit)s, %(tier)s, %(status)s, %(est)s, %(lat)s,"
-            " %(flags)s::jsonb, COALESCE(%(ts)s, now()))",
+            _RECORD,
             {
                 "org": e.org_id,
                 "team": e.team_id,
@@ -113,8 +129,9 @@ class UsageRepository:
                 "status": e.status,
                 "est": e.usage.estimated,
                 "lat": e.latency_ms,
-                "flags": orjson.dumps(e.flags).decode(),
+                "flags": orjson.dumps(flags).decode(),
                 "ts": e.ts,
+                "hold": e.hold,
             },
         )
 
