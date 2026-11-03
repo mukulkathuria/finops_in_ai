@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # and how often it rebuilds the current budget counters from the ledger.
     janitor_interval_seconds: float = Field(default=30, ge=1, le=3600)
     reconcile_interval_seconds: float = Field(default=300, ge=10, le=86_400)
+    outbox_interval_seconds: float = Field(default=5, ge=0.5, le=300)  # alert delivery
 
     # Observability (US-29). Traces export over OTLP/HTTP when the endpoint is set (empty: no
     # export). /metrics needs METRICS_TOKEN as a bearer token when it is set; without one it

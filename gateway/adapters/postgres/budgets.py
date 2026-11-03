@@ -79,7 +79,8 @@ RETURNING r.budget_id, r.period_start, b.unit,
 """
 
 # Swap the hold for the actual amount. The first crossing of the soft threshold in a period
-# flips `soft_alerted` and records exactly one alert.
+# flips `soft_alerted`, records exactly one alert and, in the same statement, the outbox
+# message that announces it (the worker delivers it to the org's webhook).
 _SETTLE_ROW = """
 WITH u AS (
   UPDATE budget_usage bu
@@ -93,10 +94,23 @@ WITH u AS (
   RETURNING bu.org_id, bu.budget_id, bu.period_start, new.committed AS committed,
             b.limit_amount + new.granted AS limit_amount,
             new.soft_alerted AND NOT old.soft_alerted AS fired
+),
+a AS (
+  INSERT INTO budget_alerts (org_id, budget_id, period_start, kind, committed, limit_amount)
+  SELECT org_id, budget_id, period_start, 'soft_threshold', committed, limit_amount
+    FROM u WHERE fired
+  ON CONFLICT DO NOTHING
+  RETURNING id, org_id, budget_id, period_start, committed, limit_amount, created_at
 )
-INSERT INTO budget_alerts (org_id, budget_id, period_start, kind, committed, limit_amount)
-SELECT org_id, budget_id, period_start, 'soft_threshold', committed, limit_amount FROM u WHERE fired
-ON CONFLICT DO NOTHING
+INSERT INTO outbox (org_id, topic, payload)
+SELECT a.org_id, 'budget.soft_threshold',
+       jsonb_build_object('alert_id', a.id, 'budget_id', a.budget_id,
+                          'scope_type', b.scope_type, 'team_id', b.team_id,
+                          'user_id', b.user_id, 'period', b.period, 'unit', b.unit,
+                          'period_start', a.period_start, 'committed', a.committed,
+                          'limit_amount', a.limit_amount, 'soft_pct', b.soft_pct,
+                          'alerted_at', a.created_at)
+  FROM a JOIN budgets b ON b.id = a.budget_id
 RETURNING id
 """
 

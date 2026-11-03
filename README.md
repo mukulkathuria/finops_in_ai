@@ -83,6 +83,13 @@ Concurrent requests can never push spending past a hard limit; a request that wo
 | `POST /v1/budget-requests`, `GET`, `POST /{id}/decision` | members ask; leads (admins for team budgets) decide once or permanently | requests for more budget |
 | `GET /v1/me/usage` | any user, or an API key bound to a user | own usage and remaining budget, nobody else's |
 
+Soft-threshold alerts reach your systems through a signed webhook: `PUT /v1/admin/webhook`
+`{"url": "https://..."}` returns the signing secret once. Each delivery is a POST with
+`X-FinOps-Event`, `X-FinOps-Delivery` (dedupe on it: delivery is at least once),
+`X-FinOps-Timestamp` and `X-FinOps-Signature: v1=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>`.
+Receivers must be public https hosts; failed deliveries back off for up to 10 attempts
+(`GET /v1/admin/webhook/deliveries` shows their state).
+
 Send `Idempotency-Key: <id>` on `/v1/chat/completions` or `/v1/embeddings` and a retry replays
 the first response (`idempotent-replayed: true`) instead of being charged again. The `worker`
 compose service (`python -m worker`) returns budget holds of crashed requests, rebuilds counters

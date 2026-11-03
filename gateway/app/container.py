@@ -17,6 +17,7 @@ from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
+from control_plane.services.webhooks import WebhookService
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.observability.telemetry import Telemetry
@@ -32,6 +33,7 @@ from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCa
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
+from gateway.adapters.postgres.webhooks import WebhookRepository
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
@@ -64,6 +66,8 @@ class Container:
     owns_http: bool
     chat_service: ChatService
     provider_key_service: ProviderKeyService
+    envelope: Envelope
+    webhook_service: WebhookService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     metrics: GatewayMetrics
@@ -216,4 +220,13 @@ def build_container(
         usage_reporter=UsageReporter(db=db, usage=usage, budgets=budgets),
         metrics=observability.metrics,
         telemetry=observability.telemetry,
+        envelope=envelope,
+        webhook_service=WebhookService(
+            db=db,
+            repo=WebhookRepository(),
+            envelope=envelope,
+            audit=audit,
+            authz=authz,
+            allow_insecure=not settings.is_production_like,
+        ),
     )

@@ -22,7 +22,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-08 member limits under the team cap, strict allocation, budget requests | `e57992e` | `tests/integration/test_us08_member_limits.py` |
 | US-09 own usage and remaining budget equal to the ledger | `663f03c` | `tests/integration/test_us09_own_usage.py` |
 | US-10 zero overshoot under 500 parallel requests, Idempotency-Key, janitor | `15fd84a` | `tests/integration/test_us10_concurrency.py`, `tests/unit/test_idempotency.py` |
-| US-29 liveness/readiness, Prometheus metrics, one trace per request with stage spans | (this commit) | `tests/integration/test_us29_observability.py`, `tests/unit/test_metrics_guard.py` |
+| US-29 liveness/readiness, Prometheus metrics, one trace per request with stage spans | `51565ac` | `tests/integration/test_us29_observability.py`, `tests/unit/test_metrics_guard.py` |
 
 Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
 tier-safe price bound) on every applicable budget with an ordered upsert, so `committed + reserved`
@@ -43,6 +43,9 @@ Phase 1 review loop (spec section 12): two independent reviewers, every finding 
 regression test and re-reviewed; no open Critical or High finding. See
 `docs/audits/2026-11-03-phase1-review.md`.
 
+Phase 1 also delivered: the basic dashboard (`web/`, `67109b9`; verified in a real browser) and
+the transactional outbox with signed alert webhooks (`tests/integration/test_outbox_webhooks.py`).
+
 ## Next: Phase 2 (US-11..US-16: classifiers, guardrails, file validation, OCR, parse cache, ACL retrieval)
 
 ## Remaining stories
@@ -61,7 +64,7 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-5 | Anthropic API 2026-10-21 rejects temperature/top_p/top_k | Anthropic adapter drops them (capability `sampling_params=False`) |
 | D-6 | CI image job was red from `a3f7145` to `15fd84a` (tests, lint and SAST green): Trivy's secret scanner matched docstrings in the vendored Anthropic SDK that quote `"type": "service_account"` | `trivy-secret.yaml`: allow rule scoped to `site-packages/anthropic/` only; vulnerability scanning unchanged |
 | D-7 | A budget created mid-period counts the spending its scope already made in that period (seeded from the ledger) | Keeps counters equal to the janitor's ledger rebuild at all times |
-| D-8 | Soft-threshold alerts are recorded (`budget_alerts`, `GET /v1/admin/budget-alerts`), counted in `finops_budget_soft_alerts_total` and logged; e-mail or webhook delivery needs a notification channel | Delivery joins the outbox work |
+| D-8 | Soft-threshold alerts are recorded (`budget_alerts`), counted in `finops_budget_soft_alerts_total` and delivered through the transactional outbox to a signed org webhook; e-mail delivery is not built | Resolved by the outbox (migration 0012); chat tools (Slack, Teams) take the webhook directly |
 | D-9 | Unused budget never rolls over (the spec makes rollover opt-in per org) | Not offered yet; the default behaviour is implemented |
 | D-10 | Budget reservations key on a gateway-generated hold id, never the client-supplied `X-Request-ID` | Duplicate client request ids cannot collide or settle each other's holds |
 | D-11 | An attempt that fails or is cancelled after partial output is billed for it and frees its Idempotency-Key, so a retry with that key runs (and is billed) again; only a completed request replays without a charge | The provider billed the partial attempt; replaying a truncated answer would be worse |

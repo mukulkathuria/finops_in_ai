@@ -11,7 +11,16 @@ import httpx2
 from fastapi import FastAPI
 from opentelemetry.sdk.trace.export import SpanExporter
 
-from control_plane.api import api_keys, audit, auth, budgets, invitations, providers, teams
+from control_plane.api import (
+    api_keys,
+    audit,
+    auth,
+    budgets,
+    invitations,
+    providers,
+    teams,
+    webhooks,
+)
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
 from gateway.api import health, metrics, openai, usage, whoami
@@ -83,6 +92,7 @@ def create_app(
     app.include_router(providers.router)
     app.include_router(budgets.router)
     app.include_router(budgets.requests_router)
+    app.include_router(webhooks.router)
     app.include_router(whoami.router)
     app.include_router(usage.router)
     app.include_router(openai.router)
