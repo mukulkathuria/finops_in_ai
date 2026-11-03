@@ -3,7 +3,8 @@
 Resume rule: read this file, the latest ADRs and open findings, then continue the current phase.
 Workflow that works in this environment: write files through a scratchpad bundle + unbundler,
 run the local gate script (ruff, format, mypy --strict, import contracts, bandit, route audit,
-pytest against PG19), rehearse migrations up/down/up, run the RLS audit, gitleaks-gated push.
+pytest against PG19), rehearse migrations up/down/up, run the RLS audit, gitleaks-gated push,
+then check the GitHub Actions run (all four jobs, including the image scan).
 
 ## Done
 
@@ -15,33 +16,29 @@ pytest against PG19), rehearse migrations up/down/up, run the RLS audit, gitleak
 | US-02 teams, single-use expiring invitations | `267f11d` | `tests/integration/test_us02_teams_invitations.py` (concurrent accept: one winner) |
 | US-03 login, rotating refresh, family revocation, lockout, per-IP limits | `0c0a3b3` | `tests/integration/test_us03_sessions.py` |
 | US-04 team API keys (hash only, instant revocation), data-plane Caller, /v1/whoami | `b5e594a` | `tests/integration/test_us04_api_keys.py` |
-
-## Done in this session after the checkpoint
-
-| US-05 OpenAI-compatible endpoint | `a3f7145`, `af21c2e` | `tests/contract/test_llm_contract.py` (53), `tests/integration/test_us05_openai_compat.py` (official OpenAI SDK: chat, stream, base64 embeddings) |
-
-US-05 details: canonical types; LLMAdapter port; openai_compat / anthropic (SDK 2.4.0, API 2026-10-21,
-no sampling params) / gemini (thought signatures in tool-call ids) adapters; model_catalog (prices as
-data, tiers, worst_case bound with rounding slack) and partitioned usage_events ledger (migration
-0007); config/gateway.yaml providers keyed by env API keys; ChatService with retries before output
-only, ledger row per request incl. errors and cancelled streams; /v1/chat/completions (JSON and SSE
-with cost comment), /v1/embeddings (float and base64), /v1/models; ProviderError to HTTP mapping;
-body limit 413; malformed JSON 400, schema errors 422.
-
+| US-05 OpenAI-compatible endpoint | `a3f7145`, `af21c2e` | `tests/contract/test_llm_contract.py` (53), `tests/integration/test_us05_openai_compat.py` (official OpenAI SDK) |
 | US-06 org provider keys (envelope encryption), adapter switch | `dc17580` | `tests/integration/test_us06_provider_keys.py`, `tests/unit/test_envelope.py` |
+| US-07 org and team budgets, reserve then commit, 429 naming the scope, one soft alert | `0c41fea`, `de42f0d` | `tests/integration/test_us07_budgets.py`, `tests/unit/test_budget_rules.py`, `tests/unit/test_pricing.py` |
+| US-08 member limits under the team cap, strict allocation, budget requests | `e57992e` | `tests/integration/test_us08_member_limits.py` |
+| US-09 own usage and remaining budget equal to the ledger | `663f03c` | `tests/integration/test_us09_own_usage.py` |
+| US-10 zero overshoot under 500 parallel requests, Idempotency-Key, janitor | `15fd84a` | `tests/integration/test_us10_concurrency.py`, `tests/unit/test_idempotency.py` |
 
-## Next: budgets (US-07..US-10), then US-29, Phase 2
+Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
+tier-safe price bound) on every applicable budget with an ordered upsert, so `committed + reserved`
+never passes a limit and locks are always taken in budget-id order. Settlement swaps the hold for
+the actual cost and appends the ledger row in one transaction; failures release the hold; streams
+reserve and open before the first byte. Periods are SQL functions in the org timezone, and the
+ledger row carries the request clock, so counters and the ledger always agree. The janitor
+(`python -m worker`, compose service `worker`) returns holds of crashed requests, rebuilds the
+current counters from the ledger and purges day-old idempotency keys. Verified end to end on the
+running compose stack (bootstrap signup, budget, idempotent replay, own usage, 429).
 
-US-07..US-10 budgets: budgets, budget_usage, budget_reservations, budget_requests, outbox, alerts;
-reserve (worst_case per budget, consistent lock order) before the provider call, commit actual after,
-janitor; 429 budget_exceeded naming the scope; 500-way race and idempotency tests.
+## Next: US-29 (metrics and tracing), then Phase 2
 
 ## Remaining stories
 
-US-06 provider keys (envelope encryption) and adapter switch (incl. optional LiteLLM);
-US-07..US-10 budgets (reserve/commit, hierarchy, ledger views, 500-way race, idempotency);
 US-29 metrics and tracing; Phase 2 US-11..US-16; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
-US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; worker; web dashboard.
+US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 
 ## Findings and deviations from the spec
 
@@ -52,6 +49,11 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; worker; web dashboard.
 | D-3 | `httpx2` instead of `httpx` (maintained continuation; OpenAI 3.x, MCP 2.x, anthropic 2.x use it) | ADR 0001 |
 | D-4 | `control-plane/` is `control_plane/` (Python package naming) | ADR 0001 |
 | D-5 | Anthropic API 2026-10-21 rejects temperature/top_p/top_k | Anthropic adapter drops them (capability `sampling_params=False`) |
+| D-6 | CI image job was red from `a3f7145` to `15fd84a` (tests, lint and SAST green): Trivy's secret scanner matched docstrings in the vendored Anthropic SDK that quote `"type": "service_account"` | `trivy-secret.yaml`: allow rule scoped to `site-packages/anthropic/` only; vulnerability scanning unchanged |
+| D-7 | A budget created mid-period counts the spending its scope already made in that period (seeded from the ledger) | Keeps counters equal to the janitor's ledger rebuild at all times |
+| D-8 | Soft-threshold alerts are recorded (`budget_alerts`, `GET /v1/admin/budget-alerts`) and logged; e-mail or webhook delivery needs a notification channel | Delivery joins the outbox work with US-29 |
+| D-9 | Unused budget never rolls over (the spec makes rollover opt-in per org) | Not offered yet; the default behaviour is implemented |
+| D-10 | Budget reservations key on a gateway-generated hold id, never the client-supplied `X-Request-ID` | Duplicate client request ids cannot collide or settle each other's holds |
 
 ## Blocked
 

@@ -107,7 +107,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build -f infra/docker/gateway/Dockerfile -t finops-gateway:ci .
-      - name: Trivy (fail on fixable HIGH and CRITICAL)
+      - name: Trivy (fail on fixable HIGH and CRITICAL; path-scoped secret exceptions)
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.1 \
-            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed finops-gateway:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/trivy-secret.yaml:/trivy-secret.yaml:ro" aquasec/trivy:0.76.1 \
+            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            --secret-config /trivy-secret.yaml finops-gateway:ci

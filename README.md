@@ -64,6 +64,27 @@ Integration tests create a disposable database per session, apply the same setup
 container bootstrap, migrate it, and connect through the real `app`, `worker` and
 `readonly_analytics` roles, so Row-Level Security is tested exactly as it runs in production.
 
+## Budgets and spend control
+
+Every model call reserves its worst-case cost against each budget that applies (member, team,
+org) before the provider is called, and settles the actual cost with the ledger row afterwards.
+Concurrent requests can never push spending past a hard limit; a request that would gets
+`429 budget_exceeded` naming the tightest scope and a link to ask for more.
+
+| Endpoint | Who | Purpose |
+| --- | --- | --- |
+| `PUT /v1/admin/budgets` | org admin; team lead for member limits in their team | create or change a limit (day, week, month; usd, tokens, images) |
+| `GET /v1/admin/budgets`, `DELETE /v1/admin/budgets/{id}` | admin, finance (read), team lead (own teams) | limits with committed, reserved and remaining for the current period |
+| `GET /v1/admin/budget-alerts` | as above | the one soft-threshold alert per budget and period |
+| `GET`/`PUT /v1/admin/budget-settings` | org admin | org timezone for periods; `overcommit` or `strict` allocation |
+| `POST /v1/budget-requests`, `GET`, `POST /{id}/decision` | members ask; leads (admins for team budgets) decide once or permanently | requests for more budget |
+| `GET /v1/me/usage` | any user, or an API key bound to a user | own usage and remaining budget, nobody else's |
+
+Send `Idempotency-Key: <id>` on `/v1/chat/completions` or `/v1/embeddings` and a retry replays
+the first response (`idempotent-replayed: true`) instead of being charged again. The `worker`
+compose service (`python -m worker`) returns budget holds of crashed requests, rebuilds counters
+from the ledger and purges old idempotency keys.
+
 ## Repository layout
 
 | Path | Purpose |
