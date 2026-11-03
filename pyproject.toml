@@ -18,6 +18,9 @@ dependencies = [
     "alembic>=1.20",
     "pyyaml>=6.0.3",
     "prometheus-client>=0.26",
+    "argon2-cffi>=25.1",
+    "pyjwt[crypto]>=2.15",
+    "cryptography>=50",
 ]
 
 [dependency-groups]
@@ -58,12 +61,13 @@ select = [
 ignore = [
     "S101",   # asserts are fine outside of hot paths; tests rely on them
     "RET504", # readability over terseness for named results
+    "N818",   # domain errors read as outcomes (Forbidden, NotFound), not as *Error classes
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108", "S311", "PERF", "N802"]
 "scripts/**" = ["T20"]
-"migrations/**" = ["E501"]
+"migrations/**" = ["E501", "S608"]  # static DDL; seed values are module constants
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.Path", "fastapi.Body"]

@@ -6,10 +6,12 @@ when port 5432 is already taken on the host).
 Usage: uv run python scripts/init_env.py [target-path]
 """
 
+import base64
 import os
 import re
 import secrets
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +22,10 @@ ROLE_PASSWORD_KEYS = {
     "worker": "FINOPS_WORKER_PASSWORD",
     "migrator": "FINOPS_MIGRATOR_PASSWORD",
     "readonly_analytics": "FINOPS_READONLY_PASSWORD",
+}
+# Values that must be exact-length key material rather than random passwords.
+KEY_GENERATORS: dict[str, Callable[[], str]] = {
+    "JWT_SIGNING_KEY": lambda: base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode(),
 }
 _LINE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>\S*)(?P<rest>\s+#.*)?$")
 _URL = re.compile(
@@ -33,7 +39,7 @@ def render(example: str, port: str | None = None) -> str:
     for line in example.splitlines():
         m = _LINE.match(line)
         if m and m["value"] == PLACEHOLDER:
-            values[m["key"]] = secrets.token_urlsafe(24)
+            values[m["key"]] = KEY_GENERATORS.get(m["key"], lambda: secrets.token_urlsafe(24))()
         elif m and m["key"] == "POSTGRES_PORT":
             pg_port = m["value"]
     if port:

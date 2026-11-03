@@ -8,9 +8,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from control_plane.api import auth
+from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
 from gateway.api import health
-from gateway.app.container import build_container
+from gateway.api.errors import install_error_handlers
+from gateway.app.container import Container, build_container
 from gateway.app.logging import configure_logging
 from gateway.app.settings import Settings
 
@@ -37,5 +40,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url="/openapi.json" if docs else None,
     )
+    install_error_handlers(app)
     app.include_router(health.router)
+    app.include_router(auth.well_known)
+    app.include_router(auth.router)
     return app
+
+
+def _container_satisfies_every_api_protocol(container: Container) -> ControlPlaneServices:
+    """Type-level check only: mypy fails here if the container drifts from what routers need."""
+    return container

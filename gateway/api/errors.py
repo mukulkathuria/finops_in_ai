@@ -1,0 +1,117 @@
+"""OpenAI-shaped error responses for every failure (spec section 3, US-05 compatibility).
+
+`{"error": {"message", "type", "code", "param"}}` plus optional extra fields (for example the
+limiting `scope` on `budget_exceeded`). Unexpected exceptions become a generic 500: the details
+go to the log with the request id, never to the client.
+"""
+
+import logging
+from collections.abc import Mapping
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from gateway.domain.errors import DomainError, RateLimited
+
+log = logging.getLogger(__name__)
+
+_STATUS_BY_KIND = {
+    "invalid_request": 422,
+    "authentication": 401,
+    "permission": 403,
+    "not_found": 404,
+    "conflict": 409,
+    "gone": 410,
+    "rate_limit": 429,
+    "budget_exceeded": 429,
+    "unavailable": 503,
+}
+_TYPE_BY_STATUS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    405: "invalid_request_error",
+    409: "conflict_error",
+    410: "gone_error",
+    413: "invalid_request_error",
+    415: "invalid_request_error",
+    422: "invalid_request_error",
+    429: "rate_limit_error",
+    503: "service_unavailable_error",
+}
+
+
+def error_payload(
+    status: int,
+    message: str,
+    *,
+    code: str,
+    param: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "message": message,
+        "type": _TYPE_BY_STATUS.get(status, "api_error"),
+        "code": code,
+        "param": param,
+    }
+    body.update(extra or {})
+    return {"error": body}
+
+
+def error_response(
+    status: int,
+    message: str,
+    *,
+    code: str,
+    param: str | None = None,
+    extra: dict[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    return JSONResponse(
+        error_payload(status, message, code=code, param=param, extra=extra), status, headers
+    )
+
+
+async def _domain_error(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, DomainError)
+    status = _STATUS_BY_KIND.get(exc.kind, 400)
+    headers = {"retry-after": str(exc.retry_after_s)} if isinstance(exc, RateLimited) else None
+    return error_response(
+        status, exc.message, code=exc.code, param=exc.param, extra=exc.details, headers=headers
+    )
+
+
+async def _validation_error(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, RequestValidationError)
+    first = exc.errors()[0] if exc.errors() else {}
+    loc = [str(p) for p in first.get("loc", ()) if p not in ("body", "query", "path", "header")]
+    message = str(first.get("msg", "request is not valid"))
+    return error_response(422, message, code="invalid_request", param=".".join(loc) or None)
+
+
+async def _http_error(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, StarletteHTTPException)
+    return error_response(
+        exc.status_code, str(exc.detail), code=f"http_{exc.status_code}", headers=exc.headers
+    )
+
+
+async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
+    log.error(
+        "unhandled error",
+        exc_info=exc,
+        extra={"request_id": getattr(request.state, "request_id", None)},
+    )
+    return error_response(500, "internal error", code="internal_error")
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(DomainError, _domain_error)
+    app.add_exception_handler(RequestValidationError, _validation_error)
+    app.add_exception_handler(StarletteHTTPException, _http_error)
+    app.add_exception_handler(Exception, _unexpected)

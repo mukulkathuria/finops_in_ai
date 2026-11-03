@@ -2,12 +2,20 @@
 # Ports bind to 127.0.0.1 only; nothing is exposed beyond the host.
 name: finops
 
-x-db-urls: &db-urls
+x-app-env: &app-env
   ENVIRONMENT: ${ENVIRONMENT:-dev}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   DATABASE_URL: postgresql://app:${FINOPS_APP_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
   WORKER_DATABASE_URL: postgresql://worker:${FINOPS_WORKER_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
   MIGRATOR_DATABASE_URL: postgresql://migrator:${FINOPS_MIGRATOR_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
+  JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?run scripts/init_env.py first}
+  JWT_KEY_ID: ${JWT_KEY_ID:-k1}
+  JWT_PREVIOUS_PUBLIC_KEYS: ${JWT_PREVIOUS_PUBLIC_KEYS:-}
+  JWT_ISSUER: ${JWT_ISSUER:-finops-gateway}
+  JWT_AUDIENCE: ${JWT_AUDIENCE:-finops}
+  ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
+  SIGNUP_MODE: ${SIGNUP_MODE:-bootstrap}
+  PASSWORD_HASH_CONCURRENCY: ${PASSWORD_HASH_CONCURRENCY:-4}
 
 services:
   db:
@@ -59,7 +67,7 @@ services:
       dockerfile: infra/docker/gateway/Dockerfile
     image: finops-gateway:dev
     command: ["alembic", "upgrade", "head"]
-    environment: *db-urls
+    environment: *app-env
     depends_on:
       db:
         condition: service_healthy
@@ -67,7 +75,7 @@ services:
 
   gateway:
     image: finops-gateway:dev
-    environment: *db-urls
+    environment: *app-env
     depends_on:
       migrate:
         condition: service_completed_successfully
