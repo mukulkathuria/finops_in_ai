@@ -4,6 +4,7 @@ from typing import Annotated, Protocol
 
 from fastapi import Depends, Request
 
+from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.sessions import SessionService
@@ -20,6 +21,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def invitation_service(self) -> InvitationService: ...
     @property
     def session_service(self) -> SessionService: ...
+    @property
+    def api_key_service(self) -> ApiKeyService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

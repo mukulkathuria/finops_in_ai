@@ -8,10 +8,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from control_plane.api import audit, auth, invitations, teams
+from control_plane.api import api_keys, audit, auth, invitations, teams
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
-from gateway.api import health
+from gateway.api import health, whoami
+from gateway.api.caller import CallerServices
 from gateway.api.errors import install_error_handlers
 from gateway.app.container import Container, build_container
 from gateway.app.logging import configure_logging
@@ -50,9 +51,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(teams.router)
     app.include_router(invitations.router)
     app.include_router(invitations.accept_router)
+    app.include_router(api_keys.router)
+    app.include_router(whoami.router)
     return app
 
 
-def _container_satisfies_every_api_protocol(container: Container) -> ControlPlaneServices:
+def _container_satisfies_every_api_protocol(
+    container: Container,
+) -> tuple[ControlPlaneServices, CallerServices]:
     """Type-level check only: mypy fails here if the container drifts from what routers need."""
-    return container
+    return container, container

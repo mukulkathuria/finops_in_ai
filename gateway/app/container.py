@@ -6,11 +6,13 @@ from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.authz import Authorizer
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
+from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.database import Database
@@ -33,11 +35,13 @@ class Container:
     identity_repo: IdentityRepository
     role_catalog: RoleCatalogCache
     audit: AuditRepository
+    api_keys: ApiKeyRepository
     counters: PostgresCounterStore
     session_service: SessionService
     identity_service: IdentityService
     team_service: TeamService
     invitation_service: InvitationService
+    api_key_service: ApiKeyService
 
     async def aclose(self) -> None:
         await self.db.dispose()
@@ -74,6 +78,7 @@ def build_container(settings: Settings) -> Container:
     tokens = build_token_service(settings)
     hasher = Argon2PasswordHasher(max_concurrency=settings.password_hash_concurrency)
     teams = TeamRepository()
+    api_keys = ApiKeyRepository()
     authz = Authorizer(db=db, audit=audit)
     sessions = SessionService(
         db=db,
@@ -94,6 +99,7 @@ def build_container(settings: Settings) -> Container:
         identity_repo=identity_repo,
         role_catalog=RoleCatalogCache(identity_repo),
         audit=audit,
+        api_keys=api_keys,
         counters=PostgresCounterStore(db),
         session_service=sessions,
         identity_service=IdentityService(
@@ -119,4 +125,5 @@ def build_container(settings: Settings) -> Container:
             ttl=timedelta(hours=settings.invite_ttl_hours),
             web_base_url=settings.web_base_url,
         ),
+        api_key_service=ApiKeyService(db=db, keys=api_keys, teams=teams, audit=audit, authz=authz),
     )
