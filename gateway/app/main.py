@@ -12,10 +12,11 @@ from fastapi import FastAPI
 from control_plane.api import api_keys, audit, auth, budgets, invitations, providers, teams
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
-from gateway.api import health, openai, whoami
+from gateway.api import health, openai, usage, whoami
 from gateway.api.caller import CallerServices
 from gateway.api.errors import install_error_handlers
 from gateway.api.openai import ChatServices
+from gateway.api.usage import UsageServices
 from gateway.app.container import Container, build_container
 from gateway.app.logging import configure_logging
 from gateway.app.middleware import BodyLimitMiddleware, RequestContextMiddleware
@@ -64,12 +65,13 @@ def create_app(
     app.include_router(budgets.router)
     app.include_router(budgets.requests_router)
     app.include_router(whoami.router)
+    app.include_router(usage.router)
     app.include_router(openai.router)
     return app
 
 
 def _container_satisfies_every_api_protocol(
     container: Container,
-) -> tuple[ControlPlaneServices, CallerServices, ChatServices]:
+) -> tuple[ControlPlaneServices, CallerServices, ChatServices, UsageServices]:
     """Type-level check only: mypy fails here if the container drifts from what routers need."""
-    return container, container, container
+    return container, container, container, container

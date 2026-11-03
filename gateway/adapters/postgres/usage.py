@@ -1,13 +1,14 @@
 """The usage ledger: one append-only row per request (spec section 5)."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
 import orjson
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from gateway.adapters.postgres.database import fetch_all
 from gateway.domain.llm import Usage
 
 
@@ -34,6 +35,44 @@ class UsageEvent:
     route_tier: str | None = None
     flags: dict[str, Any] = field(default_factory=dict)
     ts: datetime | None = None  # the request clock; the database time when absent
+
+
+# One user's ledger totals for the day, week and month that contain `:at`, in the org timezone.
+_PERIODS = """
+WITH org AS (SELECT timezone FROM orgs WHERE id = app_current_org()),
+p AS (
+  SELECT x.period, x.ord, org.timezone AS tz,
+         budget_period_start(x.period, :at, org.timezone) AS period_start
+    FROM org CROSS JOIN (VALUES ('day', 0), ('week', 1), ('month', 2)) AS x (period, ord)
+)
+SELECT p.period, p.period_start, budget_period_end(p.period, p.period_start) AS period_end,
+       count(e.id) AS requests,
+       CAST(coalesce(sum(e.cost_micro_usd), 0) AS bigint) AS cost_micro_usd,
+       CAST(coalesce(sum(e.input_tokens), 0) AS bigint) AS input_tokens,
+       CAST(coalesce(sum(e.output_tokens), 0) AS bigint) AS output_tokens,
+       CAST(coalesce(sum(e.images), 0) AS bigint) AS images
+  FROM p
+  LEFT JOIN usage_events e
+    ON e.user_id = :user
+   AND e.ts >= (CAST(p.period_start AS timestamp) AT TIME ZONE p.tz)
+   AND e.ts < (CAST(budget_period_end(p.period, p.period_start) AS timestamp) AT TIME ZONE p.tz)
+ GROUP BY p.period, p.ord, p.period_start
+ ORDER BY p.ord
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodUsage:
+    """One user's ledger totals for one budget period (org timezone)."""
+
+    period: str
+    period_start: date
+    period_end: date
+    requests: int
+    cost_micro_usd: int
+    input_tokens: int
+    output_tokens: int
+    images: int
 
 
 class UsageRepository:
@@ -78,3 +117,9 @@ class UsageRepository:
                 "ts": e.ts,
             },
         )
+
+    async def periods(
+        self, conn: AsyncConnection, *, user_id: UUID, at: datetime
+    ) -> list[PeriodUsage]:
+        rows = await fetch_all(conn, _PERIODS, {"user": user_id, "at": at})
+        return [PeriodUsage(**dict(r)) for r in rows]

@@ -35,6 +35,7 @@ from gateway.adapters.security.tokens import TokenService, parse_public_keys, pr
 from gateway.app.gateway_config import load_gateway_config
 from gateway.app.settings import Settings
 from gateway.pipeline.chat import ChatService
+from gateway.pipeline.usage import UsageReporter
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class Container:
     chat_service: ChatService
     provider_key_service: ProviderKeyService
     budget_service: BudgetService
+    usage_reporter: UsageReporter
 
     async def aclose(self) -> None:
         await self.chat_service.drain()
@@ -130,6 +132,7 @@ def build_container(
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
     budgets = BudgetRepository()
+    usage = UsageRepository()
     authz = Authorizer(db=db, audit=audit)
     sessions = SessionService(
         db=db,
@@ -183,7 +186,7 @@ def build_container(
             db=db,
             catalog=CatalogCache(db, CatalogRepository()),
             adapters=adapters,
-            usage=UsageRepository(),
+            usage=usage,
             budgets=budgets,
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
@@ -200,4 +203,5 @@ def build_container(
             known_providers=frozenset(provider_configs),
         ),
         budget_service=BudgetService(db=db, budgets=budgets, teams=teams, audit=audit, authz=authz),
+        usage_reporter=UsageReporter(db=db, usage=usage, budgets=budgets),
     )

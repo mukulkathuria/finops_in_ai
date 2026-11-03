@@ -120,7 +120,7 @@ DELETE FROM budgets WHERE id = :id
 RETURNING id, scope_type, team_id, user_id, period, unit, limit_amount, soft_pct
 """
 
-# `:teams` NULL means every budget of the org; `:id` NULL means any budget.
+# `:teams`, `:id` and `:user` narrow the list; NULL leaves that filter off.
 _STATUSES = """
 SELECT b.id, b.scope_type, b.team_id, b.user_id, b.period, b.unit, b.limit_amount, b.soft_pct,
        x.period_start, coalesce(u.committed, 0) AS committed,
@@ -131,6 +131,7 @@ SELECT b.id, b.scope_type, b.team_id, b.user_id, b.period, b.unit, b.limit_amoun
   LEFT JOIN budget_usage u ON u.budget_id = b.id AND u.period_start = x.period_start
  WHERE (CAST(:teams AS uuid[]) IS NULL OR b.team_id = ANY(CAST(:teams AS uuid[])))
    AND (CAST(:id AS uuid) IS NULL OR b.id = CAST(:id AS uuid))
+   AND (CAST(:user AS uuid) IS NULL OR b.user_id = CAST(:user AS uuid))
  ORDER BY CASE b.scope_type WHEN 'org' THEN 0 WHEN 'team' THEN 1 ELSE 2 END,
           b.team_id NULLS FIRST, b.user_id NULLS FIRST, b.period, b.unit
 """
@@ -370,11 +371,12 @@ class BudgetRepository:
         at: datetime,
         team_ids: Sequence[UUID] | None = None,
         budget_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> list[BudgetStatus]:
         """Budgets with their counters for the period that contains `at` (org timezone).
         `team_ids=None` means every budget of the org; otherwise budgets of those teams only."""
         rows = await fetch_all(
-            conn, _STATUSES, {"at": at, "teams": _teams(team_ids), "id": budget_id}
+            conn, _STATUSES, {"at": at, "teams": _teams(team_ids), "id": budget_id, "user": user_id}
         )
         return [
             BudgetStatus(
