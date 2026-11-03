@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     janitor_interval_seconds: float = Field(default=30, ge=1, le=3600)
     reconcile_interval_seconds: float = Field(default=300, ge=10, le=86_400)
 
+    # Observability (US-29). Traces export over OTLP/HTTP when the endpoint is set (empty: no
+    # export). /metrics needs METRICS_TOKEN as a bearer token when it is set; without one it
+    # is served in dev and test only.
+    otel_exporter_otlp_endpoint: str = ""
+    otel_sample_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    metrics_token: SecretStr | None = None
+
     @property
     def is_production_like(self) -> bool:
         return self.environment in (Environment.STAGING, Environment.PRODUCTION)

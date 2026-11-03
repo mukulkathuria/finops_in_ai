@@ -18,6 +18,8 @@ from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
+from gateway.adapters.observability.metrics import GatewayMetrics
+from gateway.adapters.observability.telemetry import Telemetry
 from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.budgets import BudgetRepository
@@ -34,6 +36,7 @@ from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
 from gateway.app.gateway_config import load_gateway_config
+from gateway.app.observability import Observability, build_observability
 from gateway.app.settings import Settings
 from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.usage import UsageReporter
@@ -63,6 +66,8 @@ class Container:
     provider_key_service: ProviderKeyService
     budget_service: BudgetService
     usage_reporter: UsageReporter
+    metrics: GatewayMetrics
+    telemetry: Telemetry
 
     async def aclose(self) -> None:
         await self.chat_service.drain()
@@ -108,7 +113,9 @@ def build_container(
     *,
     http_client: httpx2.AsyncClient | None = None,
     environ: Mapping[str, str] | None = None,
+    observability: Observability | None = None,
 ) -> Container:
+    observability = observability or build_observability(settings)
     db = Database(
         settings.database_url.get_secret_value(),
         pool_size=settings.db_pool_size,
@@ -190,6 +197,7 @@ def build_container(
             usage=usage,
             budgets=budgets,
             idempotency=IdempotencyRepository(stale_after_s=HOLD_TTL.total_seconds()),
+            telemetry=observability.telemetry,
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
             org_adapters=OrgAdapters(
@@ -206,4 +214,6 @@ def build_container(
         ),
         budget_service=BudgetService(db=db, budgets=budgets, teams=teams, audit=audit, authz=authz),
         usage_reporter=UsageReporter(db=db, usage=usage, budgets=budgets),
+        metrics=observability.metrics,
+        telemetry=observability.telemetry,
     )

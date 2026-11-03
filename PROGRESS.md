@@ -22,6 +22,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-08 member limits under the team cap, strict allocation, budget requests | `e57992e` | `tests/integration/test_us08_member_limits.py` |
 | US-09 own usage and remaining budget equal to the ledger | `663f03c` | `tests/integration/test_us09_own_usage.py` |
 | US-10 zero overshoot under 500 parallel requests, Idempotency-Key, janitor | `15fd84a` | `tests/integration/test_us10_concurrency.py`, `tests/unit/test_idempotency.py` |
+| US-29 liveness/readiness, Prometheus metrics, one trace per request with stage spans | (this commit) | `tests/integration/test_us29_observability.py`, `tests/unit/test_metrics_guard.py` |
 
 Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
 tier-safe price bound) on every applicable budget with an ordered upsert, so `committed + reserved`
@@ -33,11 +34,16 @@ ledger row carries the request clock, so counters and the ledger always agree. T
 current counters from the ledger and purges day-old idempotency keys. Verified end to end on the
 running compose stack (bootstrap signup, budget, idempotent replay, own usage, 429).
 
-## Next: US-29 (metrics and tracing), then Phase 2
+Observability: `/metrics` (per-app registry, route-template labels; bearer `METRICS_TOKEN`, dev/test
+only without it), OpenTelemetry server span per request continuing W3C `traceparent`, child spans
+`auth`, `budget.reserve`, GenAI client span `chat <model>` (usage, cost), `budget.settle`; the
+trace id is returned as `x-trace-id` and logged; OTLP/HTTP export via `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+## Next: Phase 2 (US-11..US-16: classifiers, guardrails, file validation, OCR, parse cache, ACL retrieval)
 
 ## Remaining stories
 
-US-29 metrics and tracing; Phase 2 US-11..US-16; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
+Phase 2 US-11..US-16; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
 US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 
 ## Findings and deviations from the spec
@@ -51,7 +57,7 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-5 | Anthropic API 2026-10-21 rejects temperature/top_p/top_k | Anthropic adapter drops them (capability `sampling_params=False`) |
 | D-6 | CI image job was red from `a3f7145` to `15fd84a` (tests, lint and SAST green): Trivy's secret scanner matched docstrings in the vendored Anthropic SDK that quote `"type": "service_account"` | `trivy-secret.yaml`: allow rule scoped to `site-packages/anthropic/` only; vulnerability scanning unchanged |
 | D-7 | A budget created mid-period counts the spending its scope already made in that period (seeded from the ledger) | Keeps counters equal to the janitor's ledger rebuild at all times |
-| D-8 | Soft-threshold alerts are recorded (`budget_alerts`, `GET /v1/admin/budget-alerts`) and logged; e-mail or webhook delivery needs a notification channel | Delivery joins the outbox work with US-29 |
+| D-8 | Soft-threshold alerts are recorded (`budget_alerts`, `GET /v1/admin/budget-alerts`), counted in `finops_budget_soft_alerts_total` and logged; e-mail or webhook delivery needs a notification channel | Delivery joins the outbox work |
 | D-9 | Unused budget never rolls over (the spec makes rollover opt-in per org) | Not offered yet; the default behaviour is implemented |
 | D-10 | Budget reservations key on a gateway-generated hold id, never the client-supplied `X-Request-ID` | Duplicate client request ids cannot collide or settle each other's holds |
 

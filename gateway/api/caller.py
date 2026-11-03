@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import Depends, Header, Request
 
+from gateway.adapters.observability.telemetry import Telemetry
 from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.database import TenantContext, set_lookup, set_tenant
 from gateway.api.deps import GatewayServices, bearer_token
@@ -22,6 +23,8 @@ from gateway.domain.policy import Permission
 class CallerServices(GatewayServices, Protocol):
     @property
     def api_keys(self) -> ApiKeyRepository: ...
+    @property
+    def telemetry(self) -> Telemetry: ...
 
 
 def get_caller_services(request: Request) -> CallerServices:
@@ -105,11 +108,12 @@ async def current_caller(
 ) -> Caller:
     services = get_caller_services(request)
     token = bearer_token(authorization)
-    caller = (
-        await _from_api_key(services, token)
-        if looks_like_api_key(token)
-        else await _from_jwt(services, token, x_finops_team)
-    )
+    with services.telemetry.stage("auth"):
+        caller = (
+            await _from_api_key(services, token)
+            if looks_like_api_key(token)
+            else await _from_jwt(services, token, x_finops_team)
+        )
     request.state.caller = caller
     return caller
 

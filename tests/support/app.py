@@ -8,6 +8,7 @@ from uuid import uuid4
 import httpx2
 from fastapi import FastAPI
 from mock_llm.app import app as mock_provider
+from opentelemetry.sdk.trace.export import SpanExporter
 from pydantic import SecretStr
 
 from gateway.app.main import create_app
@@ -33,12 +34,20 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
 
 @asynccontextmanager
 async def app_client(
-    settings: Settings, *, client_ip: str = "127.0.0.1"
+    settings: Settings,
+    *,
+    client_ip: str = "127.0.0.1",
+    span_exporter: SpanExporter | None = None,
 ) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
     providers = httpx2.AsyncClient(
         mounts={"http://mock-llm:8000": httpx2.ASGITransport(app=mock_provider)}
     )
-    app = create_app(settings, http_client=providers, environ={"MOCK_LLM_API_KEY": "test-key"})
+    app = create_app(
+        settings,
+        http_client=providers,
+        environ={"MOCK_LLM_API_KEY": "test-key"},
+        span_exporter=span_exporter,
+    )
     async with providers, app.router.lifespan_context(app):
         transport = httpx2.ASGITransport(app=app, client=(client_ip, 50000))
         async with httpx2.AsyncClient(

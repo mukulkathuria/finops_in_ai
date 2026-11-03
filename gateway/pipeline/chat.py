@@ -1,4 +1,4 @@
-"""Chat and embeddings use cases (US-05, US-07, US-10).
+"""Chat and embeddings use cases (US-05, US-07, US-10, US-29).
 
 Every request follows spec section 6: reserve the worst-case cost against each applicable budget
 in one transaction, call the provider with retries, then settle the actual cost and append the
@@ -8,6 +8,9 @@ the client goes away, using the provider's usage report or an estimate.
 With an Idempotency-Key, the key is claimed in the reserve transaction and completed, with the
 canonical result, in the settle transaction: a retry replays that result and is never reserved
 or charged again. A failed or cancelled attempt forgets its key, so the client may retry it.
+
+Each stage (budget.reserve, the provider call, budget.settle) is a span of the request's trace
+and a sample of the stage-duration histogram; no prompt or completion text is ever recorded.
 """
 
 import asyncio
@@ -20,13 +23,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, TypeVar
 from uuid import UUID, uuid7
 
+from opentelemetry.trace import Span
+
 from gateway.adapters.llm.registry import OrgAdapters
+from gateway.adapters.observability.telemetry import Telemetry
 from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
-from gateway.domain.budgets import Demand, chat_demand, embed_demand
+from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
 from gateway.domain.errors import NotFound, Unavailable
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
@@ -114,6 +120,18 @@ class _Call:
         return Origin(self.who.request_id, self.who.at)
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamEnd:
+    """What a finished stream settles with."""
+
+    usage: Usage
+    cost: int
+    status: str
+    charged: bool
+    finish: FinishReason | None
+    stored: bytes | None
+
+
 def estimate_tokens(text: str) -> int:
     """Rough count (about 4 characters per token) used only when a provider reports nothing."""
     return (len(text) + 3) // 4
@@ -148,6 +166,7 @@ class ChatService:
         usage: UsageRepository,
         budgets: BudgetRepository,
         idempotency: IdempotencyRepository,
+        telemetry: Telemetry,
         default_max_tokens: int,
         retries: int,
         org_adapters: OrgAdapters | None = None,
@@ -159,6 +178,7 @@ class ChatService:
         self._usage = usage
         self._budgets = budgets
         self._idempotency = idempotency
+        self._telemetry = telemetry
         self.default_max_tokens = default_max_tokens
         self._retries = retries
         self._background: set[asyncio.Task[None]] = set()
@@ -209,20 +229,27 @@ class ChatService:
         With an Idempotency-Key whose earlier attempt finished, return that attempt's stored
         result instead: nothing is reserved and nothing will be charged."""
         hold = str(uuid7())  # never the client-supplied request id: holds must be unique
-        async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
-            if idem is not None:
-                stored = await self._idempotency.claim(conn, idem)
-                if stored is not None:
-                    return stored
-            await self._budgets.reserve(
-                conn,
-                hold=hold,
-                team_id=who.team_id,
-                user_id=who.user_id,
-                demand=demand,
-                at=who.at,
-                expires_at=who.at + HOLD_TTL,
-            )
+        with self._telemetry.stage("budget.reserve") as span:
+            try:
+                async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
+                    if idem is not None:
+                        stored = await self._idempotency.claim(conn, idem)
+                        if stored is not None:
+                            self._telemetry.metrics.idempotent_replays.labels(kind).inc()
+                            span.set_attribute("finops.idempotent_replay", True)
+                            return stored
+                    await self._budgets.reserve(
+                        conn,
+                        hold=hold,
+                        team_id=who.team_id,
+                        user_id=who.user_id,
+                        demand=demand,
+                        at=who.at,
+                        expires_at=who.at + HOLD_TTL,
+                    )
+            except BudgetExceeded as exc:
+                self._telemetry.budget_refused(span, exc)
+                raise
         return _Call(who, r, kind, hold, time.perf_counter(), idem)
 
     async def _end(
@@ -257,17 +284,27 @@ class ChatService:
             flags=dict(flags or {}),
             ts=who.at,
         )
-        async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
-            await self._usage.record(conn, event)
-            fired = await self._budgets.settle(
-                conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
-            )
-            if call.idem is not None:
-                if result is not None:
-                    await self._idempotency.complete(conn, call.idem, result)
-                else:
-                    await self._idempotency.forget(conn, call.idem)
+        with self._telemetry.stage("budget.settle"):
+            async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
+                await self._usage.record(conn, event)
+                fired = await self._budgets.settle(
+                    conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
+                )
+                if call.idem is not None:
+                    if result is not None:
+                        await self._idempotency.complete(conn, call.idem, result)
+                    else:
+                        await self._idempotency.forget(conn, call.idem)
+        self._telemetry.count(
+            provider=r.entry.provider,
+            model=r.entry.model,
+            kind=call.kind,
+            status=status,
+            usage=usage,
+            cost=cost,
+        )
         if fired:
+            self._telemetry.metrics.budget_alerts.inc(fired)
             log.info(
                 "budget soft threshold crossed",
                 extra={"request_id": who.request_id, "alerts": fired},
@@ -313,16 +350,20 @@ class ChatService:
         call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem)
         if isinstance(call, bytes):
             return ChatResult(*load_chat(call))
-        response = await self._call_provider(call, lambda: r.adapter.complete(req))
-        usage = response.usage
-        if usage.estimated:
-            prompt = "".join(m.text() for m in req.messages)
-            usage = Usage(
-                input_tokens=estimate_tokens(prompt),
-                output_tokens=estimate_tokens(response.content or ""),
-                estimated=True,
-            )
-        cost = r.entry.cost(usage)
+        with self._telemetry.provider_call(
+            "chat", r.entry.provider, r.entry.model, req.max_tokens
+        ) as span:
+            response = await self._call_provider(call, lambda: r.adapter.complete(req))
+            usage = response.usage
+            if usage.estimated:
+                prompt = "".join(m.text() for m in req.messages)
+                usage = Usage(
+                    input_tokens=estimate_tokens(prompt),
+                    output_tokens=estimate_tokens(response.content or ""),
+                    estimated=True,
+                )
+            cost = r.entry.cost(usage)
+            self._telemetry.annotate(span, usage, cost, response.finish_reason)
         stored = dump_chat(call.origin, cost, response) if idem is not None else None
         await self._end(call, usage, cost, "ok", charged=True, result=stored)
         return ChatResult(response, cost, call.origin)
@@ -348,8 +389,14 @@ class ChatService:
             current[:] = [stream]
             return await anext(stream, None)
 
-        first = await self._call_provider(call, open_stream)  # retry only before any output
-        return StreamResult(self._relay(call, req, first, current, outcome), call.origin)
+        span = self._telemetry.stream_span(r.entry.provider, r.entry.model, req.max_tokens)
+        try:
+            with self._telemetry.opening(span):
+                first = await self._call_provider(call, open_stream)  # retry before output only
+        except BaseException:
+            span.end()
+            raise
+        return StreamResult(self._relay(call, req, first, current, outcome, span), call.origin)
 
     async def _relay(
         self,
@@ -358,6 +405,7 @@ class ChatService:
         pending: CanonicalChunk | None,
         current: list[AsyncIterator[CanonicalChunk]],
         outcome: list[StreamOutcome],
+        span: Span,
     ) -> AsyncGenerator[CanonicalChunk]:
         """Yield provider chunks; always settle and record, even when the client disconnects."""
         usage: Usage | None = None
@@ -406,34 +454,37 @@ class ChatService:
                     usage=usage,
                 )
                 stored = dump_chat(call.origin, cost, assembled)
-            self._spawn(
-                self._finish_stream(
-                    call, current, usage if charged else Usage(), cost, status, charged, stored
-                )
-            )
+            end = _StreamEnd(usage if charged else Usage(), cost, status, charged, finish, stored)
+            self._spawn(self._finish_stream(call, current, end, span))
 
     async def _finish_stream(
         self,
         call: _Call,
         current: list[AsyncIterator[CanonicalChunk]],
-        usage: Usage,
-        cost: int,
-        status: str,
-        charged: bool,
-        stored: bytes | None,
+        end: _StreamEnd,
+        span: Span,
     ) -> None:
         """Close the upstream stream (stops provider generation on disconnect), then settle."""
-        for stream in current:
-            aclose = getattr(stream, "aclose", None)
-            if aclose is None:
-                continue
-            try:
-                await aclose()
-            except ProviderError, RuntimeError:
-                log.debug(
-                    "upstream stream already closed", extra={"request_id": call.who.request_id}
-                )
-        await self._end_quietly(call, usage, cost, status, charged=charged, result=stored)
+        try:
+            for stream in current:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is None:
+                    continue
+                try:
+                    await aclose()
+                except ProviderError, RuntimeError:
+                    log.debug(
+                        "upstream stream already closed",
+                        extra={"request_id": call.who.request_id},
+                    )
+            self._telemetry.annotate(
+                span, end.usage, end.cost, end.finish, failed=end.status == "error"
+            )
+        finally:
+            span.end()
+        await self._end_quietly(
+            call, end.usage, end.cost, end.status, charged=end.charged, result=end.stored
+        )
 
     async def embed(
         self, who: Attribution, r: Resolved, req: EmbedRequest, idem: Idempotency | None = None
@@ -441,8 +492,10 @@ class ChatService:
         call = await self._begin(who, r, "embed", embed_demand(r.entry, req), idem)
         if isinstance(call, bytes):
             return EmbedResult(*load_embed(call))
-        response = await self._call_provider(call, lambda: r.adapter.embed(req))
-        cost = r.entry.cost(response.usage)
+        with self._telemetry.provider_call("embeddings", r.entry.provider, r.entry.model) as span:
+            response = await self._call_provider(call, lambda: r.adapter.embed(req))
+            cost = r.entry.cost(response.usage)
+            self._telemetry.annotate(span, response.usage, cost, None)
         stored = dump_embed(call.origin, cost, response) if idem is not None else None
         await self._end(call, response.usage, cost, "ok", charged=True, result=stored)
         return EmbedResult(response, cost, call.origin)
