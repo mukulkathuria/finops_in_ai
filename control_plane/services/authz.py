@@ -36,6 +36,8 @@ class Authorizer:
         target: str,
         meta: RequestMeta,
         team_id: UUID | None = None,
+        message: str = "you do not have permission for this action",
+        code: str | None = None,
     ) -> NoReturn:
         details: dict[str, object] = {"missing_permissions": [p.value for p in missing]}
         if team_id:
@@ -54,4 +56,4 @@ class Authorizer:
                     request_id=meta.request_id,
                 ),
             )
-        raise Forbidden("you do not have permission for this action")
+        raise Forbidden(message, code=code)

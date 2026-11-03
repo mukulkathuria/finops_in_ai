@@ -13,6 +13,8 @@ from gateway.domain.budgets import (
     BudgetStatus,
     Demand,
     chat_demand,
+    check_member_limit,
+    check_team_cap,
     embed_demand,
     validate_limit,
 )
@@ -111,3 +113,26 @@ def test_embed_demand_covers_every_input() -> None:
     demand = embed_demand(PRICE, EmbedRequest("m", ("alpha", "βeta")))
     assert demand.tokens == 5 + 5 + 2 * EMBED_INPUT_OVERHEAD
     assert demand.usd_micro >= per_million(demand.tokens, 1_000_000)
+
+
+def test_leads_never_exceed_the_team_cap_and_admins_may() -> None:
+    check_member_limit(500, team_cap=None, others=10**9, strict=True, capped=True)  # no cap
+    check_member_limit(1000, team_cap=1000, others=900, strict=False, capped=True)  # overcommit
+    check_member_limit(5000, team_cap=1000, others=0, strict=False, capped=False)  # admin
+    with pytest.raises(InvalidInput, match="team cap"):
+        check_member_limit(1001, team_cap=1000, others=0, strict=False, capped=True)
+
+
+@given(st.integers(0, 10**6), st.integers(0, 10**6), st.integers(0, 10**6))
+def test_strict_allocation_keeps_the_sum_within_the_cap(limit: int, others: int, cap: int) -> None:
+    if others + limit <= cap:
+        check_member_limit(limit, team_cap=cap, others=others, strict=True, capped=False)
+    else:
+        with pytest.raises(InvalidInput, match="strict allocation"):
+            check_member_limit(limit, team_cap=cap, others=others, strict=True, capped=False)
+
+
+def test_a_strict_team_cap_never_drops_below_its_member_limits() -> None:
+    check_team_cap(1000, members=1000)
+    with pytest.raises(InvalidInput):
+        check_team_cap(999, members=1000)

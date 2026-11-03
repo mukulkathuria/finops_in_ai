@@ -6,7 +6,7 @@ views and the janitor share one definition of "this period" in the org timezone.
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -18,6 +18,8 @@ Scope = Literal["org", "team", "member"]
 Period = Literal["day", "week", "month"]
 Unit = Literal["usd", "tokens", "images"]
 Allocation = Literal["overcommit", "strict"]
+GrantType = Literal["one_time", "permanent"]
+RequestStatus = Literal["pending", "approved", "denied"]
 MAX_LIMIT = 10**15
 EMBED_INPUT_OVERHEAD = 2  # start and end markers an embedding tokenizer may add per input
 _SHAPES: dict[str, tuple[bool, bool]] = {
@@ -131,3 +133,56 @@ def embed_demand(entry: ModelPrice, req: EmbedRequest) -> Demand:
     return Demand(
         usd_micro=entry.worst_case(input_tokens=prompt, max_output_tokens=0), tokens=prompt
     )
+
+
+def check_member_limit(
+    limit: int, *, team_cap: int | None, others: int, strict: bool, capped: bool
+) -> None:
+    """Spec section 6: a team lead (`capped`) never sets a member above the team cap, and under
+    strict allocation the member limits of a team never sum above it. No team cap, no constraint.
+    `others` is the sum of the team's other member limits for the same period and unit."""
+    if team_cap is None:
+        return
+    if capped and limit > team_cap:
+        raise InvalidInput(
+            f"the limit exceeds the team cap of {team_cap}",
+            code="above_team_cap",
+            param="limit_amount",
+        )
+    if strict and others + limit > team_cap:
+        raise InvalidInput(
+            f"member limits would total {others + limit}, above the team cap of {team_cap}"
+            " under strict allocation",
+            code="allocation_exceeded",
+            param="limit_amount",
+        )
+
+
+def check_team_cap(cap: int, *, members: int) -> None:
+    """Under strict allocation a team cap never drops below the sum of its member limits."""
+    if members > cap:
+        raise InvalidInput(
+            f"member limits total {members}, above a team cap of {cap} under strict allocation;"
+            " lower them first",
+            code="allocation_exceeded",
+            param="limit_amount",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetRequest:
+    """A member's request for more budget on a budget that applies to them."""
+
+    id: UUID
+    budget_id: UUID
+    team_id: UUID
+    user_id: UUID
+    amount: int
+    unit: Unit
+    reason: str
+    status: RequestStatus
+    grant_type: GrantType | None
+    decided_by: UUID | None
+    decided_at: datetime | None
+    decision_note: str | None
+    created_at: datetime

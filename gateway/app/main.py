@@ -62,6 +62,7 @@ def create_app(
     app.include_router(api_keys.router)
     app.include_router(providers.router)
     app.include_router(budgets.router)
+    app.include_router(budgets.requests_router)
     app.include_router(whoami.router)
     app.include_router(openai.router)
     return app

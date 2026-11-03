@@ -78,6 +78,14 @@ class TeamRepository:
             await fetch_one(conn, "SELECT 1 FROM users WHERE id = :u", {"u": user_id}) is not None
         )
 
+    async def is_member(self, conn: AsyncConnection, team_id: UUID, user_id: UUID) -> bool:
+        row = await fetch_one(
+            conn,
+            "SELECT 1 FROM team_members WHERE team_id = :t AND user_id = :u",
+            {"t": team_id, "u": user_id},
+        )
+        return row is not None
+
     async def email_in_org(self, conn: AsyncConnection, email: str) -> bool:
         row = await fetch_one(
             conn,

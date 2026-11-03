@@ -20,10 +20,12 @@ from gateway.domain.budgets import (
     Budget,
     BudgetChange,
     BudgetExceeded,
+    BudgetRequest,
     BudgetSettings,
     BudgetStatus,
     Demand,
 )
+from gateway.domain.errors import Conflict
 
 # The spec's conditional UPDATE as one ordered upsert across every budget that applies to the
 # caller: a new period row starts with this hold, an existing row takes it only while
@@ -141,6 +143,79 @@ SELECT a.id AS alert_id, a.period_start, a.kind, a.committed AS alert_committed,
  WHERE (CAST(:teams AS uuid[]) IS NULL OR b.team_id = ANY(CAST(:teams AS uuid[])))
  ORDER BY a.created_at DESC, a.id DESC
  LIMIT :limit
+"""
+
+# The team budget for one period and unit, locked: limit changes inside a team serialize on it.
+_TEAM_CAP = """
+SELECT limit_amount FROM budgets
+ WHERE scope_type = 'team' AND team_id = :team AND period = :period AND unit = :unit
+ FOR UPDATE
+"""
+
+_MEMBER_TOTAL = """
+SELECT coalesce(sum(limit_amount), 0) AS total FROM budgets
+ WHERE scope_type = 'member' AND team_id = :team AND period = :period AND unit = :unit
+   AND (CAST(:user AS uuid) IS NULL OR user_id <> CAST(:user AS uuid))
+"""
+
+# A team whose member limits sum above its cap (strict allocation forbids it).
+_OVERALLOCATED = """
+SELECT t.team_id FROM budgets t
+ WHERE t.scope_type = 'team'
+   AND t.limit_amount < (SELECT coalesce(sum(m.limit_amount), 0) FROM budgets m
+                          WHERE m.scope_type = 'member' AND m.team_id = t.team_id
+                            AND m.period = t.period AND m.unit = t.unit)
+ LIMIT 1
+"""
+
+_CREATE_REQUEST = """
+INSERT INTO budget_requests (org_id, team_id, user_id, budget_id, amount, unit, reason)
+VALUES (:org, :team, :user, :budget, :amount, :unit, :reason)
+RETURNING id, budget_id, team_id, user_id, amount, unit, reason, status, grant_type,
+          decided_by, decided_at, decision_note, created_at
+"""
+
+_GET_REQUEST = """
+SELECT id, budget_id, team_id, user_id, amount, unit, reason, status, grant_type,
+       decided_by, decided_at, decision_note, created_at
+  FROM budget_requests WHERE id = :id
+"""
+
+_LOCK_REQUEST = """
+SELECT id, budget_id, team_id, user_id, amount, unit, reason, status, grant_type,
+       decided_by, decided_at, decision_note, created_at
+  FROM budget_requests WHERE id = :id
+   FOR UPDATE
+"""
+
+_LIST_REQUESTS = """
+SELECT id, budget_id, team_id, user_id, amount, unit, reason, status, grant_type,
+       decided_by, decided_at, decision_note, created_at
+  FROM budget_requests
+ WHERE (CAST(:everything AS boolean) OR team_id = ANY(CAST(:teams AS uuid[]))
+        OR user_id = CAST(:user AS uuid))
+   AND (CAST(:status AS text) IS NULL OR status = CAST(:status AS text))
+ ORDER BY created_at DESC, id DESC
+ LIMIT 200
+"""
+
+_DECIDE = """
+UPDATE budget_requests
+   SET status = :status, grant_type = :grant, decided_by = :actor, decided_at = now(),
+       decision_note = :note
+ WHERE id = :id AND status = 'pending'
+RETURNING id, budget_id, team_id, user_id, amount, unit, reason, status, grant_type,
+          decided_by, decided_at, decision_note, created_at
+"""
+
+# A one-time approval: extra budget for the current period only (the next period starts at 0).
+_GRANT_ONCE = """
+INSERT INTO budget_usage AS bu (org_id, budget_id, period_start, granted)
+SELECT b.org_id, b.id, budget_period_start(b.period, :at, o.timezone), CAST(:amount AS bigint)
+  FROM budgets b JOIN orgs o ON o.id = b.org_id
+ WHERE b.id = :id
+ON CONFLICT (budget_id, period_start) DO UPDATE SET granted = bu.granted + excluded.granted
+RETURNING bu.granted
 """
 
 
@@ -354,3 +429,104 @@ class BudgetRepository:
             {"n": name},
         )
         return bool(row and row["ok"])
+
+    async def team_cap(
+        self, conn: AsyncConnection, team_id: UUID, period: str, unit: str
+    ) -> int | None:
+        """The team budget's limit for this period and unit, locked until the transaction ends."""
+        row = await fetch_one(conn, _TEAM_CAP, {"team": team_id, "period": period, "unit": unit})
+        return int(row["limit_amount"]) if row else None
+
+    async def member_total(
+        self,
+        conn: AsyncConnection,
+        team_id: UUID,
+        period: str,
+        unit: str,
+        *,
+        excluding: UUID | None,
+    ) -> int:
+        row = await fetch_one(
+            conn,
+            _MEMBER_TOTAL,
+            {"team": team_id, "period": period, "unit": unit, "user": excluding},
+        )
+        return int(row["total"]) if row else 0
+
+    async def overallocated_team(self, conn: AsyncConnection) -> UUID | None:
+        row = await fetch_one(conn, _OVERALLOCATED)
+        return cast(UUID, row["team_id"]) if row else None
+
+    async def create_request(
+        self,
+        conn: AsyncConnection,
+        *,
+        org_id: UUID,
+        budget: Budget,
+        user_id: UUID,
+        amount: int,
+        reason: str,
+    ) -> BudgetRequest:
+        row = await fetch_one(
+            conn,
+            _CREATE_REQUEST,
+            {
+                "org": org_id,
+                "team": budget.team_id,
+                "user": user_id,
+                "budget": budget.id,
+                "amount": amount,
+                "unit": budget.unit,
+                "reason": reason,
+            },
+        )
+        if row is None:  # pragma: no cover - an insert always returns its row
+            raise RuntimeError("budget request insert returned no row")
+        return BudgetRequest(**dict(row))
+
+    async def get_request(
+        self, conn: AsyncConnection, request_id: UUID, *, lock: bool = False
+    ) -> BudgetRequest | None:
+        row = await fetch_one(conn, _LOCK_REQUEST if lock else _GET_REQUEST, {"id": request_id})
+        return BudgetRequest(**dict(row)) if row else None
+
+    async def list_requests(
+        self,
+        conn: AsyncConnection,
+        *,
+        everything: bool,
+        team_ids: Sequence[UUID],
+        user_id: UUID,
+        status: str | None,
+    ) -> list[BudgetRequest]:
+        rows = await fetch_all(
+            conn,
+            _LIST_REQUESTS,
+            {"everything": everything, "teams": list(team_ids), "user": user_id, "status": status},
+        )
+        return [BudgetRequest(**dict(r)) for r in rows]
+
+    async def decide_request(
+        self,
+        conn: AsyncConnection,
+        request_id: UUID,
+        *,
+        status: str,
+        grant_type: str | None,
+        actor: UUID,
+        note: str | None,
+    ) -> BudgetRequest:
+        row = await fetch_one(
+            conn,
+            _DECIDE,
+            {"id": request_id, "status": status, "grant": grant_type, "actor": actor, "note": note},
+        )
+        if row is None:
+            raise Conflict("this budget request was already decided", code="request_decided")
+        return BudgetRequest(**dict(row))
+
+    async def grant_once(
+        self, conn: AsyncConnection, *, budget_id: UUID, at: datetime, amount: int
+    ) -> int:
+        row = await fetch_one(conn, _GRANT_ONCE, {"id": budget_id, "at": at, "amount": amount})
+        return int(row["granted"]) if row else 0

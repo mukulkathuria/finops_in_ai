@@ -1,4 +1,4 @@
-"""Budget administration endpoints (US-07, US-08)."""
+"""Budget endpoints (US-07, US-08): limits, alerts, settings and requests for more budget."""
 
 from datetime import date, datetime
 from typing import Literal
@@ -9,9 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.api.deps import Services
 from gateway.api.deps import AuthorizedPrincipal, request_meta
-from gateway.domain.budgets import MAX_LIMIT, BudgetChange, BudgetSettings, BudgetStatus
+from gateway.domain.budgets import (
+    MAX_LIMIT,
+    BudgetChange,
+    BudgetRequest,
+    BudgetSettings,
+    BudgetStatus,
+)
 
 router = APIRouter(prefix="/v1/admin", tags=["budgets"])
+requests_router = APIRouter(prefix="/v1/budget-requests", tags=["budgets"])
 
 
 class BudgetIn(BaseModel):
@@ -68,11 +75,46 @@ class AlertList(BaseModel):
 class SettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    allocation: Literal["overcommit", "strict"] | None = None
 
 
 class SettingsOut(BaseModel):
     timezone: str
     allocation: str
+
+
+class RequestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    budget_id: UUID
+    amount: int = Field(gt=0, le=MAX_LIMIT)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class DecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    decision: Literal["approve", "deny"]
+    grant_type: Literal["one_time", "permanent"] | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class RequestOut(BaseModel):
+    id: UUID
+    budget_id: UUID
+    team_id: UUID
+    user_id: UUID
+    amount: int
+    unit: str
+    reason: str
+    status: str
+    grant_type: str | None
+    decided_by: UUID | None
+    decided_at: datetime | None
+    decision_note: str | None
+    created_at: datetime
+
+
+class RequestList(BaseModel):
+    data: list[RequestOut]
 
 
 def budget_out(s: BudgetStatus) -> BudgetOut:
@@ -96,6 +138,10 @@ def budget_out(s: BudgetStatus) -> BudgetOut:
 
 def _settings_out(s: BudgetSettings) -> SettingsOut:
     return SettingsOut(timezone=s.timezone, allocation=s.allocation)
+
+
+def _request_out(r: BudgetRequest) -> RequestOut:
+    return RequestOut.model_validate(r, from_attributes=True)
 
 
 @router.put("/budgets")
@@ -180,6 +226,49 @@ async def update_settings(
     body: SettingsIn, request: Request, principal: AuthorizedPrincipal, services: Services
 ) -> SettingsOut:
     new = await services.budget_service.update_settings(
-        principal, timezone=body.timezone, meta=request_meta(request)
+        principal, timezone=body.timezone, allocation=body.allocation, meta=request_meta(request)
     )
     return _settings_out(new)
+
+
+@requests_router.post("", status_code=201)
+async def request_more(
+    body: RequestIn, request: Request, principal: AuthorizedPrincipal, services: Services
+) -> RequestOut:
+    created = await services.budget_service.request_more(
+        principal,
+        budget_id=body.budget_id,
+        amount=body.amount,
+        reason=body.reason,
+        meta=request_meta(request),
+    )
+    return _request_out(created)
+
+
+@requests_router.get("")
+async def list_requests(
+    principal: AuthorizedPrincipal,
+    services: Services,
+    status: Literal["pending", "approved", "denied"] | None = None,
+) -> RequestList:
+    found = await services.budget_service.list_requests(principal, status=status)
+    return RequestList(data=[_request_out(r) for r in found])
+
+
+@requests_router.post("/{request_id}/decision")
+async def decide(
+    request_id: UUID,
+    body: DecisionIn,
+    request: Request,
+    principal: AuthorizedPrincipal,
+    services: Services,
+) -> RequestOut:
+    decided = await services.budget_service.decide(
+        principal,
+        request_id,
+        approve=body.decision == "approve",
+        grant=body.grant_type,
+        note=body.note,
+        meta=request_meta(request),
+    )
+    return _request_out(decided)
