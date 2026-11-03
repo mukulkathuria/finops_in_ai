@@ -1,17 +1,24 @@
-"""Authentication endpoints (US-01) and the JWKS document."""
+"""Authentication endpoints (US-01, US-03) and the JWKS document.
+
+Public endpoints are rate limited per client address; the credentials in their bodies (password,
+refresh token) are the authentication.
+"""
 
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.api.deps import Services
+from control_plane.services.sessions import Session
 from gateway.api.deps import AuthorizedPrincipal, get_services, request_meta
 from gateway.api.markers import public
+from gateway.api.ratelimit import per_ip_limit
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 well_known = APIRouter(tags=["auth"])
+auth_rate_limit = [Depends(per_ip_limit("auth"))]
 
 
 class SignupRequest(BaseModel):
@@ -22,6 +29,19 @@ class SignupRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=1024)
     display_name: str = Field(default="", max_length=200)
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=1, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str = Field(min_length=20, max_length=200)
 
 
 class OrgOut(BaseModel):
@@ -42,6 +62,8 @@ class SessionOut(BaseModel):
     access_token: str
     token_type: Literal["Bearer"] = "Bearer"  # noqa: S105 - OAuth token type, not a secret
     expires_in: int
+    refresh_token: str
+    refresh_expires_in: int
 
 
 class MeOut(BaseModel):
@@ -51,10 +73,21 @@ class MeOut(BaseModel):
     roles: list[str]
 
 
-@router.post("/signup", status_code=201)
+def session_out(session: Session) -> SessionOut:
+    return SessionOut(
+        org=OrgOut(id=session.org_id, name=session.org_name, slug=session.org_slug),
+        user=UserOut(id=session.user_id, email=session.email, roles=list(session.roles)),
+        access_token=session.access_token,
+        expires_in=session.expires_in,
+        refresh_token=session.refresh_token,
+        refresh_expires_in=session.refresh_expires_in,
+    )
+
+
+@router.post("/signup", status_code=201, dependencies=auth_rate_limit)
 @public
 async def signup(body: SignupRequest, request: Request, services: Services) -> SessionOut:
-    result = await services.identity_service.signup(
+    session = await services.identity_service.signup(
         org_name=body.org_name,
         org_slug=body.org_slug,
         email=body.email,
@@ -62,11 +95,32 @@ async def signup(body: SignupRequest, request: Request, services: Services) -> S
         display_name=body.display_name,
         meta=request_meta(request),
     )
-    return SessionOut(
-        org=OrgOut(id=result.org_id, name=result.org_name, slug=result.org_slug),
-        user=UserOut(id=result.user_id, email=result.email, roles=list(result.roles)),
-        access_token=result.access_token,
-        expires_in=result.expires_in,
+    return session_out(session)
+
+
+@router.post("/login", dependencies=auth_rate_limit)
+@public
+async def login(body: LoginRequest, request: Request, services: Services) -> SessionOut:
+    session = await services.session_service.login(
+        email=body.email, password=body.password, meta=request_meta(request)
+    )
+    return session_out(session)
+
+
+@router.post("/refresh", dependencies=auth_rate_limit)
+@public
+async def refresh(body: RefreshRequest, request: Request, services: Services) -> SessionOut:
+    session = await services.session_service.refresh(
+        refresh_token=body.refresh_token, meta=request_meta(request)
+    )
+    return session_out(session)
+
+
+@router.post("/logout", status_code=204, dependencies=auth_rate_limit)
+@public
+async def logout(body: RefreshRequest, request: Request, services: Services) -> None:
+    await services.session_service.logout(
+        refresh_token=body.refresh_token, meta=request_meta(request)
     )
 
 

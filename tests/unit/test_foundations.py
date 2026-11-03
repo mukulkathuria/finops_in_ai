@@ -69,6 +69,7 @@ _FAKE_SECRETS = [
     "AKIA" + "ABCDEFGHIJKLMNOP",
     "eyJ" + "hbGciOiJFZERTQSJ9." + "eyJzdWIiOiIxIn0." + "c2lnbmF0dXJl",
     "jane.doe" + "@example.com",
+    "frt_" + "abcdefghijklmnopqrstuvwxyz0123",
 ]
 
 

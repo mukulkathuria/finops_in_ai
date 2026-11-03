@@ -16,6 +16,7 @@ _REDACTIONS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}"), "[REDACTED_KEY]"),
     (re.compile(r"\bfo_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{16,}"), "[REDACTED_KEY]"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED_KEY]"),
+    (re.compile(r"\bfrt_[A-Za-z0-9_-]{20,}"), "[REDACTED_TOKEN]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"), "[REDACTED_JWT]"),
     (re.compile(r"(postgres(?:ql)?(?:\+\w+)?://[^:/\s]+):[^@\s]+@"), r"\1:[REDACTED]@"),
     (

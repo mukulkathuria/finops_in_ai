@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.api.auth import OrgOut, SessionOut, UserOut
+from control_plane.api.auth import SessionOut, auth_rate_limit, session_out
 from control_plane.api.deps import Services
 from control_plane.services.invitations import OrgRole
 from gateway.api.deps import AuthorizedPrincipal, request_meta, require
@@ -87,18 +87,13 @@ async def revoke(
     await services.invitation_service.revoke(principal, invitation_id, request_meta(request))
 
 
-@accept_router.post("/invitations/accept", status_code=201)
+@accept_router.post("/invitations/accept", status_code=201, dependencies=auth_rate_limit)
 @public
 async def accept(body: AcceptRequest, request: Request, services: Services) -> SessionOut:
-    result = await services.invitation_service.accept(
+    session = await services.invitation_service.accept(
         token=body.token,
         password=body.password,
         display_name=body.display_name,
         meta=request_meta(request),
     )
-    return SessionOut(
-        org=OrgOut(id=result.org_id, name=result.org_name, slug=result.org_slug),
-        user=UserOut(id=result.user_id, email=result.email, roles=list(result.roles)),
-        access_token=result.access_token,
-        expires_in=result.expires_in,
-    )
+    return session_out(session)

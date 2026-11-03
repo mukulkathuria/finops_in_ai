@@ -8,16 +8,16 @@ from uuid import UUID, uuid7
 from sqlalchemy.exc import IntegrityError
 
 from control_plane.services.authz import Authorizer
-from control_plane.services.identity import SignupResult, raise_for_constraint
+from control_plane.services.identity import raise_for_constraint, require_strong_password
+from control_plane.services.sessions import Session, SessionService
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database, TenantContext, set_lookup
 from gateway.adapters.postgres.identity import IdentityRepository
 from gateway.adapters.postgres.teams import InvitationRecord, InvitationRepository, TeamRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
-from gateway.adapters.security.tokens import TokenService
 from gateway.domain.audit import AuditAction, AuditEvent, RequestMeta
 from gateway.domain.errors import Conflict, Gone, InvalidInput, NotFound
-from gateway.domain.identity import normalize_email, password_problems
+from gateway.domain.identity import normalize_email
 from gateway.domain.policy import Permission, Principal, Role, RoleGrant
 from gateway.domain.secrets import digest, new_secret
 from gateway.domain.teams import TeamRole
@@ -43,7 +43,7 @@ class InvitationService:
         audit: AuditRepository,
         authz: Authorizer,
         hasher: Argon2PasswordHasher,
-        tokens: TokenService,
+        sessions: SessionService,
         ttl: timedelta,
         web_base_url: str,
     ) -> None:
@@ -54,7 +54,7 @@ class InvitationService:
         self._audit = audit
         self._authz = authz
         self._hasher = hasher
-        self._tokens = tokens
+        self._sessions = sessions
         self._ttl = ttl
         self._web_base_url = web_base_url.rstrip("/")
 
@@ -160,7 +160,7 @@ class InvitationService:
 
     async def accept(
         self, *, token: str, password: str, display_name: str, meta: RequestMeta
-    ) -> SignupResult:
+    ) -> Session:
         token_hash = digest(token)
         async with self._db.transaction() as conn:
             await set_lookup(conn, "token_hash", token_hash)
@@ -173,14 +173,7 @@ class InvitationService:
             raise Gone("invitation link was revoked", code="invitation_revoked")
         if record.expires_at <= datetime.now(UTC):
             raise Gone("invitation link has expired", code="invitation_expired")
-        problems = password_problems(password, email=record.email)
-        if problems:
-            raise InvalidInput(
-                "password does not meet the policy: " + "; ".join(problems),
-                code="weak_password",
-                param="password",
-                details={"problems": problems},
-            )
+        require_strong_password(password, email=record.email)
         password_hash = await self._hasher.hash(password)
         user_id = uuid7()
         grants = [RoleGrant(record.org_role)]
@@ -211,7 +204,6 @@ class InvitationService:
                         user_id=user_id,
                         added_by=user_id,
                     )
-                org_name, org_slug = await self._identity.get_org(conn)
                 await self._audit.append(
                     conn,
                     AuditEvent(
@@ -225,16 +217,8 @@ class InvitationService:
                         request_id=meta.request_id,
                     ),
                 )
+                session = await self._sessions.issue(conn, user_id=user_id)
         except IntegrityError as exc:
             raise_for_constraint(exc)
             raise
-        return SignupResult(
-            org_id=record.org_id,
-            org_name=org_name,
-            org_slug=org_slug,
-            user_id=user_id,
-            email=record.email,
-            roles=tuple(g.role for g in grants),
-            access_token=self._tokens.issue_access(user_id, record.org_id),
-            expires_in=self._tokens.access_ttl_seconds,
-        )
+        return session

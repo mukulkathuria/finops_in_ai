@@ -12,7 +12,14 @@ import sys
 import psycopg
 
 GLOBAL_TABLES = frozenset(
-    {"alembic_version", "roles", "permissions", "role_permissions", "system_state"}
+    {
+        "alembic_version",
+        "roles",
+        "permissions",
+        "role_permissions",
+        "system_state",
+        "rate_limit_counters",  # hashed client keys only, no tenant data
+    }
 )
 OWNER_ROLE = "migrator"
 RUNTIME_ROLES = ("app", "worker", "readonly_analytics")

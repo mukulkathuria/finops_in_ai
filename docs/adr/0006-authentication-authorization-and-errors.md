@@ -37,3 +37,13 @@ roles org admin, finance, team lead, member and auditor.
 ## Consequences
 - Moving a user between orgs is not supported in v1 (would need re-keying by org).
 - Changing role permissions is a data migration, picked up by the role catalog cache.
+
+## Sessions and edge limits (US-03)
+- Refresh tokens are opaque `frt_` secrets (256-bit), stored as SHA-256, 14-day sliding TTL inside
+  a 30-day absolute family lifetime. Every refresh rotates the token with a conditional UPDATE.
+- Presenting an already-rotated token, or losing a concurrent rotation race, revokes the whole
+  family and is audited (`auth.token_family_revoked`). The revocation commits before the 401.
+- Five consecutive failures lock the account with exponential backoff (1 minute doubling to 1
+  hour), computed atomically in SQL; wrong password, unknown and malformed emails get the same 401.
+- Public auth endpoints are rate limited per client address through the `CounterStore` port
+  (Postgres unlogged-table implementation; client addresses are stored hashed).

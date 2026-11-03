@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
+from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from gateway.api.deps import GatewayServices
 
@@ -17,6 +18,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def team_service(self) -> TeamService: ...
     @property
     def invitation_service(self) -> InvitationService: ...
+    @property
+    def session_service(self) -> SessionService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

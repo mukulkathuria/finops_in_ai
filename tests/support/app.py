@@ -22,6 +22,7 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "environment": "test",
         "database_url": SecretStr(db.app_url),
         "signup_mode": "open",
+        "auth_rate_limit_per_minute": 100_000,  # tests share one client address
         "db_pool_size": 10,
         "log_level": "WARNING",
     }
@@ -30,10 +31,12 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
 
 
 @asynccontextmanager
-async def app_client(settings: Settings) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
+async def app_client(
+    settings: Settings, *, client_ip: str = "127.0.0.1"
+) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
     app = create_app(settings)
     async with app.router.lifespan_context(app):
-        transport = httpx2.ASGITransport(app=app)
+        transport = httpx2.ASGITransport(app=app, client=(client_ip, 50000))
         async with httpx2.AsyncClient(
             transport=transport, base_url="http://gateway.test"
         ) as client:

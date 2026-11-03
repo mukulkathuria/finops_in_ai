@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = Field(default=900, ge=60, le=3600)
     signup_mode: Literal["bootstrap", "open", "disabled"] = "bootstrap"
     password_hash_concurrency: int = Field(default=4, ge=1, le=64)
+    refresh_token_ttl_seconds: int = Field(default=14 * 86_400, ge=3_600, le=90 * 86_400)
+    refresh_family_ttl_seconds: int = Field(default=30 * 86_400, ge=3_600, le=365 * 86_400)
+    login_max_failures: int = Field(default=5, ge=3, le=20)
+    auth_rate_limit_per_minute: int = Field(default=30, ge=1, le=100_000)
 
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)

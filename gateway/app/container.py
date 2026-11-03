@@ -9,10 +9,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from control_plane.services.authz import Authorizer
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
+from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from gateway.adapters.postgres.audit import AuditRepository
+from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
+from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
@@ -30,6 +33,8 @@ class Container:
     identity_repo: IdentityRepository
     role_catalog: RoleCatalogCache
     audit: AuditRepository
+    counters: PostgresCounterStore
+    session_service: SessionService
     identity_service: IdentityService
     team_service: TeamService
     invitation_service: InvitationService
@@ -70,6 +75,17 @@ def build_container(settings: Settings) -> Container:
     hasher = Argon2PasswordHasher(max_concurrency=settings.password_hash_concurrency)
     teams = TeamRepository()
     authz = Authorizer(db=db, audit=audit)
+    sessions = SessionService(
+        db=db,
+        sessions=SessionRepository(),
+        identity=identity_repo,
+        audit=audit,
+        hasher=hasher,
+        tokens=tokens,
+        refresh_ttl=timedelta(seconds=settings.refresh_token_ttl_seconds),
+        family_ttl=timedelta(seconds=settings.refresh_family_ttl_seconds),
+        max_failed_logins=settings.login_max_failures,
+    )
     return Container(
         settings=settings,
         db=db,
@@ -78,12 +94,14 @@ def build_container(settings: Settings) -> Container:
         identity_repo=identity_repo,
         role_catalog=RoleCatalogCache(identity_repo),
         audit=audit,
+        counters=PostgresCounterStore(db),
+        session_service=sessions,
         identity_service=IdentityService(
             db=db,
             repo=identity_repo,
             audit=audit,
             hasher=hasher,
-            tokens=tokens,
+            sessions=sessions,
             signup_mode=settings.signup_mode,
         ),
         team_service=TeamService(
@@ -97,7 +115,7 @@ def build_container(settings: Settings) -> Container:
             audit=audit,
             authz=authz,
             hasher=hasher,
-            tokens=tokens,
+            sessions=sessions,
             ttl=timedelta(hours=settings.invite_ttl_hours),
             web_base_url=settings.web_base_url,
         ),
