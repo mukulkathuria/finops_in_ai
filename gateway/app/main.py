@@ -8,13 +8,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from control_plane.api import auth
+from control_plane.api import audit, auth
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
 from gateway.api import health
 from gateway.api.errors import install_error_handlers
 from gateway.app.container import Container, build_container
 from gateway.app.logging import configure_logging
+from gateway.app.middleware import RequestContextMiddleware
 from gateway.app.settings import Settings
 
 
@@ -41,9 +42,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if docs else None,
     )
     install_error_handlers(app)
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(health.router)
     app.include_router(auth.well_known)
     app.include_router(auth.router)
+    app.include_router(audit.router)
     return app
 
 

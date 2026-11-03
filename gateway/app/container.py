@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from control_plane.services.identity import IdentityService
+from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.security.passwords import Argon2PasswordHasher
@@ -23,6 +24,7 @@ class Container:
     hasher: Argon2PasswordHasher
     identity_repo: IdentityRepository
     role_catalog: RoleCatalogCache
+    audit: AuditRepository
     identity_service: IdentityService
 
     async def aclose(self) -> None:
@@ -56,6 +58,7 @@ def build_container(settings: Settings) -> Container:
         application_name=settings.service_name,
     )
     identity_repo = IdentityRepository()
+    audit = AuditRepository()
     tokens = build_token_service(settings)
     hasher = Argon2PasswordHasher(max_concurrency=settings.password_hash_concurrency)
     return Container(
@@ -65,9 +68,11 @@ def build_container(settings: Settings) -> Container:
         hasher=hasher,
         identity_repo=identity_repo,
         role_catalog=RoleCatalogCache(identity_repo),
+        audit=audit,
         identity_service=IdentityService(
             db=db,
             repo=identity_repo,
+            audit=audit,
             hasher=hasher,
             tokens=tokens,
             signup_mode=settings.signup_mode,

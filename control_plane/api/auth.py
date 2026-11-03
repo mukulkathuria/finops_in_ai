@@ -7,7 +7,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.api.deps import Services
-from gateway.api.deps import AuthorizedPrincipal, get_services
+from gateway.api.deps import AuthorizedPrincipal, get_services, request_meta
 from gateway.api.markers import public
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -53,13 +53,14 @@ class MeOut(BaseModel):
 
 @router.post("/signup", status_code=201)
 @public
-async def signup(body: SignupRequest, services: Services) -> SessionOut:
+async def signup(body: SignupRequest, request: Request, services: Services) -> SessionOut:
     result = await services.identity_service.signup(
         org_name=body.org_name,
         org_slug=body.org_slug,
         email=body.email,
         password=body.password,
         display_name=body.display_name,
+        meta=request_meta(request),
     )
     return SessionOut(
         org=OrgOut(id=result.org_id, name=result.org_name, slug=result.org_slug),

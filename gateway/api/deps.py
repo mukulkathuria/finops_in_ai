@@ -8,15 +8,19 @@ by default: a principal needs an explicit grant, and use cases re-check object s
 `principal.can(permission, team_id)`.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Protocol
 
 from fastapi import Depends, Header, Request
+from sqlalchemy.exc import SQLAlchemyError
 
+from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.security.tokens import TokenService
 from gateway.api.markers import authz_dependency
+from gateway.domain.audit import AuditAction, AuditEvent, RequestMeta
 from gateway.domain.errors import Forbidden, Unauthenticated
 from gateway.domain.policy import Permission, Principal
 
@@ -30,11 +34,43 @@ class GatewayServices(Protocol):
     def identity_repo(self) -> IdentityRepository: ...
     @property
     def role_catalog(self) -> RoleCatalogCache: ...
+    @property
+    def audit(self) -> AuditRepository: ...
+
+
+log = logging.getLogger(__name__)
 
 
 def get_services(request: Request) -> GatewayServices:
     services: GatewayServices = request.app.state.container
     return services
+
+
+def request_meta(request: Request) -> RequestMeta:
+    client = request.client.host if request.client else None
+    return RequestMeta(ip=client, request_id=getattr(request.state, "request_id", None))
+
+
+async def audit_denial(request: Request, principal: Principal, details: dict[str, object]) -> None:
+    """Record an authorization denial in its own transaction. A failed write never grants access."""
+    services = get_services(request)
+    meta = request_meta(request)
+    event = AuditEvent(
+        action=AuditAction.ACCESS_DENIED,
+        actor_type="user",
+        actor_id=principal.user_id,
+        target_type="route",
+        target_id=f"{request.method} {request.url.path}",
+        details=details,
+        ip=meta.ip,
+        request_id=meta.request_id,
+    )
+    try:
+        tenant = TenantContext(principal.org_id, principal.user_id)
+        async with services.db.transaction(tenant) as conn:
+            await services.audit.append(conn, event)
+    except SQLAlchemyError:
+        log.exception("could not audit an access denial", extra={"request_id": meta.request_id})
 
 
 def bearer_token(authorization: str | None) -> str:
@@ -61,8 +97,12 @@ def require(*permissions: Permission) -> Callable[..., Awaitable[Principal]]:
     """Route guard: the caller must hold every listed permission in at least one scope."""
 
     @authz_dependency
-    async def guard(principal: Annotated[Principal, Depends(current_principal)]) -> Principal:
-        if not all(principal.can_somewhere(p) for p in permissions):
+    async def guard(
+        request: Request, principal: Annotated[Principal, Depends(current_principal)]
+    ) -> Principal:
+        missing = [p.value for p in permissions if not principal.can_somewhere(p)]
+        if missing:
+            await audit_denial(request, principal, {"missing_permissions": missing})
             raise Forbidden("you do not have permission for this action")
         return principal
 

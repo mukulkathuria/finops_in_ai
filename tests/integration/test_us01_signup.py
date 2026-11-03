@@ -4,7 +4,6 @@ Acceptance: valid details create an org and an admin and issue a JWT; weak passw
 emails are rejected; passwords are Argon2id hashed.
 """
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx2
@@ -24,12 +23,6 @@ from tests.support.app import (
     unique_email,
 )
 from tests.support.database import DisposableDatabase
-
-
-@pytest.fixture(scope="session")
-async def api(test_db: DisposableDatabase) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
-    async with app_client(app_settings(test_db)) as pair:
-        yield pair
 
 
 def _count_users(db: DisposableDatabase, email: str) -> int:

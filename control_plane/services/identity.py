@@ -6,10 +6,12 @@ from uuid import UUID, uuid7
 
 from sqlalchemy.exc import IntegrityError
 
+from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.identity import IdentityRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService
+from gateway.domain.audit import AuditAction, AuditEvent, RequestMeta
 from gateway.domain.errors import Conflict, Forbidden, InvalidInput
 from gateway.domain.identity import normalize_email, password_problems, slugify, validate_slug
 from gateway.domain.policy import Role, RoleGrant
@@ -46,19 +48,29 @@ class IdentityService:
         *,
         db: Database,
         repo: IdentityRepository,
+        audit: AuditRepository,
         hasher: Argon2PasswordHasher,
         tokens: TokenService,
         signup_mode: SignupMode,
     ) -> None:
         self._db = db
         self._repo = repo
+        self._audit = audit
         self._hasher = hasher
         self._tokens = tokens
         self._signup_mode = signup_mode
 
     async def signup(
-        self, *, org_name: str, org_slug: str | None, email: str, password: str, display_name: str
+        self,
+        *,
+        org_name: str,
+        org_slug: str | None,
+        email: str,
+        password: str,
+        display_name: str,
+        meta: RequestMeta | None = None,
     ) -> SignupResult:
+        meta = meta or RequestMeta()
         if self._signup_mode == "disabled":
             raise Forbidden("self-service signup is disabled", code="signup_disabled")
         org_name = org_name.strip()
@@ -96,6 +108,19 @@ class IdentityService:
                     password_hash=password_hash,
                 )
                 await self._repo.grant_roles(conn, org_id=org_id, user_id=user_id, grants=grants)
+                await self._audit.append(
+                    conn,
+                    AuditEvent(
+                        action=AuditAction.SIGNUP,
+                        actor_type="user",
+                        actor_id=user_id,
+                        target_type="org",
+                        target_id=str(org_id),
+                        details={"org_slug": slug, "roles": [g.role for g in grants]},
+                        ip=meta.ip,
+                        request_id=meta.request_id,
+                    ),
+                )
         except IntegrityError as exc:
             raise_for_constraint(exc)
             raise

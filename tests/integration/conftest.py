@@ -1,11 +1,14 @@
-"""Integration fixtures: one migrated PostgreSQL 19 database per test session."""
+"""Integration fixtures: one migrated PostgreSQL 19 database and one app per test session."""
 
 import os
 from collections.abc import AsyncIterator, Iterator
 
+import httpx2
 import pytest
+from fastapi import FastAPI
 
 from gateway.adapters.postgres.database import Database
+from tests.support.app import app_client, app_settings
 from tests.support.database import DisposableDatabase, create_test_database, drop_test_database
 
 
@@ -37,3 +40,10 @@ async def worker_db(test_db: DisposableDatabase) -> AsyncIterator[Database]:
         yield db
     finally:
         await db.dispose()
+
+
+@pytest.fixture(scope="session")
+async def api(test_db: DisposableDatabase) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
+    """The full app (open signup) over an in-process ASGI transport."""
+    async with app_client(app_settings(test_db)) as pair:
+        yield pair
