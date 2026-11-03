@@ -219,6 +219,48 @@ ON CONFLICT (budget_id, period_start) DO UPDATE SET granted = bu.granted + exclu
 RETURNING bu.granted
 """
 
+_ENSURE_ROW = """
+INSERT INTO budget_usage (org_id, budget_id, period_start)
+SELECT b.org_id, b.id, budget_period_start(b.period, :at, o.timezone)
+  FROM budgets b JOIN orgs o ON o.id = b.org_id
+ WHERE b.id = :id
+ON CONFLICT (budget_id, period_start) DO NOTHING
+RETURNING period_start
+"""
+
+_LOCK_ROW = """
+SELECT committed FROM budget_usage WHERE budget_id = :id AND period_start = :p FOR UPDATE
+"""
+
+# Sources of truth for one counter: `committed` is every ledger event of the budget's scope
+# whose request started inside the period (org timezone); `reserved` is the live holds.
+_REBUILD = """
+UPDATE budget_usage bu
+   SET committed = t.committed, reserved = t.reserved
+  FROM (
+    SELECT
+      (SELECT CAST(coalesce(sum(CASE b.unit WHEN 'usd' THEN e.cost_micro_usd
+                                            WHEN 'tokens' THEN e.input_tokens + e.output_tokens
+                                            ELSE e.images END), 0) AS bigint)
+         FROM usage_events e
+        WHERE e.org_id = b.org_id
+          AND (b.scope_type = 'org'
+               OR (e.team_id = b.team_id AND (b.scope_type = 'team' OR e.user_id = b.user_id)))
+          AND e.ts >= CAST(CAST(:p AS date) AS timestamp) AT TIME ZONE o.timezone
+          AND e.ts < CAST(budget_period_end(b.period, CAST(:p AS date)) AS timestamp)
+                     AT TIME ZONE o.timezone) AS committed,
+      (SELECT CAST(coalesce(sum(r.amount), 0) AS bigint) FROM budget_reservations r
+        WHERE r.budget_id = b.id AND r.period_start = CAST(:p AS date)
+          AND r.status = 'reserved') AS reserved
+      FROM budgets b JOIN orgs o ON o.id = b.org_id
+     WHERE b.id = :id
+  ) t
+ WHERE bu.budget_id = :id AND bu.period_start = :p
+   AND (bu.committed <> t.committed OR bu.reserved <> t.reserved)
+RETURNING old.committed AS was_committed, old.reserved AS was_reserved,
+          new.committed AS committed, new.reserved AS reserved
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class BudgetAlert:
@@ -532,3 +574,21 @@ class BudgetRepository:
     ) -> int:
         row = await fetch_one(conn, _GRANT_ONCE, {"id": budget_id, "at": at, "amount": amount})
         return int(row["granted"]) if row else 0
+
+    async def seed(self, conn: AsyncConnection, budget_id: UUID, at: datetime) -> None:
+        """A new budget starts from the spending already made in its current period."""
+        row = await fetch_one(conn, _ENSURE_ROW, {"id": budget_id, "at": at})
+        if row is not None:
+            await self.reconcile_row(conn, budget_id, row["period_start"])
+
+    async def reconcile_row(
+        self, conn: AsyncConnection, budget_id: UUID, period_start: date
+    ) -> RowMapping | None:
+        """Rebuild one counter from its sources of truth; returns the change, or None when it
+        already agreed. The row is locked by an earlier statement, so the ledger read (a new
+        snapshot) sees every settlement that committed before the lock was granted, and any later
+        settlement adds on top of the rebuilt value."""
+        params = {"id": budget_id, "p": period_start}
+        if await fetch_one(conn, _LOCK_ROW, params) is None:
+            return None
+        return await fetch_one(conn, _REBUILD, params)

@@ -25,6 +25,7 @@ from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
 from gateway.adapters.postgres.database import Database
+from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
@@ -34,7 +35,7 @@ from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
 from gateway.app.gateway_config import load_gateway_config
 from gateway.app.settings import Settings
-from gateway.pipeline.chat import ChatService
+from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.usage import UsageReporter
 
 log = logging.getLogger(__name__)
@@ -188,6 +189,7 @@ def build_container(
             adapters=adapters,
             usage=usage,
             budgets=budgets,
+            idempotency=IdempotencyRepository(stale_after_s=HOLD_TTL.total_seconds()),
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
             org_adapters=OrgAdapters(

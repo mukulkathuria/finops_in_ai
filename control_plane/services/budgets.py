@@ -149,6 +149,8 @@ class BudgetService:
         budget, old = await self._budgets.upsert(
             conn, org_id=principal.org_id, change=change, actor=principal.user_id
         )
+        if old is None:  # a new budget counts what its scope already spent this period
+            await self._budgets.seed(conn, budget.id, datetime.now(UTC))
         await self._audit.append(
             conn,
             self._event(

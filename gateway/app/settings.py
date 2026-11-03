@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"
 
+    # Worker (US-10): how often the budget janitor returns the holds of requests that died,
+    # and how often it rebuilds the current budget counters from the ledger.
+    janitor_interval_seconds: float = Field(default=30, ge=1, le=3600)
+    reconcile_interval_seconds: float = Field(default=300, ge=10, le=86_400)
+
     @property
     def is_production_like(self) -> bool:
         return self.environment in (Environment.STAGING, Environment.PRODUCTION)

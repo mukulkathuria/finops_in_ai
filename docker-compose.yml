@@ -24,6 +24,8 @@ x-app-env: &app-env
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  JANITOR_INTERVAL_SECONDS: ${JANITOR_INTERVAL_SECONDS:-30}
+  RECONCILE_INTERVAL_SECONDS: ${RECONCILE_INTERVAL_SECONDS:-300}
 
 services:
   db:
@@ -91,6 +93,22 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+
+  # Budget janitor (US-10): returns holds of crashed requests, rebuilds counters from the
+  # ledger, purges old idempotency keys. Healthy while its heartbeat file stays fresh.
+  worker:
+    image: finops-gateway:dev
+    command: ["python", "-m", "worker"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,time; p='/tmp/finops-worker.alive'; sys.exit(not os.path.exists(p) or time.time() - os.path.getmtime(p) > 180)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
 volumes:
   pgdata:

@@ -6,7 +6,6 @@ streams end with an SSE comment carrying the cost because headers leave before i
 
 import base64
 import struct
-import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from typing import Annotated, Any, Literal, Protocol
@@ -18,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway.api.caller import Caller, ModelCaller
 from gateway.domain.errors import InvalidInput, MalformedRequest
+from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
     CanonicalChunk,
     CanonicalRequest,
@@ -30,6 +30,7 @@ from gateway.domain.llm import (
 )
 from gateway.domain.pricing import usd
 from gateway.pipeline.chat import Attribution, ChatService, StreamOutcome
+from gateway.pipeline.idempotency import Origin
 
 router = APIRouter(tags=["data-plane"])
 
@@ -191,6 +192,19 @@ def _who(caller: Caller, request: Request) -> Attribution:
     )
 
 
+def _idempotency(request: Request, caller: Caller, body: bytes) -> Idempotency | None:
+    """An Idempotency-Key belongs to one credential: equal keys of two callers never meet."""
+    owner = f"key:{caller.api_key_id}" if caller.api_key_id else f"user:{caller.user_id}"
+    return Idempotency.from_header(
+        request.headers.get("idempotency-key"), caller=owner, route=request.url.path, body=body
+    )
+
+
+def _completion_id(origin: Origin) -> str:
+    """Derived from the request that produced the result, so a replay is byte-identical."""
+    return f"chatcmpl-{origin.request_id.replace('-', '')}"
+
+
 def _usage_json(
     input_tokens: int, output_tokens: int, cached: int, reasoning: int
 ) -> dict[str, Any]:
@@ -216,25 +230,30 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
         "x-finops-model": resolved.entry.public_name,
         "x-finops-catalog-version": str(resolved.entry.catalog_version),
     }
-    completion_id = f"chatcmpl-{who.request_id.replace('-', '')}"
-    created = int(time.time())
+    idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
         outcome: list[StreamOutcome] = []
-        # Budget and provider errors raise here, so they reach the client as JSON errors.
-        chunks = await chat.stream(who, resolved, req, outcome)
+        # Budget, idempotency and provider errors raise here, so the client gets JSON errors.
+        stream = await chat.stream(who, resolved, req, outcome, idem)
+        if stream.origin.replayed:
+            headers["idempotent-replayed"] = "true"
         frames = _sse(
-            chunks,
+            stream.chunks,
             outcome,
-            completion_id,
-            created,
+            _completion_id(stream.origin),
+            int(stream.origin.at.timestamp()),
             resolved.entry.public_name,
             include_usage,
         )
         return StreamingResponse(
             frames, media_type="text/event-stream", headers={**headers, "cache-control": "no-store"}
         )
-    response, cost = await chat.complete(who, resolved, req)
+    result = await chat.complete(who, resolved, req, idem)
+    response, cost = result.response, result.cost
+    completion_id, created = _completion_id(result.origin), int(result.origin.at.timestamp())
+    if result.origin.replayed:
+        headers["idempotent-replayed"] = "true"
     message: dict[str, Any] = {"role": "assistant", "content": response.content}
     if response.tool_calls:
         message["tool_calls"] = [
@@ -324,9 +343,13 @@ async def embeddings(request: Request, caller: ModelCaller, chat: Chat) -> Respo
     if not inputs or len(inputs) > 2048 or any(not isinstance(t, str) or not t for t in inputs):
         raise InvalidInput("input must be 1-2048 non-empty strings", param="input")
     resolved = await chat.resolve(body.model, "embedding", caller.org_id)
-    response, cost = await chat.embed(
-        _who(caller, request), resolved, EmbedRequest(resolved.entry.model, inputs, body.dimensions)
+    result = await chat.embed(
+        _who(caller, request),
+        resolved,
+        EmbedRequest(resolved.entry.model, inputs, body.dimensions),
+        _idempotency(request, caller, await request.body()),
     )
+    response, cost = result.response, result.cost
     data = []
     for i, vector in enumerate(response.vectors):
         embedding: Any = (
@@ -348,6 +371,8 @@ async def embeddings(request: Request, caller: ModelCaller, chat: Chat) -> Respo
         "x-finops-provider": resolved.entry.provider,
         "x-finops-model": resolved.entry.public_name,
     }
+    if result.origin.replayed:
+        headers["idempotent-replayed"] = "true"
     return Response(orjson.dumps(payload), media_type="application/json", headers=headers)
 
 
