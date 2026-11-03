@@ -18,7 +18,7 @@ pytest against PG19), rehearse migrations up/down/up, run the RLS audit, gitleak
 
 ## Done in this session after the checkpoint
 
-| US-05 OpenAI-compatible endpoint | adapters `a3f7145`, endpoints next commit | `tests/contract/test_llm_contract.py` (53), `tests/integration/test_us05_openai_compat.py` (official OpenAI SDK: chat, stream, base64 embeddings) |
+| US-05 OpenAI-compatible endpoint | `a3f7145`, `af21c2e` | `tests/contract/test_llm_contract.py` (53), `tests/integration/test_us05_openai_compat.py` (official OpenAI SDK: chat, stream, base64 embeddings) |
 
 US-05 details: canonical types; LLMAdapter port; openai_compat / anthropic (SDK 2.4.0, API 2026-10-21,
 no sampling params) / gemini (thought signatures in tool-call ids) adapters; model_catalog (prices as
@@ -28,10 +28,10 @@ only, ledger row per request incl. errors and cancelled streams; /v1/chat/comple
 with cost comment), /v1/embeddings (float and base64), /v1/models; ProviderError to HTTP mapping;
 body limit 413; malformed JSON 400, schema errors 422.
 
-## Next: US-06 then budgets
+| US-06 org provider keys (envelope encryption), adapter switch | `dc17580` | `tests/integration/test_us06_provider_keys.py`, `tests/unit/test_envelope.py` |
 
-US-06 provider keys per org with envelope encryption (KeyManager port, AES-256-GCM, per-row DEK,
-MASTER_KEY env) and adapter switch native|litellm (optional extra, contract suite on both).
+## Next: budgets (US-07..US-10), then US-29, Phase 2
+
 US-07..US-10 budgets: budgets, budget_usage, budget_reservations, budget_requests, outbox, alerts;
 reserve (worst_case per budget, consistent lock order) before the provider call, commit actual after,
 janitor; 429 budget_exceeded naming the scope; 500-way race and idempotency tests.
