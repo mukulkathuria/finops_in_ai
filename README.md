@@ -41,6 +41,7 @@ uv sync                                # Python dependencies (locked in uv.lock)
 uv run python scripts/init_env.py      # writes .env with fresh random secrets (never overwrites)
 docker compose up -d --build           # PostgreSQL 19 RC1, mock LLM, migrations, gateway
 curl http://127.0.0.1:8080/readyz      # {"status":"ok","checks":{"database":"ok"}}
+open http://127.0.0.1:5173            # dashboard (sign in with the bootstrap admin)
 ```
 
 If port 5432 is taken on your host, create the env file with
@@ -59,6 +60,8 @@ If port 5432 is taken on your host, create the env file with
 | Route authorization audit | `uv run python scripts/audit_routes.py` |
 | RLS coverage audit | `AUDIT_DATABASE_URL=... uv run python scripts/audit_rls.py` |
 | Migrations | `uv run alembic upgrade head` (uses `MIGRATOR_DATABASE_URL`) |
+| Dashboard (dev server, proxies `/v1` to the gateway) | `cd web && npm ci && npm run dev` |
+| Dashboard checks | `cd web && npm run typecheck && npm test && npm run build` |
 
 Integration tests create a disposable database per session, apply the same setup SQL as the
 container bootstrap, migrate it, and connect through the real `app`, `worker` and

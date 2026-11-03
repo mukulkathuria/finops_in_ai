@@ -100,6 +100,21 @@ jobs:
             semgrep scan --error --metrics=off --config .semgrep/rules.yml --config p/python \
             gateway control_plane worker scripts sidecars
 
+  web:
+    name: dashboard types, tests, audit and build
+    runs-on: ubuntu-24.04
+    container: node:24-bookworm-slim
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm audit --audit-level=high
+      - run: npm run build
+
   image:
     name: build and scan the gateway image
     runs-on: ubuntu-24.04

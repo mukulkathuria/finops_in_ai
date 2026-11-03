@@ -29,6 +29,8 @@ x-app-env: &app-env
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-1.0}
   METRICS_TOKEN: ${METRICS_TOKEN:-}
+  # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
+  FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 
 services:
   db:
@@ -96,6 +98,18 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+
+  # Dashboard (React 19) served by unprivileged nginx with a strict CSP; /v1 is proxied to the
+  # gateway on the same origin, so no CORS is needed.
+  web:
+    build:
+      context: web
+    image: finops-web:dev
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:8080"
 
   # Budget janitor (US-10): returns holds of crashed requests, rebuilds counters from the
   # ledger, purges old idempotency keys. Healthy while its heartbeat file stays fresh.
