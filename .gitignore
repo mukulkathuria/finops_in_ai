@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.import_linter_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Secrets and local config (only the example is committed)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Local data
+/data/
+/var/
+
+# Node / web
+node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+
+# Terraform (commit .terraform.lock.hcl, never state or real tfvars)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Load test output
+tests/load/results/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
