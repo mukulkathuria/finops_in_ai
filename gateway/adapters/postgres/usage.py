@@ -1,6 +1,7 @@
 """The usage ledger: one append-only row per request (spec section 5)."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -32,6 +33,7 @@ class UsageEvent:
     cache_hit: str = "none"
     route_tier: str | None = None
     flags: dict[str, Any] = field(default_factory=dict)
+    ts: datetime | None = None  # the request clock; the database time when absent
 
 
 class UsageRepository:
@@ -41,12 +43,12 @@ class UsageRepository:
             " provider, model, adapter, catalog_version, input_tokens, output_tokens,"
             " cached_tokens,"
             " cache_write_tokens, reasoning_tokens, images, cost_micro_usd, baseline_micro_usd,"
-            " overhead_micro_usd, cache_hit, route_tier, status, estimated, latency_ms, flags)"
+            " overhead_micro_usd, cache_hit, route_tier, status, estimated, latency_ms, flags, ts)"
             " VALUES (%(org)s, %(team)s, %(user)s, %(key)s, %(rid)s, %(kind)s, %(provider)s,"
             " %(model)s,"
             " %(adapter)s, %(cv)s, %(inp)s, %(out)s, %(cached)s, %(cw)s, %(reason)s, %(images)s,"
             " %(cost)s, %(base)s, %(over)s, %(hit)s, %(tier)s, %(status)s, %(est)s, %(lat)s,"
-            " %(flags)s::jsonb)",
+            " %(flags)s::jsonb, COALESCE(%(ts)s, now()))",
             {
                 "org": e.org_id,
                 "team": e.team_id,
@@ -73,5 +75,6 @@ class UsageRepository:
                 "est": e.usage.estimated,
                 "lat": e.latency_ms,
                 "flags": orjson.dumps(e.flags).decode(),
+                "ts": e.ts,
             },
         )

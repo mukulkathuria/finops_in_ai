@@ -1,5 +1,6 @@
 """Object-level authorization with audited denials (spec section 10: check every object)."""
 
+from typing import NoReturn
 from uuid import UUID
 
 from gateway.adapters.postgres.audit import AuditRepository
@@ -35,7 +36,7 @@ class Authorizer:
         target: str,
         meta: RequestMeta,
         team_id: UUID | None = None,
-    ) -> None:
+    ) -> NoReturn:
         details: dict[str, object] = {"missing_permissions": [p.value for p in missing]}
         if team_id:
             details["team_id"] = str(team_id)

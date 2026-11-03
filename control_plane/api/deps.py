@@ -5,6 +5,7 @@ from typing import Annotated, Protocol
 from fastapi import Depends, Request
 
 from control_plane.services.api_keys import ApiKeyService
+from control_plane.services.budgets import BudgetService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
@@ -26,6 +27,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def api_key_service(self) -> ApiKeyService: ...
     @property
     def provider_key_service(self) -> ProviderKeyService: ...
+    @property
+    def budget_service(self) -> BudgetService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

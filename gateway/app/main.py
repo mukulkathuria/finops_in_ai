@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import httpx2
 from fastapi import FastAPI
 
-from control_plane.api import api_keys, audit, auth, invitations, providers, teams
+from control_plane.api import api_keys, audit, auth, budgets, invitations, providers, teams
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
 from gateway.api import health, openai, whoami
@@ -61,6 +61,7 @@ def create_app(
     app.include_router(invitations.accept_router)
     app.include_router(api_keys.router)
     app.include_router(providers.router)
+    app.include_router(budgets.router)
     app.include_router(whoami.router)
     app.include_router(openai.router)
     return app

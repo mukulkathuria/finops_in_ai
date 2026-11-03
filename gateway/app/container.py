@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.authz import Authorizer
+from control_plane.services.budgets import BudgetService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
@@ -19,6 +20,7 @@ from control_plane.services.teams import TeamService
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.audit import AuditRepository
+from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
@@ -57,6 +59,7 @@ class Container:
     owns_http: bool
     chat_service: ChatService
     provider_key_service: ProviderKeyService
+    budget_service: BudgetService
 
     async def aclose(self) -> None:
         await self.chat_service.drain()
@@ -126,6 +129,7 @@ def build_container(
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
+    budgets = BudgetRepository()
     authz = Authorizer(db=db, audit=audit)
     sessions = SessionService(
         db=db,
@@ -180,6 +184,7 @@ def build_container(
             catalog=CatalogCache(db, CatalogRepository()),
             adapters=adapters,
             usage=UsageRepository(),
+            budgets=budgets,
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
             org_adapters=OrgAdapters(
@@ -194,4 +199,5 @@ def build_container(
             authz=authz,
             known_providers=frozenset(provider_configs),
         ),
+        budget_service=BudgetService(db=db, budgets=budgets, teams=teams, audit=audit, authz=authz),
     )

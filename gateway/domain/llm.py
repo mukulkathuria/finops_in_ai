@@ -6,6 +6,7 @@ these types. Token accounting convention (all providers are normalised to it):
 `output_tokens` counts every generated token, *including* reasoning tokens.
 """
 
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
@@ -182,3 +183,33 @@ class ProviderError(Exception):
         self.provider = provider
         self.status = status
         self.retry_after_s = retry_after_s
+
+
+PER_MESSAGE_OVERHEAD = 16  # role markers and chat-template tokens around each message
+PER_TOOL_OVERHEAD = 600  # the tool-use preamble a provider adds when tools are present
+PER_IMAGE_TOKENS = 6_000  # above any supported provider's per-image token charge
+
+
+def _json_bytes(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def upper_bound_input_tokens(req: CanonicalRequest) -> int:
+    """A ceiling on billed prompt tokens (spec section 6, step 1): a tokenizer emits at most one
+    token per UTF-8 byte, plus fixed allowances for chat-template markers, the tool preamble and
+    images. Over-estimating only holds more budget for the duration of the call."""
+    total = PER_MESSAGE_OVERHEAD * len(req.messages)
+    for m in req.messages:
+        for part in m.content:
+            total += len(part.text.encode()) if isinstance(part, TextPart) else PER_IMAGE_TOKENS
+        for call in m.tool_calls:
+            total += len(call.id.encode()) + len(call.name.encode()) + len(call.arguments.encode())
+        total += len((m.tool_call_id or "").encode()) + len((m.name or "").encode())
+    if req.tools:
+        total += PER_TOOL_OVERHEAD + sum(
+            len(t.name.encode()) + len(t.description.encode()) + _json_bytes(t.parameters)
+            for t in req.tools
+        )
+    if req.response_format:
+        total += _json_bytes(req.response_format)
+    return total

@@ -7,7 +7,8 @@ streams end with an SSE comment carrying the cost because headers leave before i
 import base64
 import struct
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from typing import Annotated, Any, Literal, Protocol
 
 import orjson
@@ -220,8 +221,10 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
         outcome: list[StreamOutcome] = []
+        # Budget and provider errors raise here, so they reach the client as JSON errors.
+        chunks = await chat.stream(who, resolved, req, outcome)
         frames = _sse(
-            chat.stream(who, resolved, req, outcome),
+            chunks,
             outcome,
             completion_id,
             created,
@@ -257,7 +260,7 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
 
 
 async def _sse(
-    chunks: AsyncIterator[CanonicalChunk],
+    chunks: AsyncGenerator[CanonicalChunk],
     outcome: list[StreamOutcome],
     completion_id: str,
     created: int,
@@ -275,25 +278,26 @@ async def _sse(
         return b"data: " + orjson.dumps(event) + b"\n\n"
 
     yield frame({"role": "assistant", "content": ""})
-    async for chunk in chunks:
-        delta: dict[str, Any] = {}
-        if chunk.content:
-            delta["content"] = chunk.content
-        if chunk.tool_calls:
-            delta["tool_calls"] = [
-                {
-                    "index": t.index,
-                    **({"id": t.id, "type": "function"} if t.id else {}),
-                    "function": {
-                        k: v
-                        for k, v in (("name", t.name), ("arguments", t.arguments))
-                        if v is not None
-                    },
-                }
-                for t in chunk.tool_calls
-            ]
-        if delta or chunk.finish_reason:
-            yield frame(delta, chunk.finish_reason)
+    async with aclosing(chunks):  # closing the frames always settles the stream
+        async for chunk in chunks:
+            delta: dict[str, Any] = {}
+            if chunk.content:
+                delta["content"] = chunk.content
+            if chunk.tool_calls:
+                delta["tool_calls"] = [
+                    {
+                        "index": t.index,
+                        **({"id": t.id, "type": "function"} if t.id else {}),
+                        "function": {
+                            k: v
+                            for k, v in (("name", t.name), ("arguments", t.arguments))
+                            if v is not None
+                        },
+                    }
+                    for t in chunk.tool_calls
+                ]
+            if delta or chunk.finish_reason:
+                yield frame(delta, chunk.finish_reason)
     final = outcome[-1] if outcome else None
     if final is not None and include_usage:
         u = final.usage

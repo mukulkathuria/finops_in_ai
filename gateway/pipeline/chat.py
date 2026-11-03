@@ -1,20 +1,27 @@
-"""Chat and embeddings use cases (US-05): resolve the model, call the provider with retries,
-price the usage from the catalog and append one ledger row per request, success or failure.
-Budgets (US-07) and the optimisation stages wrap around these calls."""
+"""Chat and embeddings use cases (US-05, US-07).
+
+Every request follows spec section 6: reserve the worst-case cost against each applicable budget
+in one transaction, call the provider with retries, then settle the actual cost and append the
+ledger row in one transaction. A failed call releases its hold. Streams settle when they end or
+the client goes away, using the provider's usage report or an estimate.
+"""
 
 import asyncio
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from typing import TypeVar
-from uuid import UUID
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, TypeVar
+from uuid import UUID, uuid7
 
 from gateway.adapters.llm.registry import OrgAdapters
+from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
+from gateway.domain.budgets import Demand, chat_demand, embed_demand
 from gateway.domain.errors import NotFound, Unavailable
 from gateway.domain.llm import (
     CanonicalChunk,
@@ -31,7 +38,9 @@ from gateway.ports.llm import LLMAdapter
 
 T = TypeVar("T")
 log = logging.getLogger(__name__)
-_MAX_BACKOFF_S = 4.0
+_MAX_BACKOFF_S: Final = 4.0
+# A hold must outlive the longest provider call; the janitor returns holds of crashed processes.
+HOLD_TTL: Final = timedelta(minutes=15)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +50,8 @@ class Attribution:
     user_id: UUID | None
     api_key_id: UUID | None
     request_id: str
+    # The request clock: it picks the budget period and stamps the ledger row, so both agree.
+    at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,9 +69,24 @@ class StreamOutcome:
     cost_micro_usd: int
 
 
+@dataclass(frozen=True, slots=True)
+class _Call:
+    """One request in flight and the budget hold it carries."""
+
+    who: Attribution
+    r: Resolved
+    kind: str
+    hold: str
+    started: float
+
+
 def estimate_tokens(text: str) -> int:
     """Rough count (about 4 characters per token) used only when a provider reports nothing."""
     return (len(text) + 3) // 4
+
+
+def _spent(usage: Usage, cost: int) -> Demand:
+    return Demand(usd_micro=cost, tokens=usage.input_tokens + usage.output_tokens)
 
 
 class ChatService:
@@ -71,6 +97,7 @@ class ChatService:
         catalog: CatalogCache,
         adapters: Mapping[str, LLMAdapter],
         usage: UsageRepository,
+        budgets: BudgetRepository,
         default_max_tokens: int,
         retries: int,
         org_adapters: OrgAdapters | None = None,
@@ -80,6 +107,7 @@ class ChatService:
         self._catalog = catalog
         self._adapters = adapters
         self._usage = usage
+        self._budgets = budgets
         self.default_max_tokens = default_max_tokens
         self._retries = retries
         self._background: set[asyncio.Task[None]] = set()
@@ -118,24 +146,46 @@ class ChatService:
                 await asyncio.sleep(min(delay, _MAX_BACKOFF_S) + random.uniform(0, 0.1))  # noqa: S311  # nosec B311
         raise AssertionError("unreachable")  # pragma: no cover
 
-    async def _record(
+    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(work)
+        self._background.add(task)  # keep a strong reference until the write finishes
+        task.add_done_callback(self._background.discard)
+
+    async def _begin(self, who: Attribution, r: Resolved, kind: str, demand: Demand) -> _Call:
+        """Spec section 6, steps 2-3: hold the worst case against every applicable budget."""
+        hold = str(uuid7())  # never the client-supplied request id: holds must be unique
+        async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
+            await self._budgets.reserve(
+                conn,
+                hold=hold,
+                team_id=who.team_id,
+                user_id=who.user_id,
+                demand=demand,
+                at=who.at,
+                expires_at=who.at + HOLD_TTL,
+            )
+        return _Call(who, r, kind, hold, time.perf_counter())
+
+    async def _end(
         self,
-        who: Attribution,
-        r: Resolved,
-        kind: str,
+        call: _Call,
         usage: Usage,
         cost: int,
         status: str,
-        started: float,
         flags: dict[str, object] | None = None,
+        *,
+        charged: bool,
     ) -> None:
+        """Spec section 6, steps 5-6: settle the hold (or release it when nothing was charged)
+        and append the ledger row, atomically."""
+        who, r = call.who, call.r
         event = UsageEvent(
             org_id=who.org_id,
             team_id=who.team_id,
             user_id=who.user_id,
             api_key_id=who.api_key_id,
             request_id=who.request_id,
-            kind=kind,
+            kind=call.kind,
             provider=r.entry.provider,
             model=r.entry.model,
             adapter=r.adapter.name,
@@ -143,23 +193,55 @@ class ChatService:
             usage=usage,
             cost_micro_usd=cost,
             status=status,
-            latency_ms=int((time.perf_counter() - started) * 1000),
+            latency_ms=int((time.perf_counter() - call.started) * 1000),
             flags=dict(flags or {}),
+            ts=who.at,
         )
         async with self._db.transaction(TenantContext(who.org_id, who.user_id)) as conn:
             await self._usage.record(conn, event)
+            fired = await self._budgets.settle(
+                conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
+            )
+        if fired:
+            log.info(
+                "budget soft threshold crossed",
+                extra={"request_id": who.request_id, "alerts": fired},
+            )
+
+    async def _end_quietly(
+        self,
+        call: _Call,
+        usage: Usage,
+        cost: int,
+        status: str,
+        flags: dict[str, object] | None = None,
+        *,
+        charged: bool,
+    ) -> None:
+        """Failure paths: a failed write must not mask the original error. The janitor returns
+        the hold once it expires."""
+        try:
+            await self._end(call, usage, cost, status, flags, charged=charged)
+        except Exception:
+            log.exception("could not settle a request", extra={"request_id": call.who.request_id})
+
+    async def _call_provider(self, call: _Call, attempt: Callable[[], Awaitable[T]]) -> T:
+        """Run the provider call with retries; any failure releases the hold and is recorded."""
+        try:
+            return await self._with_retries(attempt)
+        except asyncio.CancelledError:
+            self._spawn(self._end_quietly(call, Usage(), 0, "cancelled", charged=False))
+            raise
+        except Exception as exc:
+            error = exc.kind.value if isinstance(exc, ProviderError) else "internal"
+            await self._end_quietly(call, Usage(), 0, "error", {"error": error}, charged=False)
+            raise
 
     async def complete(
         self, who: Attribution, r: Resolved, req: CanonicalRequest
     ) -> tuple[CanonicalResponse, int]:
-        started = time.perf_counter()
-        try:
-            response = await self._with_retries(lambda: r.adapter.complete(req))
-        except ProviderError as exc:
-            await self._record(
-                who, r, "chat", Usage(), 0, "error", started, {"error": exc.kind.value}
-            )
-            raise
+        call = await self._begin(who, r, "chat", chat_demand(r.entry, req))
+        response = await self._call_provider(call, lambda: r.adapter.complete(req))
         usage = response.usage
         if usage.estimated:
             prompt = "".join(m.text() for m in req.messages)
@@ -169,18 +251,15 @@ class ChatService:
                 estimated=True,
             )
         cost = r.entry.cost(usage)
-        await self._record(who, r, "chat", usage, cost, "ok", started)
+        await self._end(call, usage, cost, "ok", charged=True)
         return response, cost
 
     async def stream(
         self, who: Attribution, r: Resolved, req: CanonicalRequest, outcome: list[StreamOutcome]
-    ) -> AsyncIterator[CanonicalChunk]:
-        """Yield provider chunks; always record the ledger row, even when the client disconnects."""
-        started = time.perf_counter()
-        usage: Usage | None = None
-        finish: FinishReason | None = None
-        produced: list[str] = []
-        status = "cancelled"
+    ) -> AsyncGenerator[CanonicalChunk]:
+        """Hold the budget and open the provider stream. Budget and provider errors raise here,
+        before any byte is sent; the returned stream settles when it ends or is closed."""
+        call = await self._begin(who, r, "chat", chat_demand(r.entry, req))
         current: list[AsyncIterator[CanonicalChunk]] = []
 
         async def open_stream() -> CanonicalChunk | None:
@@ -188,8 +267,23 @@ class ChatService:
             current[:] = [stream]
             return await anext(stream, None)
 
+        first = await self._call_provider(call, open_stream)  # retry only before any output
+        return self._relay(call, req, first, current, outcome)
+
+    async def _relay(
+        self,
+        call: _Call,
+        req: CanonicalRequest,
+        pending: CanonicalChunk | None,
+        current: list[AsyncIterator[CanonicalChunk]],
+        outcome: list[StreamOutcome],
+    ) -> AsyncGenerator[CanonicalChunk]:
+        """Yield provider chunks; always settle and record, even when the client disconnects."""
+        usage: Usage | None = None
+        finish: FinishReason | None = None
+        produced: list[str] = []
+        status = "cancelled"
         try:
-            pending = await self._with_retries(open_stream)  # retry only before any output
             while pending is not None:
                 if pending.usage is not None:
                     usage = pending.usage
@@ -199,7 +293,7 @@ class ChatService:
                 yield pending
                 pending = await anext(current[0], None)
             status = "ok"
-        except ProviderError:
+        except Exception:
             status = "error"
             raise
         finally:
@@ -210,54 +304,45 @@ class ChatService:
                     output_tokens=estimate_tokens("".join(produced)),
                     estimated=True,
                 )
-            cost = r.entry.cost(usage) if status != "error" or produced else 0
+            # An error before any output is not charged; a cancelled stream bills its prompt.
+            charged = status != "error" or bool(produced)
+            cost = call.r.entry.cost(usage) if charged else 0
             outcome.append(StreamOutcome(usage=usage, finish_reason=finish, cost_micro_usd=cost))
-            task = asyncio.create_task(
-                self._finish_stream(current, who, r, usage, cost, status, started)
+            self._spawn(
+                self._finish_stream(
+                    call, current, usage if charged else Usage(), cost, status, charged
+                )
             )
-            self._background.add(task)  # keep a strong reference until the write finishes
-            task.add_done_callback(self._background.discard)
 
     async def _finish_stream(
         self,
+        call: _Call,
         current: list[AsyncIterator[CanonicalChunk]],
-        who: Attribution,
-        r: Resolved,
         usage: Usage,
         cost: int,
         status: str,
-        started: float,
+        charged: bool,
     ) -> None:
-        """Close the upstream stream (stops provider generation on disconnect), then bill."""
+        """Close the upstream stream (stops provider generation on disconnect), then settle."""
         for stream in current:
             aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                try:
-                    await aclose()
-                except ProviderError, RuntimeError:
-                    log.debug(
-                        "upstream stream already closed", extra={"request_id": who.request_id}
-                    )
-        try:
-            await self._record(who, r, "chat", usage, cost, status, started)
-        except Exception:
-            log.exception(
-                "could not record a streamed request", extra={"request_id": who.request_id}
-            )
+            if aclose is None:
+                continue
+            try:
+                await aclose()
+            except ProviderError, RuntimeError:
+                log.debug(
+                    "upstream stream already closed", extra={"request_id": call.who.request_id}
+                )
+        await self._end_quietly(call, usage, cost, status, charged=charged)
 
     async def embed(
         self, who: Attribution, r: Resolved, req: EmbedRequest
     ) -> tuple[EmbedResponse, int]:
-        started = time.perf_counter()
-        try:
-            response = await self._with_retries(lambda: r.adapter.embed(req))
-        except ProviderError as exc:
-            await self._record(
-                who, r, "embed", Usage(), 0, "error", started, {"error": exc.kind.value}
-            )
-            raise
+        call = await self._begin(who, r, "embed", embed_demand(r.entry, req))
+        response = await self._call_provider(call, lambda: r.adapter.embed(req))
         cost = r.entry.cost(response.usage)
-        await self._record(who, r, "embed", response.usage, cost, "ok", started)
+        await self._end(call, response.usage, cost, "ok", charged=True)
         return response, cost
 
     async def drain(self) -> None:

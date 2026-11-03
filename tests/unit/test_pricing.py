@@ -86,3 +86,24 @@ def test_catalog_resolves_public_names_and_unambiguous_aliases() -> None:
     assert catalog.resolve("claude-opus-5-5") is None  # ambiguous bare name
     assert catalog.resolve("nope") is None
     assert next(m.public_name for m in catalog.models("chat")) == "anthropic/claude-haiku-5-5"
+
+
+BULK = ModelPrice(
+    9,
+    "p",
+    "bulk",
+    "chat",
+    price_input=1_000_000,
+    price_output=4_000_000,
+    tier_threshold_tokens=1_000,
+    tier_price_input=500_000,  # a volume discount: dearer below the threshold than above it
+    tier_price_output=2_000_000,
+)
+
+
+@given(st.integers(0, 5_000), st.integers(0, 5_000), st.integers(0, 5_000), st.integers(0, 5_000))
+def test_worst_case_bounds_any_smaller_actual_usage(a: int, b: int, c: int, d: int) -> None:
+    usage = Usage(input_tokens=min(a, b), output_tokens=min(c, d))
+    for price in (OPUS, HAIKU, BULK):
+        bound = price.worst_case(input_tokens=max(a, b), max_output_tokens=max(c, d))
+        assert price.cost(usage) <= bound

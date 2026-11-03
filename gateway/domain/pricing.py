@@ -67,10 +67,15 @@ class ModelPrice:
         )
 
     def worst_case(self, *, input_tokens: int, max_output_tokens: int, images: int = 0) -> int:
-        """Upper bound for a reservation: every input token at the dearest input rate (a cache
-        write can cost more than a plain read) and every allowed output token."""
-        rate_in, rate_out = self._rates(input_tokens)
-        dearest_in = max(rate_in, self.price_cache_write or 0)
+        """Upper bound for a reservation, valid for any actual usage up to these counts: every
+        input token at the dearest input rate (a cache write can cost more than a plain read) and
+        every allowed output token. Above a tier threshold the actual prompt may land on either
+        side of it, so the dearer of the two rates applies."""
+        rate_in, rate_out = self.price_input, self.price_output
+        if self.tier_threshold_tokens is not None and input_tokens > self.tier_threshold_tokens:
+            rate_in = max(rate_in, self.tier_price_input or 0)
+            rate_out = max(rate_out, self.tier_price_output or 0)
+        dearest_in = max(rate_in, self.price_cache_write or 0, self.price_cached_input or 0)
         return (
             per_million(input_tokens, dearest_in)
             + per_million(max_output_tokens, rate_out)
