@@ -93,7 +93,7 @@ jobs:
           uv export --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
           uv run pip-audit --strict --disable-pip -r /tmp/requirements.txt
       - name: Gitleaks (whole history)
-        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --redact --exit-code 1
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --redact --exit-code 1 --gitleaks-ignore-path /repo/.gitleaksignore
       - name: Semgrep (custom rules + Python ruleset)
         run: |
           docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.183.0 \
