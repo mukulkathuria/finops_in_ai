@@ -1,0 +1,80 @@
+# Dev stack: `uv run python scripts/init_env.py && docker compose up -d --build`
+# Ports bind to 127.0.0.1 only; nothing is exposed beyond the host.
+name: finops
+
+x-db-urls: &db-urls
+  ENVIRONMENT: ${ENVIRONMENT:-dev}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql://app:${FINOPS_APP_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
+  WORKER_DATABASE_URL: postgresql://worker:${FINOPS_WORKER_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
+  MIGRATOR_DATABASE_URL: postgresql://migrator:${FINOPS_MIGRATOR_PASSWORD:?run scripts/init_env.py first}@db:5432/${FINOPS_DB:-finops}
+
+services:
+  db:
+    build: infra/docker/postgres
+    image: finops-postgres:19rc1
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/init_env.py first}
+      FINOPS_DB: ${FINOPS_DB:-finops}
+      FINOPS_MIGRATOR_PASSWORD: ${FINOPS_MIGRATOR_PASSWORD:?run scripts/init_env.py first}
+      FINOPS_APP_PASSWORD: ${FINOPS_APP_PASSWORD:?run scripts/init_env.py first}
+      FINOPS_WORKER_PASSWORD: ${FINOPS_WORKER_PASSWORD:?run scripts/init_env.py first}
+      FINOPS_READONLY_PASSWORD: ${FINOPS_READONLY_PASSWORD:?run scripts/init_env.py first}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_partman_bgw
+      - -c
+      - pg_partman_bgw.dbname=${FINOPS_DB:-finops}
+      - -c
+      - pg_partman_bgw.role=migrator
+      - -c
+      - pg_partman_bgw.interval=3600
+      - -c
+      - max_connections=300
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${FINOPS_DB:-finops}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  mock-llm:
+    build:
+      context: .
+      dockerfile: sidecars/mock_llm/Dockerfile
+    image: finops-mock-llm:dev
+    environment:
+      MOCK_LATENCY_MS_MIN: ${MOCK_LATENCY_MS_MIN:-20}
+      MOCK_LATENCY_MS_MAX: ${MOCK_LATENCY_MS_MAX:-80}
+      MOCK_STREAM_CHUNK_DELAY_MS: ${MOCK_STREAM_CHUNK_DELAY_MS:-2}
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/gateway/Dockerfile
+    image: finops-gateway:dev
+    command: ["alembic", "upgrade", "head"]
+    environment: *db-urls
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    image: finops-gateway:dev
+    environment: *db-urls
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-llm:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+
+volumes:
+  pgdata:
