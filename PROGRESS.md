@@ -39,6 +39,10 @@ only without it), OpenTelemetry server span per request continuing W3C `tracepar
 `auth`, `budget.reserve`, GenAI client span `chat <model>` (usage, cost), `budget.settle`; the
 trace id is returned as `x-trace-id` and logged; OTLP/HTTP export via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
+Phase 1 review loop (spec section 12): two independent reviewers, every finding fixed with a
+regression test and re-reviewed; no open Critical or High finding. See
+`docs/audits/2026-11-03-phase1-review.md`.
+
 ## Next: Phase 2 (US-11..US-16: classifiers, guardrails, file validation, OCR, parse cache, ACL retrieval)
 
 ## Remaining stories
@@ -60,6 +64,9 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-8 | Soft-threshold alerts are recorded (`budget_alerts`, `GET /v1/admin/budget-alerts`), counted in `finops_budget_soft_alerts_total` and logged; e-mail or webhook delivery needs a notification channel | Delivery joins the outbox work |
 | D-9 | Unused budget never rolls over (the spec makes rollover opt-in per org) | Not offered yet; the default behaviour is implemented |
 | D-10 | Budget reservations key on a gateway-generated hold id, never the client-supplied `X-Request-ID` | Duplicate client request ids cannot collide or settle each other's holds |
+| D-11 | An attempt that fails or is cancelled after partial output is billed for it and frees its Idempotency-Key, so a retry with that key runs (and is billed) again; only a completed request replays without a charge | The provider billed the partial attempt; replaying a truncated answer would be worse |
+| D-12 | When the org timezone changes, current counters are rebuilt from the ledger for the new periods; a one-time grant stays with the period it was granted in | `docs/audits/2026-11-03-phase1-review.md` (M5) |
+| D-13 | Members of several teams must send `X-FinOps-Team` on model calls (422 `team_required`); team and member budgets key on the team | Review finding C1 |
 
 ## Blocked
 

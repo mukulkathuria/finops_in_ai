@@ -365,16 +365,20 @@ class ChatService:
         """Spec section 6, steps 2-3: hold the worst case against every applicable budget.
         With an Idempotency-Key whose earlier attempt finished, return that attempt's stored
         result instead: nothing is reserved and nothing will be charged."""
-        hold = str(uuid7())  # never the client-supplied request id: holds must be unique
+        holds: list[str] = []
 
         async def work(conn: AsyncConnection) -> bytes | None:
+            # Never the client-supplied request id (holds must be unique), and a fresh one per
+            # attempt: a retry after a lost commit acknowledgement must not collide with the
+            # hold that committed (that stray hold expires through the janitor).
+            holds.append(str(uuid7()))
             if idem is not None:
                 stored = await self._idempotency.claim(conn, idem)
                 if stored is not None:
                     return stored
             await self._budgets.reserve(
                 conn,
-                hold=hold,
+                hold=holds[-1],
                 team_id=who.team_id,
                 user_id=who.user_id,
                 demand=demand,
@@ -393,7 +397,7 @@ class ChatService:
                 self._telemetry.metrics.idempotent_replays.labels(kind).inc()
                 span.set_attribute("finops.idempotent_replay", True)
                 return stored
-        return _Call(who, r, kind, hold, time.perf_counter(), idem)
+        return _Call(who, r, kind, holds[-1], time.perf_counter(), idem)
 
     async def _end(
         self,

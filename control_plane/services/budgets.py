@@ -282,10 +282,6 @@ class BudgetService:
                     )
             if new != old:
                 await self._budgets.update_settings(conn, new)
-                if new.timezone != old.timezone:  # periods moved: counters follow the ledger
-                    now = datetime.now(UTC)
-                    for budget_id in await self._budgets.budget_ids(conn):
-                        await self._budgets.rebuild_current(conn, budget_id, now)
                 await self._audit.append(
                     conn,
                     self._event(
@@ -301,6 +297,15 @@ class BudgetService:
                         },
                     ),
                 )
+        if new.timezone != old.timezone:
+            # Periods moved: rebuild each current counter from the ledger, one short transaction
+            # per budget so no counter stays locked for the whole loop.
+            now = datetime.now(UTC)
+            async with self._db.transaction(self._ctx(principal)) as conn:
+                budget_ids = await self._budgets.budget_ids(conn)
+            for budget_id in budget_ids:
+                async with self._db.transaction(self._ctx(principal)) as conn:
+                    await self._budgets.rebuild_current(conn, budget_id, now)
         return new
 
     async def request_more(

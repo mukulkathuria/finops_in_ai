@@ -101,6 +101,8 @@ class UsageRepository:
     async def record(self, conn: AsyncConnection, e: UsageEvent) -> None:
         """Append one ledger row. With a hold the insert is idempotent: a settlement retried
         after an unacknowledged commit finds its own row and writes nothing (one charge)."""
+        if e.hold is not None and e.ts is None:
+            raise ValueError("a ledger row with a hold needs its request time (ts) to deduplicate")
         flags = {**e.flags, "hold": e.hold} if e.hold else e.flags
         await conn.exec_driver_sql(
             _RECORD,
