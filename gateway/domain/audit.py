@@ -27,6 +27,7 @@ class AuditAction:
     ACCESS_DENIED = "authz.access_denied"
     USER_INVITED = "users.invited"
     INVITATION_ACCEPTED = "users.invitation_accepted"
+    INVITATION_REVOKED = "users.invitation_revoked"
     TEAM_CREATED = "teams.created"
     TEAM_MEMBER_ADDED = "teams.member_added"
     TEAM_MEMBER_REMOVED = "teams.member_removed"

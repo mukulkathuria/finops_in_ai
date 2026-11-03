@@ -5,12 +5,18 @@ from typing import Annotated, Protocol
 from fastapi import Depends, Request
 
 from control_plane.services.identity import IdentityService
+from control_plane.services.invitations import InvitationService
+from control_plane.services.teams import TeamService
 from gateway.api.deps import GatewayServices
 
 
 class ControlPlaneServices(GatewayServices, Protocol):
     @property
     def identity_service(self) -> IdentityService: ...
+    @property
+    def team_service(self) -> TeamService: ...
+    @property
+    def invitation_service(self) -> InvitationService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

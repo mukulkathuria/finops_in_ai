@@ -92,7 +92,9 @@ class IdentityRepository:
             "SELECT u.id, u.org_id, u.email, u.status,"
             " COALESCE((SELECT jsonb_agg(jsonb_build_object("
             "             'role', ra.role, 'team_id', ra.team_id))"
-            "           FROM role_assignments ra WHERE ra.user_id = u.id), '[]'::jsonb) AS grants"
+            "           FROM role_assignments ra WHERE ra.user_id = u.id), '[]'::jsonb) AS grants,"
+            " COALESCE((SELECT array_agg(m.team_id) FROM team_members m"
+            "           WHERE m.user_id = u.id), '{}') AS team_ids"
             " FROM users u WHERE u.id = :uid",
             {"uid": user_id},
         )
@@ -108,8 +110,15 @@ class IdentityRepository:
             email=row["email"],
             status=row["status"],
             grants=grants,
-            team_ids=frozenset(),
+            team_ids=frozenset(row["team_ids"]),
         )
+
+    async def get_org(self, conn: AsyncConnection) -> tuple[str, str]:
+        """Name and slug of the org in the current tenant context."""
+        row = await fetch_one(conn, "SELECT name, slug FROM orgs WHERE id = app_current_org()")
+        if row is None:
+            raise RuntimeError("tenant org not visible in this transaction")
+        return str(row["name"]), str(row["slug"])
 
     async def load_role_catalog(self, conn: AsyncConnection) -> RoleCatalog:
         rows = await fetch_all(conn, "SELECT role, permission FROM role_permissions")

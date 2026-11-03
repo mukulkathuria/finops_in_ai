@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from control_plane.api import audit, auth
+from control_plane.api import audit, auth, invitations, teams
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
 from gateway.api import health
@@ -47,6 +47,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.well_known)
     app.include_router(auth.router)
     app.include_router(audit.router)
+    app.include_router(teams.router)
+    app.include_router(invitations.router)
+    app.include_router(invitations.accept_router)
     return app
 
 

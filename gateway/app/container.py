@@ -2,13 +2,18 @@
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from control_plane.services.authz import Authorizer
 from control_plane.services.identity import IdentityService
+from control_plane.services.invitations import InvitationService
+from control_plane.services.teams import TeamService
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
+from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
 from gateway.app.settings import Settings
@@ -26,6 +31,8 @@ class Container:
     role_catalog: RoleCatalogCache
     audit: AuditRepository
     identity_service: IdentityService
+    team_service: TeamService
+    invitation_service: InvitationService
 
     async def aclose(self) -> None:
         await self.db.dispose()
@@ -61,6 +68,8 @@ def build_container(settings: Settings) -> Container:
     audit = AuditRepository()
     tokens = build_token_service(settings)
     hasher = Argon2PasswordHasher(max_concurrency=settings.password_hash_concurrency)
+    teams = TeamRepository()
+    authz = Authorizer(db=db, audit=audit)
     return Container(
         settings=settings,
         db=db,
@@ -76,5 +85,20 @@ def build_container(settings: Settings) -> Container:
             hasher=hasher,
             tokens=tokens,
             signup_mode=settings.signup_mode,
+        ),
+        team_service=TeamService(
+            db=db, teams=teams, identity=identity_repo, audit=audit, authz=authz
+        ),
+        invitation_service=InvitationService(
+            db=db,
+            invitations=InvitationRepository(),
+            teams=teams,
+            identity=identity_repo,
+            audit=audit,
+            authz=authz,
+            hasher=hasher,
+            tokens=tokens,
+            ttl=timedelta(hours=settings.invite_ttl_hours),
+            web_base_url=settings.web_base_url,
         ),
     )

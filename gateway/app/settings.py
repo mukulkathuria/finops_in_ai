@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     signup_mode: Literal["bootstrap", "open", "disabled"] = "bootstrap"
     password_hash_concurrency: int = Field(default=4, ge=1, le=64)
 
+    # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
+    invite_ttl_hours: int = Field(default=72, ge=1, le=720)
+    web_base_url: str = "http://127.0.0.1:5173"
+
     @property
     def is_production_like(self) -> bool:
         return self.environment in (Environment.STAGING, Environment.PRODUCTION)
