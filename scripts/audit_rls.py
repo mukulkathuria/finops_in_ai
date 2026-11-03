@@ -19,6 +19,7 @@ GLOBAL_TABLES = frozenset(
         "role_permissions",
         "system_state",
         "rate_limit_counters",  # hashed client keys only, no tenant data
+        "model_catalog",  # global price list, read-only for runtime roles
     }
 )
 OWNER_ROLE = "migrator"

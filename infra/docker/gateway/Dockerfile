@@ -21,6 +21,7 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY alembic.ini ./
 COPY migrations ./migrations
+COPY config ./config
 ENV PATH=/app/.venv/bin:$PATH
 USER 10001:10001
 EXPOSE 8080

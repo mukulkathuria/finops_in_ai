@@ -16,29 +16,25 @@ pytest against PG19), rehearse migrations up/down/up, run the RLS audit, gitleak
 | US-03 login, rotating refresh, family revocation, lockout, per-IP limits | `0c0a3b3` | `tests/integration/test_us03_sessions.py` |
 | US-04 team API keys (hash only, instant revocation), data-plane Caller, /v1/whoami | `b5e594a` | `tests/integration/test_us04_api_keys.py` |
 
-## In progress: US-05 OpenAI-compatible endpoint
+## Done in this session after the checkpoint
 
-Done so far (uncommitted until the contract suite lands):
-- `gateway/domain/llm.py` canonical types; `Usage` invariants (input includes cached and
-  cache-write subsets, output includes reasoning; never negative).
-- `gateway/ports/llm.py` `LLMAdapter` port; `ProviderErrorKind` adds `bad_request` and
-  `unavailable` to the spec's six kinds so retry and HTTP mapping stay exact.
-- Adapters: `openai_compat` (httpx2), `anthropic` (official SDK 2.4.0, API version 2026-10-21:
-  temperature/top_p are never sent), `gemini` (REST v1beta; thought signatures carried in tool-call
-  ids as `call_<hex>.gts.<b64url>`).
+| US-05 OpenAI-compatible endpoint | adapters `a3f7145`, endpoints next commit | `tests/contract/test_llm_contract.py` (53), `tests/integration/test_us05_openai_compat.py` (official OpenAI SDK: chat, stream, base64 embeddings) |
 
-Next, in order:
-1. Contract suite `tests/contract/test_llm_contract.py` with recorded fixtures per adapter
-   (text, stream, tool call, streamed tool call, cached/reasoning usage, 429 with Retry-After, 401,
-   5xx/529, context overflow, content filter, timeout, malformed stream, embeddings).
-2. Migration 0007: `model_catalog` (global, prices micro-USD per 1M tokens, effective_from,
-   catalog_version = row id) seeded with mock models and Anthropic models (prices from the
-   claude-api skill, cached 2026-10-06); `usage_events` partitioned ledger.
-3. `config/gateway.yaml` providers (mock, openai, anthropic, gemini; api_key_env) and a provider
-   registry; `create_app(settings, http_client=...)` seam for tests (ASGI mock provider).
-4. `/v1/chat/completions` (JSON and SSE), `/v1/embeddings` (float and base64), `/v1/models`;
-   cost headers; ledger write; retries with jitter on retryable kinds; ingress body limits.
-5. Official `openai` SDK compatibility tests through an httpx2 ASGI transport.
+US-05 details: canonical types; LLMAdapter port; openai_compat / anthropic (SDK 2.4.0, API 2026-10-21,
+no sampling params) / gemini (thought signatures in tool-call ids) adapters; model_catalog (prices as
+data, tiers, worst_case bound with rounding slack) and partitioned usage_events ledger (migration
+0007); config/gateway.yaml providers keyed by env API keys; ChatService with retries before output
+only, ledger row per request incl. errors and cancelled streams; /v1/chat/completions (JSON and SSE
+with cost comment), /v1/embeddings (float and base64), /v1/models; ProviderError to HTTP mapping;
+body limit 413; malformed JSON 400, schema errors 422.
+
+## Next: US-06 then budgets
+
+US-06 provider keys per org with envelope encryption (KeyManager port, AES-256-GCM, per-row DEK,
+MASTER_KEY env) and adapter switch native|litellm (optional extra, contract suite on both).
+US-07..US-10 budgets: budgets, budget_usage, budget_reservations, budget_requests, outbox, alerts;
+reserve (worst_case per budget, consistent lock order) before the provider call, commit actual after,
+janitor; 429 budget_exceeded naming the scope; 500-way race and idempotency tests.
 
 ## Remaining stories
 

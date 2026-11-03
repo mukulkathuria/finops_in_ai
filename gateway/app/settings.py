@@ -5,6 +5,7 @@ changes that must not restart the process go through snapshots, not through Sett
 """
 
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
@@ -26,6 +27,8 @@ class Settings(BaseSettings):
     environment: Environment = Environment.DEV
     log_level: str = "INFO"
     service_name: str = "finops-gateway"
+    config_path: Path = Path("config/gateway.yaml")
+    max_request_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
 
     # PostgreSQL 19 (app role, always under RLS). The worker uses its own role.
     database_url: SecretStr

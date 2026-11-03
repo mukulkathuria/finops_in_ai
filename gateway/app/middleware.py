@@ -12,6 +12,8 @@ from uuid import uuid7
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from gateway.domain.errors import PayloadTooLarge
+
 _VALID_ID: Final = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 log = logging.getLogger("finops.access")
 
@@ -52,3 +54,41 @@ class RequestContextMiddleware:
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 },
             )
+
+
+class BodyLimitMiddleware:
+    """Reject request bodies above `max_bytes` (spec section 4, ingress) without buffering them."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = next((v for k, v in scope["headers"] if k == b"content-length"), b"")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            body = b'{"error":{"message":"request body too large","type":"invalid_request_error",'
+            body += b'"code":"request_too_large","param":null}}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        seen = 0
+
+        async def limited() -> Message:
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    raise PayloadTooLarge("request body too large")
+            return message
+
+        await self.app(scope, limited, send)

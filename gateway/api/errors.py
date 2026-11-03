@@ -15,17 +15,20 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from gateway.domain.errors import DomainError, RateLimited
+from gateway.domain.llm import ProviderError, ProviderErrorKind
 
 log = logging.getLogger(__name__)
 
 _STATUS_BY_KIND = {
     "invalid_request": 422,
+    "malformed": 400,
     "authentication": 401,
     "permission": 403,
     "not_found": 404,
     "conflict": 409,
     "gone": 410,
     "rate_limit": 429,
+    "too_large": 413,
     "budget_exceeded": 429,
     "unavailable": 503,
 }
@@ -41,7 +44,19 @@ _TYPE_BY_STATUS = {
     415: "invalid_request_error",
     422: "invalid_request_error",
     429: "rate_limit_error",
+    502: "upstream_error",
     503: "service_unavailable_error",
+    504: "upstream_timeout_error",
+}
+_PROVIDER = {
+    ProviderErrorKind.RATE_LIMIT: (429, "upstream_rate_limited"),
+    ProviderErrorKind.TIMEOUT: (504, "upstream_timeout"),
+    ProviderErrorKind.CONTENT_FILTER: (400, "content_filter"),
+    ProviderErrorKind.CTX_OVERFLOW: (400, "context_length_exceeded"),
+    ProviderErrorKind.AUTH: (502, "upstream_auth_failed"),
+    ProviderErrorKind.BAD_REQUEST: (400, "upstream_bad_request"),
+    ProviderErrorKind.UNAVAILABLE: (503, "upstream_unavailable"),
+    ProviderErrorKind.OTHER: (502, "upstream_error"),
 }
 
 
@@ -86,6 +101,19 @@ async def _domain_error(_: Request, raw: Exception) -> JSONResponse:
     )
 
 
+async def _provider_error(_: Request, raw: Exception) -> JSONResponse:
+    exc = cast(ProviderError, raw)  # registered for ProviderError only
+    status, code = _PROVIDER[exc.kind]
+    # Upstream auth messages can quote (masked) credentials: never relay them to callers.
+    message = (
+        f"provider {exc.provider} rejected the gateway credentials"
+        if exc.kind is ProviderErrorKind.AUTH
+        else f"provider {exc.provider}: {exc.message}"
+    )
+    headers = {"retry-after": str(max(1, int(exc.retry_after_s)))} if exc.retry_after_s else None
+    return error_response(status, message, code=code, headers=headers)
+
+
 async def _validation_error(_: Request, raw: Exception) -> JSONResponse:
     exc = cast(RequestValidationError, raw)  # registered for RequestValidationError only
     first = exc.errors()[0] if exc.errors() else {}
@@ -112,6 +140,7 @@ async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
 
 def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(DomainError, _domain_error)
+    app.add_exception_handler(ProviderError, _provider_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(Exception, _unexpected)

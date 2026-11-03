@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import httpx2
 from fastapi import FastAPI
+from mock_llm.app import app as mock_provider
 from pydantic import SecretStr
 
 from gateway.app.main import create_app
@@ -34,8 +35,11 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
 async def app_client(
     settings: Settings, *, client_ip: str = "127.0.0.1"
 ) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
-    app = create_app(settings)
-    async with app.router.lifespan_context(app):
+    providers = httpx2.AsyncClient(
+        mounts={"http://mock-llm:8000": httpx2.ASGITransport(app=mock_provider)}
+    )
+    app = create_app(settings, http_client=providers, environ={"MOCK_LLM_API_KEY": "test-key"})
+    async with providers, app.router.lifespan_context(app):
         transport = httpx2.ASGITransport(app=app, client=(client_ip, 50000))
         async with httpx2.AsyncClient(
             transport=transport, base_url="http://gateway.test"

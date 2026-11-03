@@ -1,0 +1,23 @@
+# Non-secret gateway structure (ADR 0005). API keys are read from the environment variable named
+# by api_key_env; a provider without a key is simply not offered. Prices live in model_catalog.
+providers:
+  mock:
+    kind: openai_compat
+    base_url: http://mock-llm:8000/v1
+    api_key_env: MOCK_LLM_API_KEY
+  openai:
+    kind: openai_compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    max_tokens_field: max_completion_tokens
+  anthropic:
+    kind: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+  gemini:
+    kind: gemini
+    base_url: https://generativelanguage.googleapis.com
+    api_key_env: GEMINI_API_KEY
+defaults:
+  max_output_tokens: 4096
+  provider_retries: 1

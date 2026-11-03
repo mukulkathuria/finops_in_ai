@@ -32,6 +32,13 @@ class InvalidInput(DomainError):
     default_code = "invalid_request"
 
 
+class MalformedRequest(DomainError):
+    """The body cannot be parsed at all (invalid JSON or UTF-8): 400, unlike a schema error."""
+
+    kind = "malformed"
+    default_code = "invalid_json"
+
+
 class Unauthenticated(DomainError):
     kind = "authentication"
     default_code = "invalid_credentials"
@@ -64,6 +71,11 @@ class RateLimited(DomainError):
     def __init__(self, message: str, *, retry_after_s: int = 1, code: str | None = None) -> None:
         super().__init__(message, code=code)
         self.retry_after_s = retry_after_s
+
+
+class PayloadTooLarge(DomainError):
+    kind = "too_large"
+    default_code = "request_too_large"
 
 
 class Unavailable(DomainError):
