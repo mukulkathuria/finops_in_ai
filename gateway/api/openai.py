@@ -205,7 +205,7 @@ def _usage_json(
 @router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) -> Response:
     body = _validate(ChatRequest, await _json(request))
-    resolved = await chat.resolve(body.model, "chat")
+    resolved = await chat.resolve(body.model, "chat", caller.org_id)
     requested = body.max_completion_tokens or body.max_tokens or chat.default_max_tokens
     limit = resolved.entry.max_output_tokens or requested
     req = _canonical(body, resolved.entry.model, min(requested, limit))
@@ -319,7 +319,7 @@ async def embeddings(request: Request, caller: ModelCaller, chat: Chat) -> Respo
     inputs = (body.input,) if isinstance(body.input, str) else tuple(body.input)
     if not inputs or len(inputs) > 2048 or any(not isinstance(t, str) or not t for t in inputs):
         raise InvalidInput("input must be 1-2048 non-empty strings", param="input")
-    resolved = await chat.resolve(body.model, "embedding")
+    resolved = await chat.resolve(body.model, "embedding", caller.org_id)
     response, cost = await chat.embed(
         _who(caller, request), resolved, EmbedRequest(resolved.entry.model, inputs, body.dimensions)
     )

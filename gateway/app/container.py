@@ -13,18 +13,21 @@ from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.authz import Authorizer
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
+from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
-from gateway.adapters.llm.registry import build_adapters
+from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
+from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
+from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
 from gateway.app.gateway_config import load_gateway_config
@@ -53,6 +56,7 @@ class Container:
     http: httpx2.AsyncClient
     owns_http: bool
     chat_service: ChatService
+    provider_key_service: ProviderKeyService
 
     async def aclose(self) -> None:
         await self.chat_service.drain()
@@ -78,6 +82,21 @@ def build_token_service(settings: Settings) -> TokenService:
     )
 
 
+def build_envelope(settings: Settings) -> Envelope:
+    if settings.master_key is None:
+        # Settings refuses this outside dev and test; stored keys then die with the process.
+        log.warning("MASTER_KEY is not set; using an ephemeral master key")
+        keys, active = {"ephemeral": os.urandom(32)}, "ephemeral"
+    else:
+        keys = parse_master_keys(
+            settings.master_key.get_secret_value(),
+            settings.master_key_id,
+            settings.master_previous_keys.get_secret_value(),
+        )
+        active = settings.master_key_id
+    return Envelope(LocalKeyManager(keys, active))
+
+
 def build_container(
     settings: Settings,
     *,
@@ -101,9 +120,10 @@ def build_container(
         limits=httpx2.Limits(max_connections=500, max_keepalive_connections=100),
     )
     gateway_config = load_gateway_config(settings.config_path)
-    adapters = build_adapters(
-        gateway_config.provider_configs(), os.environ if environ is None else environ, http
-    )
+    provider_configs = gateway_config.provider_configs(settings.provider_adapter_default)
+    adapters = build_adapters(provider_configs, os.environ if environ is None else environ, http)
+    envelope = build_envelope(settings)
+    credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
     authz = Authorizer(db=db, audit=audit)
@@ -162,5 +182,16 @@ def build_container(
             usage=UsageRepository(),
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
+            org_adapters=OrgAdapters(
+                org_key_lookup(db, credentials, envelope), provider_configs, http
+            ),
+        ),
+        provider_key_service=ProviderKeyService(
+            db=db,
+            repo=credentials,
+            envelope=envelope,
+            audit=audit,
+            authz=authz,
+            known_providers=frozenset(provider_configs),
         ),
     )

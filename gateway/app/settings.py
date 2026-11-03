@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     login_max_failures: int = Field(default=5, ge=3, le=20)
     auth_rate_limit_per_minute: int = Field(default=30, ge=1, le=100_000)
 
+    # Provider keys (US-06): envelope encryption master key and the adapter switch.
+    master_key: SecretStr | None = None
+    master_key_id: str = Field(default="m1", pattern=r"^[A-Za-z0-9._-]{1,32}$")
+    master_previous_keys: SecretStr = SecretStr("")
+    provider_adapter_default: Literal["native", "litellm"] = "native"
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"
@@ -69,4 +75,7 @@ class Settings(BaseSettings):
         key = self.jwt_signing_key.get_secret_value() if self.jwt_signing_key else ""
         if not key or "CHANGE_ME" in key:
             raise ValueError("JWT_SIGNING_KEY is required outside dev and test")
+        master = self.master_key.get_secret_value() if self.master_key else ""
+        if not master or "CHANGE_ME" in master:
+            raise ValueError("MASTER_KEY is required outside dev and test")
         return self

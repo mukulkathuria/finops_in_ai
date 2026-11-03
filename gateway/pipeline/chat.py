@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 from uuid import UUID
 
+from gateway.adapters.llm.registry import OrgAdapters
 from gateway.adapters.postgres.catalog import CatalogCache
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
@@ -72,7 +73,9 @@ class ChatService:
         usage: UsageRepository,
         default_max_tokens: int,
         retries: int,
+        org_adapters: OrgAdapters | None = None,
     ) -> None:
+        self._org_adapters = org_adapters
         self._db = db
         self._catalog = catalog
         self._adapters = adapters
@@ -81,7 +84,7 @@ class ChatService:
         self._retries = retries
         self._background: set[asyncio.Task[None]] = set()
 
-    async def resolve(self, model: str, kind: ModelKind) -> Resolved:
+    async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
         entry = (await self._catalog.get()).resolve(model)
         if entry is None or entry.kind != kind:
             raise NotFound(
@@ -89,7 +92,10 @@ class ChatService:
                 code="model_not_found",
                 param="model",
             )
-        adapter = self._adapters.get(entry.provider)
+        adapter = None
+        if org_id is not None and self._org_adapters is not None:
+            adapter = (await self._org_adapters.get(org_id)).get(entry.provider)
+        adapter = adapter or self._adapters.get(entry.provider)
         if adapter is None:
             raise Unavailable(
                 f"provider '{entry.provider}' is not configured on this gateway",

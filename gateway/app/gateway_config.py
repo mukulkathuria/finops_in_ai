@@ -16,6 +16,7 @@ class _Provider(BaseModel):
     api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
     max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     timeout_s: float = Field(default=120.0, gt=0, le=600)
+    adapter: Literal["native", "litellm"] | None = None
 
 
 class _Defaults(BaseModel):
@@ -29,7 +30,9 @@ class GatewayConfig(BaseModel):
     providers: dict[str, _Provider] = Field(default_factory=dict)
     defaults: _Defaults = _Defaults()
 
-    def provider_configs(self) -> dict[str, ProviderConfig]:
+    def provider_configs(
+        self, default_adapter: Literal["native", "litellm"] = "native"
+    ) -> dict[str, ProviderConfig]:
         return {
             name: ProviderConfig(
                 name=name,
@@ -38,6 +41,7 @@ class GatewayConfig(BaseModel):
                 api_key_env=p.api_key_env,
                 max_tokens_field=p.max_tokens_field,
                 timeout_s=p.timeout_s,
+                adapter=p.adapter or default_adapter,
             )
             for name, p in self.providers.items()
         }

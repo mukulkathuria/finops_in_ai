@@ -14,3 +14,4 @@ class ProviderConfig:
     api_key_env: str
     max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     timeout_s: float = 120.0
+    adapter: Literal["native", "litellm"] = "native"

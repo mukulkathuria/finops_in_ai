@@ -26,6 +26,7 @@ ROLE_PASSWORD_KEYS = {
 # Values that must be exact-length key material rather than random passwords.
 KEY_GENERATORS: dict[str, Callable[[], str]] = {
     "JWT_SIGNING_KEY": lambda: base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode(),
+    "MASTER_KEY": lambda: base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode(),
 }
 _LINE = re.compile(r"^(?P<key>[A-Z][A-Z0-9_]*)=(?P<value>\S*)(?P<rest>\s+#.*)?$")
 _URL = re.compile(
