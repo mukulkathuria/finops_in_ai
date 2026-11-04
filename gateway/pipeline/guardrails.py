@@ -28,6 +28,7 @@ from gateway.domain.detectors import (
     Finding,
     Placeholders,
     detect,
+    injection_rule,
     normalize,
     redact,
     reveal_hidden,
@@ -36,6 +37,7 @@ from gateway.domain.detectors import (
 from gateway.domain.errors import DomainError, Unavailable
 from gateway.domain.guardrails import GuardrailBlocked, GuardrailPolicy
 from gateway.domain.llm import CanonicalRequest, CanonicalResponse, Message, TextPart
+from gateway.domain.retrieval import Hit
 from gateway.ports.classifiers import Classifier
 
 log = logging.getLogger(__name__)
@@ -144,6 +146,23 @@ class _ChatScan:
     findings: _Findings
     untrusted: str  # user and tool text, for the injection check
     rule: Verdict | None  # the rules' injection verdict; None when the check does not apply
+
+
+def _screen(policy: GuardrailPolicy, hits: Sequence[Hit]) -> tuple[list[Hit], list[dict[str, str]]]:
+    kept: list[Hit] = []
+    dropped: list[dict[str, str]] = []
+    for hit in hits:
+        findings = _Findings(policy)
+        findings.text(hit.content)
+        rules = findings.blocking()
+        rule = rules[0] if rules else None
+        if rule is None and policy.injection == "block":
+            rule = injection_rule(hit.content)
+        if rule is None:
+            kept.append(hit)
+        else:
+            dropped.append({"chunk_id": str(hit.chunk_id), "rule": rule})
+    return kept, dropped
 
 
 def _chat_chars(req: CanonicalRequest) -> int:
@@ -416,6 +435,16 @@ class Guardrails:
                 raise result
             verdicts += result
         return max(verdicts, key=lambda d: d.probability)
+
+    async def screen_passages(
+        self, org_id: UUID, hits: Sequence[Hit]
+    ) -> tuple[list[Hit], list[dict[str, str]]]:
+        """Retrieved passages the policy blocks on are dropped instead of blocking the request: a
+        document holding a blocked value or an injection must not stop every question that
+        retrieves it. Returns the passages kept and, for the ledger, those dropped and why.
+        Redacting policies apply later, with the rest of the request."""
+        policy = await self._policies.get(org_id)
+        return await _offload(sum(len(h.content) for h in hits), lambda: _screen(policy, hits))
 
     async def inspect_inputs(
         self, org_id: UUID, inputs: Sequence[str], *, request_id: str

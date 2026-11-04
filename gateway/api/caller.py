@@ -15,10 +15,12 @@ from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.database import TenantContext, set_lookup, set_tenant
 from gateway.api.deps import GatewayServices, bearer_token
 from gateway.api.markers import authz_dependency
+from gateway.app.settings import Settings
 from gateway.domain.api_keys import api_key_digest, looks_like_api_key
-from gateway.domain.errors import Forbidden, InvalidInput, Unauthenticated
+from gateway.domain.errors import Forbidden, InvalidInput, RateLimited, Unauthenticated
 from gateway.domain.policy import Permission
 from gateway.domain.retrieval import caller_groups
+from gateway.ports.counters import CounterStore
 
 
 class CallerServices(GatewayServices, Protocol):
@@ -26,6 +28,10 @@ class CallerServices(GatewayServices, Protocol):
     def api_keys(self) -> ApiKeyRepository: ...
     @property
     def telemetry(self) -> Telemetry: ...
+    @property
+    def counters(self) -> CounterStore: ...
+    @property
+    def settings(self) -> Settings: ...
 
 
 def get_caller_services(request: Request) -> CallerServices:
@@ -129,7 +135,21 @@ async def current_caller(
             else await _from_jwt(services, token, x_finops_team)
         )
     request.state.caller = caller
+    await _count(services, "credential", caller, services.settings.rate_limit_per_minute)
     return caller
+
+
+async def _count(services: CallerServices, bucket: str, caller: Caller, limit: int) -> None:
+    """One request against the credential's per-minute limit for `bucket` (spec section 10)."""
+    decision = await services.counters.hit(
+        f"{bucket}:{caller.api_key_id or caller.user_id}", limit=limit, window_s=60
+    )
+    if not decision.allowed:
+        raise RateLimited(
+            "too many requests for this credential; slow down",
+            retry_after_s=decision.retry_after_s,
+            code="rate_limited",
+        )
 
 
 @authz_dependency
@@ -151,5 +171,17 @@ async def require_model_access(caller: Annotated[Caller, Depends(current_caller)
     return caller
 
 
+@authz_dependency
+async def require_heavy_access(
+    request: Request, caller: Annotated[Caller, Depends(require_model_access)]
+) -> Caller:
+    """Model access, within the credential's separate limit on requests that cost conversion or
+    embedding work no money budget covers: uploads, document ingests, Markdown conversions."""
+    services = get_caller_services(request)
+    await _count(services, "heavy", caller, services.settings.heavy_rate_limit_per_minute)
+    return caller
+
+
 AnyCaller = Annotated[Caller, Depends(require_caller)]
 ModelCaller = Annotated[Caller, Depends(require_model_access)]
+HeavyCaller = Annotated[Caller, Depends(require_heavy_access)]

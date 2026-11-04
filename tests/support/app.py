@@ -28,6 +28,8 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "database_url": SecretStr(db.app_url),
         "signup_mode": "open",
         "auth_rate_limit_per_minute": 100_000,  # tests share one client address
+        "rate_limit_per_minute": 1_000_000,  # and reuse a key for many requests a minute
+        "heavy_rate_limit_per_minute": 1_000_000,
         "db_pool_size": 10,
         "laya_base_url": "http://mock-llm:8000",  # the mock provider speaks SystemOne too
         "object_store_path": OBJECTS,

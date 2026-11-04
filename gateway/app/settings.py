@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     refresh_family_ttl_seconds: int = Field(default=30 * 86_400, ge=3_600, le=365 * 86_400)
     login_max_failures: int = Field(default=5, ge=3, le=20)
     auth_rate_limit_per_minute: int = Field(default=30, ge=1, le=100_000)
+    # Per credential (API key or user; spec section 10): every authenticated data-plane request,
+    # and separately the requests that cost conversion or embedding work no budget pays for
+    # (uploads, document ingests, Markdown conversions).
+    rate_limit_per_minute: int = Field(default=1200, ge=1, le=1_000_000)
+    heavy_rate_limit_per_minute: int = Field(default=60, ge=1, le=1_000_000)
 
     # Provider keys (US-06): envelope encryption master key and the adapter switch.
     master_key: SecretStr | None = None
@@ -96,6 +101,7 @@ class Settings(BaseSettings):
     embedder_model: str = "bge-m3"
     embedder_api_key: SecretStr | None = None
     embedder_timeout_s: float = Field(default=30.0, gt=0, le=300)
+    max_indexed_chunks_per_org: int = Field(default=1_000_000, ge=1, le=1_000_000_000)
 
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)

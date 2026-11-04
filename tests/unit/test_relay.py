@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from gateway.domain.llm import (
     CanonicalChunk,
     CanonicalRequest,
@@ -16,7 +18,7 @@ from gateway.domain.llm import (
     ToolCallDelta,
     Usage,
 )
-from gateway.pipeline.chat import _Relay
+from gateway.pipeline.chat import _Relay, estimate_tokens
 from gateway.pipeline.guardrails import OutputFilter
 
 KEY = "AK" + "IA" + "QWERTYUIOPASDFGH"
@@ -78,3 +80,23 @@ async def test_a_stream_without_a_finish_still_delivers_what_was_held_and_settle
     assert "".join(c.content or "" for c in out) == "mail [EMAIL_1]"
     await relay.aclose()  # closing an ended stream changes nothing
     assert [(e.status, e.charged) for e in ends] == [("ok", True)]
+
+
+async def test_text_held_back_when_a_stream_fails_still_counts_toward_the_estimate() -> None:
+    ends: list[Any] = []
+    entry = SimpleNamespace(cost=lambda usage: 1, model="m")
+    call: Any = SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None)
+
+    async def upstream() -> AsyncIterator[CanonicalChunk]:
+        raise ConnectionError("the provider dropped the stream")
+        yield CanonicalChunk()  # pragma: no cover - makes this an async generator
+
+    first = CanonicalChunk(content="Done. mail a@x.io")  # no usage: the gateway estimates
+    output = OutputFilter(frozenset({"pii", "secret"}))
+    relay = _Relay(call, REQUEST, first, upstream(), [], ends.append, output)
+    with pytest.raises(ConnectionError):
+        async for _ in relay:
+            pass
+    (end,) = ends
+    assert end.status == "error"
+    assert end.usage.output_tokens == estimate_tokens("Done. mail [EMAIL_1]")  # the held part too

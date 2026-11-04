@@ -6,15 +6,17 @@ Downloads are attachments with `nosniff` and a sandboxing CSP, so an uploaded HT
 never run in the dashboard's origin.
 """
 
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Final, Literal, Protocol
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.datastructures import UploadFile
 
 from gateway.adapters.postgres.files import FileRecord
-from gateway.api.caller import AnyCaller, Caller, ModelCaller
+from gateway.api.caller import AnyCaller, Caller, HeavyCaller
+from gateway.domain.errors import InvalidInput
 from gateway.pipeline.files import FileService, Owner
 from gateway.pipeline.parsing import ParseService, file_id_of
 
@@ -98,14 +100,39 @@ def _disposition(filename: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
-@router.post("/v1/files")
-async def upload_file(
-    caller: ModelCaller,
-    files: Files,
-    file: Annotated[UploadFile, File()],
-    purpose: Annotated[str, Form()] = "user_data",
-) -> FileOut:
-    return FileOut.of(await files.upload(file_owner(caller), file.filename, file.file, purpose))
+_UPLOAD_FORM: Final = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"},
+                        "purpose": {"type": "string", "default": "user_data"},
+                    },
+                }
+            }
+        },
+    }
+}
+
+
+@router.post("/v1/files", openapi_extra=_UPLOAD_FORM)
+async def upload_file(caller: HeavyCaller, files: Files, request: Request) -> FileOut:
+    # The form is read only once the caller is authenticated: FastAPI parses File and Form
+    # parameters before any dependency runs, so anyone could make the gateway spool a body.
+    async with request.form(max_files=1, max_fields=8) as form:
+        upload, purpose = form.get("file"), form.get("purpose", "user_data")
+        if not isinstance(upload, UploadFile):
+            raise InvalidInput(
+                "send the file in the multipart field `file`", code="missing_file", param="file"
+            )
+        if not isinstance(purpose, str):
+            raise InvalidInput("purpose must be text", code="invalid_purpose", param="purpose")
+        record = await files.upload(file_owner(caller), upload.filename, upload.file, purpose)
+    return FileOut.of(record)
 
 
 @router.get("/v1/files")
@@ -177,7 +204,7 @@ class MarkdownOut(BaseModel):
 
 
 @router.get("/v1/files/{file_id}/markdown")
-async def file_markdown(file_id: str, caller: ModelCaller, parsing: Parsing) -> MarkdownOut:
+async def file_markdown(file_id: str, caller: HeavyCaller, parsing: Parsing) -> MarkdownOut:
     """The file converted to Markdown (US-15): parsed once per content, backend, backend version
     and options, then served from the parse cache."""
     derived = await parsing.derive(file_owner(caller), file_id_of(file_id))

@@ -20,9 +20,9 @@ from gateway.adapters.postgres.documents import (
     NewChunk,
     NewDocument,
 )
-from gateway.domain.errors import InvalidInput, NotFound
+from gateway.domain.errors import Forbidden, InvalidInput, NotFound
 from gateway.domain.llm import CanonicalRequest, Message, TextPart
-from gateway.domain.parsing import text_tokens
+from gateway.domain.parsing import indexable_text, text_tokens
 from gateway.domain.retrieval import Hit, chunk_text, retrieved_context
 from gateway.pipeline.files import Owner
 from gateway.pipeline.parsing import ParseService
@@ -35,6 +35,12 @@ _MAX_QUERY_CHARS: Final = 4_000
 class Author:
     owner: Owner
     groups: frozenset[str]  # the groups the document is shared with (already authorized)
+
+
+@dataclass(frozen=True, slots=True)
+class Ingested:
+    record: DocumentRecord
+    warnings: tuple[str, ...] = ()  # what was left out of the index, and why
 
 
 def with_retrieved(req: CanonicalRequest, hits: Sequence[Hit]) -> CanonicalRequest:
@@ -67,6 +73,7 @@ class RetrievalService:
         parsing: ParseService,
         metrics: GatewayMetrics,
         max_k: int = 50,
+        max_chunks_per_org: int = 1_000_000,
     ) -> None:
         self._db = db
         self._repo = repo
@@ -74,23 +81,40 @@ class RetrievalService:
         self._parsing = parsing
         self._metrics = metrics
         self._max_k = max_k
+        self._max_chunks = max_chunks_per_org
 
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
 
     async def ingest(
         self, author: Author, title: str, text: str | None, file_id: UUID | None
-    ) -> DocumentRecord:
+    ) -> Ingested:
         if (text is None) == (file_id is None):
             raise InvalidInput("send either text or file_id", param="text")
+        warnings: tuple[str, ...] = ()
         if file_id is not None:
-            text = (await self._parsing.derive(author.owner, file_id)).artifact.markdown
+            artifact = (await self._parsing.derive(author.owner, file_id)).artifact
+            text, kept = indexable_text(artifact.markdown, artifact.pages)
+            if kept:
+                pages = ", ".join(map(str, kept))
+                warnings = (f"pages read with low confidence are not indexed: {pages}",)
         chunks = chunk_text(text or "")
         if not chunks:
-            raise InvalidInput("the document has no text to index", code="empty_document")
+            reason = "; pages read with low confidence are not indexed" if warnings else ""
+            raise InvalidInput(f"the document has no text to index{reason}", code="empty_document")
+        owner = author.owner
+        async with self._db.transaction(self._ctx(owner)) as conn:
+            held = await self._repo.indexed_chunks(conn)
+        # shortcut: concurrent ingests can pass the quota together by their own sizes; exact
+        # accounting would need a per-org lock held across the (slow) embedding call.
+        if held + len(chunks) > self._max_chunks:
+            raise Forbidden(
+                f"the organisation's index holds {held} chunks and this document adds"
+                f" {len(chunks)}, past the limit of {self._max_chunks}; delete documents first",
+                code="index_quota_exceeded",
+            )
         vectors = await self._embedder.embed(chunks)
         counted = [text_tokens(c) for c in chunks]
-        owner = author.owner
         document = NewDocument(
             id=uuid7(),
             title=title,
@@ -109,7 +133,7 @@ class RetrievalService:
         async with self._db.transaction(self._ctx(owner)) as conn:
             record = await self._repo.insert(conn, document, rows)
         self._metrics.retrievals.labels("ingest").inc()
-        return record
+        return Ingested(record, warnings)
 
     async def search(
         self, owner: Owner, groups: frozenset[str], query: str, k: int, *, source: str = "api"

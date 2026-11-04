@@ -83,6 +83,12 @@ SELECT h.id AS chunk_id, h.document_id, d.title, h.content, h.token_count,
 FROM hits h JOIN documents d ON d.id = h.document_id
 ORDER BY h.distance
 """
+# "+ 0" hides the ordering from the HNSW index: an exact scan of the chunks the caller may read.
+_SEARCH_EXACT: Final = _SEARCH.replace(
+    "ORDER BY embedding <=> CAST(:query AS vector)",
+    "ORDER BY (embedding <=> CAST(:query AS vector)) + 0",
+)
+_COUNT: Final = "SELECT count(*) AS n FROM chunks"
 _LIST: Final = """
 SELECT id, title, file_id, acl_groups, created_by, api_key_id, embedding_model, chunk_count,
        token_count, created_at
@@ -155,12 +161,19 @@ class DocumentRepository:
     ) -> list[Hit]:
         for statement in _TUNE:
             await conn.execute(text(statement))
-        rows = await fetch_all(
-            conn,
-            _SEARCH,
-            {"query": _vector(query), "groups": sorted(groups), "model": model, "k": k},
-        )
+        params = {"query": _vector(query), "groups": sorted(groups), "model": model, "k": k}
+        rows = await fetch_all(conn, _SEARCH, params)
+        if len(rows) < k:
+            # The index scan gives up after hnsw.max_scan_tuples, so when the caller may read
+            # only a few of the org's chunks, the nearest of those can lie beyond it. Few
+            # readable chunks is exactly when the exact search (through the ACL index) is cheap.
+            rows = await fetch_all(conn, _SEARCH_EXACT, params)
         return [Hit(**dict(row)) for row in rows]
+
+    async def indexed_chunks(self, conn: AsyncConnection) -> int:
+        """How many chunks the org has indexed (row-level security scopes the count)."""
+        row = await fetch_one(conn, _COUNT, {})
+        return int(row["n"]) if row is not None else 0
 
     async def visible(
         self, conn: AsyncConnection, *, groups: frozenset[str], limit: int

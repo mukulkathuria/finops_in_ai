@@ -219,6 +219,7 @@ def build_container(
         ),
         parsing=parse_service,
         metrics=observability.metrics,
+        max_chunks_per_org=settings.max_indexed_chunks_per_org,
     )
     credentials = CredentialRepository()
     teams = TeamRepository()

@@ -2,13 +2,17 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from datetime import UTC, datetime
+from typing import Annotated, Any, BinaryIO
 from uuid import uuid7
 
 import httpx2
 import pytest
 from fastapi import Depends, FastAPI
 
+from gateway.adapters.postgres.files import FileRecord
+from gateway.api import files as files_api
+from gateway.api.caller import Caller, require_heavy_access
 from gateway.api.deps import current_principal, require
 from gateway.api.errors import install_error_handlers
 from gateway.domain.audit import AuditEvent
@@ -77,6 +81,60 @@ async def _get(app: FastAPI, path: str) -> httpx2.Response:
     transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx2.AsyncClient(transport=transport, base_url="http://t") as client:
         return await client.get(path)
+
+
+class _Uploads:
+    """Stands in for the file service: records what the upload route passed on."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str | None, bytes, str]] = []
+
+    async def upload(
+        self, owner: object, filename: str | None, file: BinaryIO, purpose: str
+    ) -> FileRecord:
+        self.seen.append((filename, file.read(), purpose))
+        return FileRecord(
+            uuid7(), None, None, filename or "", "text", "text/plain", 2, bytes(32), None,
+            purpose, "k", datetime.now(UTC),
+        )  # fmt: skip
+
+
+def _files_app(uploads: _Uploads | None = None) -> FastAPI:
+    app = FastAPI()
+    install_error_handlers(app)
+    app.state.container = object()  # nothing may be needed before the credential is checked
+    app.include_router(files_api.router)
+    if uploads is not None:  # an authenticated caller
+        caller = Caller(uuid7(), None, uuid7(), uuid7(), frozenset({"models:use"}), "api_key")
+        app.dependency_overrides[require_heavy_access] = lambda: caller
+        app.dependency_overrides[files_api.get_files] = lambda: uploads
+    return app
+
+
+async def _upload(app: FastAPI, **request: Any) -> httpx2.Response:
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://t") as client:
+        return await client.post("/v1/files", **request)
+
+
+async def test_an_upload_is_not_read_before_the_caller_is_authenticated() -> None:
+    multipart = {"content-type": "multipart/form-data; boundary=x"}
+    resp = await _upload(_files_app(), content=b"garbage", headers=multipart)
+    assert (resp.status_code, resp.json()["error"]["code"]) == (401, "missing_token")
+
+
+async def test_the_upload_form_holds_one_file_and_says_what_is_missing() -> None:
+    uploads = _Uploads()
+    app = _files_app(uploads)
+    one = {"file": ("a.txt", b"hi", "text/plain")}
+    ok = await _upload(app, files=one, data={"purpose": "assistants"})
+    assert ok.status_code == 200, ok.text
+    assert uploads.seen == [("a.txt", b"hi", "assistants")]
+    missing = await _upload(app, data={"purpose": "assistants"})
+    assert (missing.status_code, missing.json()["error"]["code"]) == (422, "missing_file")
+    two = [("file", ("a.txt", b"1", "text/plain")), ("file", ("b.txt", b"2", "text/plain"))]
+    assert (await _upload(app, files=two)).status_code == 400
+    assert len(uploads.seen) == 1
 
 
 async def test_guard_allows_granted_permission(clients: tuple[FastAPI, FastAPI]) -> None:

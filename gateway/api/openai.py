@@ -291,11 +291,17 @@ async def chat_completions(
     body = _validate(ChatRequest, await _json(request))
     resolved = await chat.resolve(body.model, "chat", caller.org_id)
     requested = body.max_completion_tokens or body.max_tokens or chat.default_max_tokens
-    limit = resolved.entry.max_output_tokens or requested
-    # Attachments become Markdown before the budget hold and the guardrails see the request.
-    attached = await parsing.attach(file_owner(caller), _file_ids(body.messages))
-    req = _canonical(body, resolved.entry.model, min(requested, limit), attached.parts)
+    max_tokens = min(requested, resolved.entry.max_output_tokens or requested)
     who = _who(caller, request)
+    file_ids = _file_ids(body.messages)
+    if file_ids or body.retrieval is not None:
+        # Converting attachments and embedding the question is work no budget pays for: what
+        # the budgets cannot cover even without them is refused first.
+        bare = _canonical(body, resolved.entry.model, max_tokens, dict.fromkeys(file_ids, ()))
+        await chat.precheck(who, resolved, bare)
+    # Attachments become Markdown before the budget hold and the guardrails see the request.
+    attached = await parsing.attach(file_owner(caller), file_ids)
+    req = _canonical(body, resolved.entry.model, max_tokens, attached.parts)
     headers = {
         "x-finops-provider": resolved.entry.provider,
         "x-finops-model": resolved.entry.public_name,
@@ -314,9 +320,10 @@ async def chat_completions(
             body.retrieval.k,
             source="chat",
         )
+        hits, dropped = await chat.passages(caller.org_id, hits)
         req = with_retrieved(req, hits)
         headers["x-finops-retrieved-chunks"] = str(len(hits))
-        notes = {**(notes or {}), "retrieval": retrieval_report(hits)}
+        notes = {**(notes or {}), "retrieval": {**retrieval_report(hits), "dropped": dropped}}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))

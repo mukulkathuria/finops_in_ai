@@ -2,6 +2,10 @@
 registry and the sidecar contract, against the stand-in sidecar and against failing ones."""
 
 import base64
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid7
 
 import httpx2
 import orjson
@@ -10,9 +14,18 @@ import pytest
 from gateway.adapters.parsers.registry import OCR_MIMES, OFFICE_MIMES, build_parsers
 from gateway.adapters.parsers.sidecar import SidecarParser
 from gateway.adapters.parsers.text import TextParser
+from gateway.adapters.postgres.artifacts import Artifact
+from gateway.adapters.postgres.files import FileRecord
 from gateway.adapters.resilience import CircuitBreaker
 from gateway.domain.errors import InvalidInput, Unavailable
-from gateway.domain.parsing import ParseOptions, StoredDocument, image_tokens, text_tokens
+from gateway.domain.parsing import (
+    ParseOptions,
+    StoredDocument,
+    image_tokens,
+    indexable_text,
+    text_tokens,
+)
+from gateway.pipeline.parsing import MAX_IMAGE_BYTES_PER_REQUEST, Derived, ParseService
 from tests.support import fake_docparse
 from tests.unit.test_files import office, pdf, text_pdf
 
@@ -185,3 +198,58 @@ async def test_office_files_and_text_files() -> None:
     text = "﻿# Title\nbody".encode()
     plain = await TextParser().parse(StoredDocument("a.md", "text", "text/markdown", text), OPTIONS)
     assert (plain.markdown, plain.pages[0].method) == ("# Title\nbody", "text")
+
+
+def test_the_index_leaves_out_the_stand_ins_for_pages_kept_as_images() -> None:
+    markdown = (
+        "Revenue grew.\n\n[page 2 is attached as an image]\n\n"
+        "A note quoting [page 9 is attached as an image] verbatim."
+    )
+    pages = [{"page": 1, "kept_original": False}, {"page": 2, "kept_original": True}]
+    text, kept = indexable_text(markdown, pages)
+    assert kept == [2]
+    assert "[page 2 is attached" not in text
+    assert "[page 9 is attached as an image]" in text  # page 9 was not kept: real text
+
+
+class _Images:
+    """An object store holding one page image of `size` bytes under every key."""
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+
+    async def stream(self, key: str) -> AsyncIterator[bytes]:
+        async def chunks() -> AsyncIterator[bytes]:
+            yield bytes(self.size)
+
+        return chunks()
+
+
+def _scan(page_image_size: int) -> Derived:
+    now = datetime.now(UTC)
+    record = FileRecord(
+        uuid7(), None, None, "scan.pdf", "pdf", "application/pdf", 1, bytes(32), 1,
+        "user_data", "k", now,
+    )  # fmt: skip
+    page = {"page": 1, "kept_original": True, "image_key": f"img-{page_image_size}"}
+    markdown = "[page 1 is attached as an image]"
+    artifact = Artifact(uuid7(), "glm_ocr", "1", markdown, [page], [], 1, 1, 0.0, now)
+    return Derived(record, artifact, cached=True)
+
+
+async def test_attached_page_images_are_capped_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    image = 8 << 20  # the largest page image the sidecar client accepts
+    service: Any = ParseService.__new__(ParseService)
+    service._store = _Images(image)
+
+    async def derive(owner: object, file_id: UUID) -> Derived:
+        return _scan(image)
+
+    monkeypatch.setattr(service, "derive", derive)
+    fits = MAX_IMAGE_BYTES_PER_REQUEST // image
+    refs = [f"file-{uuid7().hex}" for _ in range(fits + 1)]
+    attached = await ParseService.attach(service, object(), refs[:fits])
+    assert sum(len(parts) for parts in attached.parts.values()) == 2 * fits  # frame and image
+    with pytest.raises(InvalidInput) as exc:
+        await ParseService.attach(service, object(), refs)
+    assert exc.value.code == "attachments_too_large"

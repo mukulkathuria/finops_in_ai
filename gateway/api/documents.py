@@ -6,6 +6,7 @@ returns the nearest chunks the caller may see: the permission filter runs inside
 search itself. A chat request asks for retrieval with `"retrieval": {"k": 5}` (see openai.py).
 """
 
+from collections.abc import Sequence
 from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from gateway.adapters.postgres.documents import DocumentRecord
-from gateway.api.caller import AnyCaller, Caller, ModelCaller
+from gateway.api.caller import AnyCaller, Caller, HeavyCaller, ModelCaller
 from gateway.api.files import file_owner
 from gateway.domain.errors import NotFound
 from gateway.domain.policy import Permission
@@ -63,9 +64,10 @@ class DocumentOut(BaseModel):
     tokens: int
     embedding_model: str
     created_at: int
+    warnings: list[str] = Field(default_factory=list)  # what the index left out, and why
 
     @classmethod
-    def of(cls, d: DocumentRecord) -> DocumentOut:
+    def of(cls, d: DocumentRecord, warnings: Sequence[str] = ()) -> DocumentOut:
         return cls(
             id=d.id,
             title=d.title,
@@ -75,6 +77,7 @@ class DocumentOut(BaseModel):
             tokens=d.token_count,
             embedding_model=d.embedding_model,
             created_at=int(d.created_at.timestamp()),
+            warnings=list(warnings),
         )
 
 
@@ -112,7 +115,7 @@ def _default_group(caller: Caller) -> str:
 
 @router.post("/v1/documents")
 async def create_document(
-    body: DocumentIn, caller: ModelCaller, retrieval: Retrieval
+    body: DocumentIn, caller: HeavyCaller, retrieval: Retrieval
 ) -> DocumentOut:
     access = Access(
         org=body.access.org,
@@ -127,10 +130,10 @@ async def create_document(
         admin=caller.can(Permission.ORG_MANAGE),
     )
     file_id = file_id_of(body.file_id) if body.file_id is not None else None
-    record = await retrieval.ingest(
+    ingested = await retrieval.ingest(
         Author(file_owner(caller), groups), body.title, body.text, file_id
     )
-    return DocumentOut.of(record)
+    return DocumentOut.of(ingested.record, ingested.warnings)
 
 
 @router.get("/v1/documents")

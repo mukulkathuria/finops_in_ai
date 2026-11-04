@@ -22,7 +22,15 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -57,6 +65,7 @@ from gateway.domain.llm import (
     Usage,
 )
 from gateway.domain.pricing import ModelKind, ModelPrice
+from gateway.domain.retrieval import Hit
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
 from gateway.ports.llm import LLMAdapter
@@ -68,6 +77,12 @@ _MAX_BACKOFF_S: Final = 4.0
 HOLD_TTL: Final = timedelta(minutes=15)
 # A dropped connection, a pool or statement timeout or a deadlock: worth another attempt.
 _TRANSIENT: Final = (OperationalError, InterfaceError, PoolTimeoutError)
+
+
+class _RolledBack(Exception):
+    """Ends a transaction that must leave nothing behind (a budget precheck)."""
+
+
 _DB_ATTEMPTS: Final = 3
 
 
@@ -299,7 +314,12 @@ class _Relay:
         call, usage = self._call, self._usage
         if usage is None or usage.estimated:
             prompt = "".join(m.text() for m in self._req.messages)
+            # What the guardrail still held when the stream failed was never sent, but the model
+            # produced it, so it counts (after a normal end the tail has already been sent).
+            tail = self._held() or CanonicalChunk()
+            held = (tail.content or "") + "".join(d.arguments for d in tail.tool_calls)
             output = "".join(self._produced) + "".join(c[1] + c[2] for c in self._calls.values())
+            output += held
             usage = Usage(
                 input_tokens=estimate_tokens(prompt),
                 output_tokens=estimate_tokens(output),
@@ -458,6 +478,39 @@ class ChatService:
                 span.set_attribute("finops.idempotent_replay", True)
                 return stored
         return _Call(who, r, kind, holds[-1], time.perf_counter(), idem, notes=dict(notes or {}))
+
+    async def precheck(self, who: Attribution, r: Resolved, req: CanonicalRequest) -> None:
+        """Refuse a request its budgets cannot cover before any costly preparation (converting
+        attachments, embedding the question): the worst-case hold for the request as sent is
+        taken and rolled back. The real hold, with everything attached, follows."""
+
+        async def work(conn: AsyncConnection) -> None:
+            await self._budgets.reserve(
+                conn,
+                hold=str(uuid7()),
+                team_id=who.team_id,
+                user_id=who.user_id,
+                demand=chat_demand(r.entry, req),
+                at=who.at,
+                expires_at=who.at + HOLD_TTL,
+            )
+            raise _RolledBack  # leaves nothing behind
+
+        with self._telemetry.stage("budget.precheck") as span:
+            try:
+                await self._transact(who, work)
+            except _RolledBack:
+                pass
+            except BudgetExceeded as exc:
+                self._telemetry.budget_refused(span, exc)
+                raise
+
+    async def passages(
+        self, org_id: UUID, hits: Sequence[Hit]
+    ) -> tuple[list[Hit], list[dict[str, str]]]:
+        """The retrieved passages the organisation's policy lets into a prompt, and the dropped
+        ones with the rule that dropped them."""
+        return await self._guardrails.screen_passages(org_id, hits)
 
     async def _end(
         self,

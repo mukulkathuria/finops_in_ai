@@ -47,6 +47,7 @@ from gateway.ports.storage import ObjectStore
 
 log = logging.getLogger(__name__)
 MAX_FILES_PER_REQUEST: Final = 20
+MAX_IMAGE_BYTES_PER_REQUEST: Final = 20 << 20  # kept page images inlined into one request
 
 
 def file_id_of(reference: str) -> UUID:
@@ -273,10 +274,15 @@ class ParseService:
             if isinstance(result, BaseException):
                 raise result
             derived.append(result)
-        parts = {r: await self._parts(d) for r, d in zip(references, derived, strict=True)}
+        parts: dict[str, tuple[ContentPart, ...]] = {}
+        room = MAX_IMAGE_BYTES_PER_REQUEST
+        for reference, d in zip(references, derived, strict=True):
+            parts[reference], room = await self._parts(d, room)
         return Attached(parts, tuple(d.report() for d in derived))
 
-    async def _parts(self, derived: Derived) -> tuple[ContentPart, ...]:
+    async def _parts(self, derived: Derived, room: int) -> tuple[tuple[ContentPart, ...], int]:
+        """The document frame and its kept page images, and what is left of the request's room
+        for images: each image is read whole, so the room bounds the request's memory."""
         record, artifact = derived.file, derived.artifact
         name = html.escape(record.filename, quote=True)
         body = neutralize_frames(artifact.markdown)  # the document cannot close its frame
@@ -290,5 +296,13 @@ class ParseService:
                 data, mime = await self._read(record.storage_key), record.mime
             else:
                 continue
+            room -= len(data)
+            if room < 0:
+                raise InvalidInput(
+                    f"the attached files' page images pass {MAX_IMAGE_BYTES_PER_REQUEST >> 20} MiB"
+                    " for one request; attach fewer files",
+                    code="attachments_too_large",
+                    param="messages",
+                )
             parts.append(ImagePart(f"data:{mime};base64,{base64.b64encode(data).decode()}"))
-        return tuple(parts)
+        return tuple(parts), room

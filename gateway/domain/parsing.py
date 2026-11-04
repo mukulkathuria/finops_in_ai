@@ -8,8 +8,10 @@ are estimates of what a model is charged for the original and for the derived fo
 import hashlib
 import json
 import math
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 PageMethod = Literal["text", "text_layer", "markitdown", "ocr"]
 PAGE_IMAGE_TOKENS: Final = 1_600  # a document page sent to a vision model as an image, about
@@ -62,6 +64,19 @@ class ParsedDocument:
 def text_tokens(text: str) -> int:
     """About four characters per token: the estimate used when nothing better is known."""
     return (len(text) + 3) // 4
+
+
+# The parser contract puts this paragraph in place of the text of a page kept as an image.
+_KEPT_PAGE: Final = re.compile(r"\[page (\d+) is attached as an image\]")
+
+
+def indexable_text(markdown: str, pages: Sequence[Mapping[str, Any]]) -> tuple[str, list[int]]:
+    """A document's text without the stand-ins for pages kept as images (they say nothing about
+    those pages), and the numbers of those pages."""
+    kept = sorted({int(p["page"]) for p in pages if p.get("kept_original")})
+    numbers = set(kept)
+    text = _KEPT_PAGE.sub(lambda m: "" if int(m[1]) in numbers else m[0], markdown)
+    return text, kept
 
 
 def image_tokens(width: int, height: int) -> int:
