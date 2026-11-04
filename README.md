@@ -218,6 +218,14 @@ the model and charges nothing. It carries `x-finops-cache: exact|semantic`, and 
 shows it as `exact_cache` or `semantic_cache` with what the answer would have cost. Only complete
 answers without tool calls are kept, for `ttl_s` seconds.
 
+Provider prompt caching is on by default; `"provider_cache": false` in the same settings turns it
+off. Requests are marked for the provider's own cache. For Anthropic that means one breakpoint on
+the system prompt (or, without one, the last tool) and, in a conversation, one on the newest turn,
+so the next turn reads everything before it at the cached price. A single question is not marked:
+writing it costs more than plain input and nothing would read it. OpenAI and Gemini cache on their
+own. The ledger records cache reads and writes, and the savings report shows the result as
+`provider_cache` (reads save; writes cost the premium).
+
 ## Routing (a cheaper model, with a quality check)
 
 The router is the optimization stage `router`: it ships `off`, can run in `shadow`, and goes `on`

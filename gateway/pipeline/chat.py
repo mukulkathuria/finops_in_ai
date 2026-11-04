@@ -76,6 +76,7 @@ from gateway.domain.savings import (
     file_conversion_report,
     overhead_cost,
     overhead_inputs,
+    provider_cache_report,
 )
 from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.cache import CacheHit, Lookup, ResponseCache
@@ -225,13 +226,15 @@ def _route_tier(reports: Sequence[StageReport]) -> str | None:
 
 
 def _price_route(reports: list[StageReport], catalog: Catalog, used: Usage) -> None:
-    """Price the router's choice on the tokens the request used (it reports zero until then)."""
+    """Price the router's choice on the tokens the request used, at full price (it reports
+    zero until then; the provider's cache reports its own discount)."""
+    full = Usage(input_tokens=used.input_tokens, output_tokens=used.output_tokens)
     for i, report in enumerate(reports):
         if report.stage == ROUTER and report.applied:
             small = catalog.resolve(str(report.decisions.get("to")))
             large = catalog.resolve(str(report.decisions.get("from")))
             if small is not None and large is not None:
-                delta = small.cost(used) - large.cost(used)
+                delta = small.cost(full) - large.cost(full)
                 reports[i] = replace(report, cost_delta_micro_usd=delta)
 
 
@@ -727,6 +730,19 @@ class ChatService:
             await self._block(call, inspection.blocked)
         return inspection
 
+    async def _with_prompt_cache(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
+        """Ask the provider to cache the request's stable prefix, unless the org turned that
+        off. Unreadable settings leave the request unmarked."""
+        try:
+            wanted = await self._cache.provider_cache(call.who.org_id)
+        except Exception:
+            log.exception(
+                "cache settings unavailable; the prompt is not marked",
+                extra={"request_id": call.who.request_id},
+            )
+            return req
+        return replace(req, prompt_cache=True) if wanted else req
+
     async def _cached(self, call: _Call, req: CanonicalRequest) -> CacheHit | None:
         """Spec section 4, step 6: an answer from the cache, exact first, then semantic, inside
         the request's org and permission scope. A cache failure is a miss, never an error."""
@@ -881,6 +897,8 @@ class ChatService:
         if "judge" in call.notes or (not charged and counterfactual is None):
             return 0, overhead  # a quality check saves nothing: all of it is overhead
         used = counterfactual or usage
+        if charged and (prompt_cache := provider_cache_report(call.r.entry, usage)):
+            call.reports.append(prompt_cache)
         price = call.requested or call.r.entry  # the model asked for, before routing
         try:
             catalog = await self._catalog.get()
@@ -938,6 +956,7 @@ class ChatService:
             stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
             await self._settle(self._served(call, hit, stored))
             return ChatResult(hit.response, 0, call.origin, cache_hit=hit.kind)
+        req = await self._with_prompt_cache(call, req)
         with self._telemetry.provider_call(
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
@@ -981,6 +1000,7 @@ class ChatService:
             await self._settle(self._served(call, hit, stored))
             replay = _replay_stream(hit.response, 0, outcome)
             return StreamResult(replay, call.origin, cache_hit=hit.kind)
+        req = await self._with_prompt_cache(call, req)
         current: list[AsyncIterator[CanonicalChunk]] = []
 
         async def open_stream() -> CanonicalChunk | None:

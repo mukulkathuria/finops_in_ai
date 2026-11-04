@@ -189,6 +189,45 @@ async def test_anthropic_never_sends_sampling_parameters() -> None:
     assert not harness.adapter.capabilities("any").sampling_params
 
 
+async def test_anthropic_marks_the_stable_prefix_for_its_prompt_cache() -> None:
+    harness = build("anthropic")
+    marker = {"type": "ephemeral"}
+    conversation = (
+        Message("system", (TextPart("You are terse."),)),
+        Message("user", (TextPart("Weather?"),)),
+        Message("assistant", (TextPart("Where?"),)),
+        Message("user", (TextPart("Paris"),)),
+    )
+    req = CanonicalRequest("text", conversation, 32, tools=(WEATHER,), prompt_cache=True)
+    await harness.adapter.complete(req)
+    body = harness.requests[-1]["body"]
+    assert body["system"] == [{"type": "text", "text": "You are terse.", "cache_control": marker}]
+    assert "cache_control" not in body["tools"][-1]  # the system breakpoint covers the tools
+    assert body["messages"][-1]["content"][-1]["cache_control"] == marker  # the turn so far
+    assert orjson.dumps(body).decode().count("cache_control") == 2
+
+    question = (Message("user", (TextPart("Hi"),)),)
+    single = CanonicalRequest("text", question, 32, tools=(WEATHER,), prompt_cache=True)
+    await harness.adapter.complete(single)
+    body = harness.requests[-1]["body"]
+    assert body["tools"][-1]["cache_control"] == marker  # no system prompt: the tools
+    assert "cache_control" not in orjson.dumps(body["messages"]).decode()  # a one-off question
+
+    await harness.adapter.complete(_req("text"))
+    body = harness.requests[-1]["body"]
+    assert "cache_control" not in orjson.dumps(body).decode()
+    assert body["system"] == "You are terse."
+
+
+async def test_providers_that_cache_on_their_own_ignore_the_marker(harness: Harness) -> None:
+    if harness.name == "anthropic":
+        return
+    await harness.adapter.complete(_req("text", tools=True))
+    plain = harness.requests[-1]["body"]
+    await harness.adapter.complete(_req("text", tools=True, prompt_cache=True))
+    assert harness.requests[-1]["body"] == plain
+
+
 async def test_gemini_thought_signatures_survive_the_round_trip() -> None:
     harness = build("gemini")
     [call] = (await harness.adapter.complete(_req("tools", tools=True))).tool_calls

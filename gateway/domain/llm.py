@@ -69,6 +69,9 @@ class CanonicalRequest:
     forced_tool: str | None = None
     response_format: dict[str, Any] | None = None
     seed: int | None = None
+    # Mark the stable prefix (tools, system prompt, the conversation so far) for the
+    # provider's prompt cache; providers that cache on their own ignore it.
+    prompt_cache: bool = False
 
 
 @dataclass(frozen=True, slots=True)

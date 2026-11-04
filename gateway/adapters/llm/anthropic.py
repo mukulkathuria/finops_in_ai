@@ -82,6 +82,23 @@ def _json_object(arguments: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _mark_cacheable(params: dict[str, Any], *, multi_turn: bool) -> None:
+    """Prompt caching is a prefix match over tools, then system, then messages. A breakpoint on
+    the system prompt (or, without one, the last tool) caches what every request of an app
+    shares; in a conversation one on the newest turn lets the next turn read all before it. A
+    single question is left unmarked: writing it costs more and nothing would read it."""
+    if "system" in params:
+        params["system"] = [
+            {"type": "text", "text": params["system"], "cache_control": {"type": "ephemeral"}}
+        ]
+    elif params.get("tools"):
+        params["tools"][-1]["cache_control"] = {"type": "ephemeral"}
+    if multi_turn:
+        last = params["messages"][-1]["content"][-1]
+        if last.get("type") != "text" or last.get("text"):  # an empty text block cannot be marked
+            last["cache_control"] = {"type": "ephemeral"}
+
+
 class AnthropicAdapter:
     def __init__(
         self,
@@ -166,6 +183,9 @@ class AnthropicAdapter:
             params["tool_choice"] = {
                 "type": {"auto": "auto", "none": "none", "required": "any"}[req.tool_choice]
             }
+        if req.prompt_cache:
+            multi_turn = any(m.role == "assistant" for m in req.messages)
+            _mark_cacheable(params, multi_turn=multi_turn)
         return params
 
     async def complete(self, req: CanonicalRequest) -> CanonicalResponse:

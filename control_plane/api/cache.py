@@ -16,6 +16,7 @@ class CacheSettingsOut(BaseModel):
     mode: str
     ttl_s: int
     threshold: float
+    provider_cache: bool
 
 
 class CacheSettingsIn(BaseModel):
@@ -25,6 +26,7 @@ class CacheSettingsIn(BaseModel):
     mode: Literal["off", "exact", "semantic"] | None = None
     ttl_s: int | None = Field(default=None, ge=60, le=30 * 86_400)
     threshold: float | None = Field(default=None, ge=0.8, le=1.0)
+    provider_cache: bool | None = None
 
 
 def _out(settings: CacheSettings) -> CacheSettingsOut:

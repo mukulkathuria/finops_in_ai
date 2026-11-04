@@ -96,3 +96,21 @@ def file_conversion_report(files: object, price: ModelPrice) -> StageReport | No
         applied=before != after,
         decisions={"files": len(reports), "kept_pages": kept},
     )
+
+
+def provider_cache_report(price: ModelPrice, usage: Usage) -> StageReport | None:
+    """The provider's prompt cache, reported as a stage once the request is priced: what reads
+    at the cached price saved and writes at the write premium cost, against full price."""
+    if not (usage.cached_tokens or usage.cache_write_tokens):
+        return None
+    full = Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+    return StageReport(
+        "provider_cache",
+        "1",
+        "post_llm",
+        0,
+        0,
+        price.cost(usage) - price.cost(full),
+        applied=True,
+        decisions={"read": usage.cached_tokens, "written": usage.cache_write_tokens},
+    )

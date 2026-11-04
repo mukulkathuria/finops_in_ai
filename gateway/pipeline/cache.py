@@ -55,6 +55,10 @@ class ResponseCache:
         self._policies = policies
         self._embedder = embedder
 
+    async def provider_cache(self, org_id: UUID) -> bool:
+        """Whether the org lets requests mark their stable prefix for the provider's cache."""
+        return (await self._settings.get(org_id)).provider_cache
+
     async def prepare(
         self, *, org_id: UUID, team_id: UUID | None, user_id: UUID | None, req: CanonicalRequest
     ) -> Lookup | None:

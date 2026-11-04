@@ -30,6 +30,7 @@ class CacheSettings:
     mode: CacheMode = "off"
     ttl_s: int = 86_400
     threshold: float = 0.95  # the cosine similarity a semantic match needs
+    provider_cache: bool = True  # mark stable prompt prefixes for the provider's cache
 
     def __post_init__(self) -> None:
         if self.mode not in CACHE_MODES:
@@ -40,7 +41,12 @@ class CacheSettings:
             raise ValueError("threshold is between 0.8 and 1")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"mode": self.mode, "ttl_s": self.ttl_s, "threshold": self.threshold}
+        return {
+            "mode": self.mode,
+            "ttl_s": self.ttl_s,
+            "threshold": self.threshold,
+            "provider_cache": self.provider_cache,
+        }
 
     @classmethod
     def parse(cls, raw: Mapping[str, Any] | None) -> CacheSettings:
@@ -52,6 +58,7 @@ class CacheSettings:
                 mode=raw.get("mode", "off"),
                 ttl_s=int(raw.get("ttl_s", 86_400)),
                 threshold=float(raw.get("threshold", 0.95)),
+                provider_cache=bool(raw.get("provider_cache", True)),
             )
         except TypeError, ValueError:
             return cls()
