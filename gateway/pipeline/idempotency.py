@@ -17,16 +17,26 @@ class Origin:
     request_id: str
     at: datetime
     replayed: bool = False
+    model: str | None = None  # the model that answered, when the router picked another
 
 
 def _envelope(origin: Origin, cost: int, body: dict[str, Any]) -> bytes:
+    served = {"served": origin.model} if origin.model else {}
     return orjson.dumps(
-        {"request_id": origin.request_id, "at": origin.at.isoformat(), "cost": cost, **body}
+        {
+            "request_id": origin.request_id,
+            "at": origin.at.isoformat(),
+            "cost": cost,
+            **served,
+            **body,
+        }
     )
 
 
 def _origin(stored: dict[str, Any]) -> Origin:
-    return Origin(str(stored["request_id"]), datetime.fromisoformat(stored["at"]), replayed=True)
+    at, served = datetime.fromisoformat(stored["at"]), stored.get("served")
+    model = str(served) if served else None
+    return Origin(str(stored["request_id"]), at, replayed=True, model=model)
 
 
 def dump_chat(origin: Origin, cost: int, response: CanonicalResponse) -> bytes:

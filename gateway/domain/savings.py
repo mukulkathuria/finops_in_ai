@@ -58,7 +58,7 @@ def overhead_inputs(
         and d.get("action") in _CLASSIFIER_CALLED
     )
     embedded = 0
-    for step in ("retrieval", "cache"):  # questions embedded to retrieve or to match
+    for step in ("retrieval", "cache", "judge"):  # embedded to retrieve, match or compare
         record = notes.get(step)
         if isinstance(record, Mapping):
             embedded += int(record.get("query_tokens") or 0)

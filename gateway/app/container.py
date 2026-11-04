@@ -18,6 +18,7 @@ from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
+from control_plane.services.routing import RoutingService
 from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
 from control_plane.services.stages import StageAdminService
@@ -45,6 +46,7 @@ from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
+from gateway.adapters.postgres.routing import RoutingRepository, RoutingSettingsCache
 from gateway.adapters.postgres.savings import BaselineModels, SavingsRepository
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.stages import StageModeCache, StageRepository
@@ -66,6 +68,7 @@ from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.parsing import ParseService
 from gateway.pipeline.retrieval import RetrievalService
+from gateway.pipeline.routing import RouterStage, Verifier
 from gateway.pipeline.stages import CompressionStage, StageRunner
 from gateway.pipeline.usage import UsageReporter
 from gateway.ports.storage import ObjectStore
@@ -99,6 +102,7 @@ class Container:
     stage_admin_service: StageAdminService
     savings_service: SavingsService
     cache_settings_service: CacheSettingsService
+    routing_service: RoutingService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -241,7 +245,11 @@ def build_container(
     cache_settings = CacheSettingsCache(db, cache_repo)
     stage_repo = StageRepository()
     stage_modes = StageModeCache(db, stage_repo)
-    stage_runner = StageRunner([CompressionStage()], stage_modes)
+    routing_repo = RoutingRepository()
+    routing_settings = RoutingSettingsCache(db, routing_repo)
+    stage_runner = StageRunner(
+        [CompressionStage(), RouterStage(routing_settings, catalog)], stage_modes
+    )
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
@@ -339,6 +347,7 @@ def build_container(
                 policies=policy_cache,
                 embedder=embedder,
             ),
+            verifier=Verifier(db=db, repo=routing_repo, embedder=embedder),
             org_adapters=OrgAdapters(
                 org_key_lookup(db, credentials, envelope), provider_configs, http
             ),
@@ -381,6 +390,14 @@ def build_container(
         ),
         cache_settings_service=CacheSettingsService(
             db=db, repo=cache_repo, cache=cache_settings, audit=audit, authz=authz
+        ),
+        routing_service=RoutingService(
+            db=db,
+            repo=routing_repo,
+            cache=routing_settings,
+            catalog=catalog,
+            audit=audit,
+            authz=authz,
         ),
         webhook_service=WebhookService(
             db=db,

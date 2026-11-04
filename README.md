@@ -218,6 +218,29 @@ the model and charges nothing. It carries `x-finops-cache: exact|semantic`, and 
 shows it as `exact_cache` or `semantic_cache` with what the answer would have cost. Only complete
 answers without tool calls are kept, for `ttl_s` seconds.
 
+## Routing (a cheaper model, with a quality check)
+
+The router is the optimization stage `router`: it ships `off`, can run in `shadow`, and goes `on`
+only after its eval run passed (see above). `PUT /v1/admin/routing-settings` with
+`{"large_model": "provider/model", "small_model": "provider/model", "threshold": 0.35,
+"judge_rate": 0.05, "tolerance": 0.15, "opt_out_teams": ["<team id>"]}` picks the two tiers (chat
+models of one provider). A request for the large tier whose complexity scores below the threshold
+goes to the small tier if that model can take the whole request (context window and output
+limit). The score comes from rules: length, code or tools, reasoning words and conversation depth.
+
+- The answer names the model that gave it (`model` and `x-finops-model`).
+- The ledger records `route_tier` (`small`, or `large` when the router kept the request there),
+  and the baseline stays at the model asked for, so the savings report shows the saving under
+  `router`.
+- A sampled share (`judge_rate`) of the requests the router sends to the small tier is answered by
+  the other tier too, in the background. In shadow the small tier answers on the side, so quality
+  is measured before cutover. The agreement of the two answers (the cosine similarity of their
+  embeddings) is stored, and `GET /v1/reports/routing?start=&end=` shows the samples, the mean
+  agreement and whether it is within the tolerance.
+- Each check is charged as its own ledger row (`<request id>.judge`) with no baseline, so it counts
+  against the router's savings. At most eight run at once; past that a sample is skipped.
+- A team in `opt_out_teams` is never routed.
+
 ## Savings (baseline versus actual)
 
 Every ledger row records a baseline: the request as the client sent it (its input before any

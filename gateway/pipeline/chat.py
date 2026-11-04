@@ -67,8 +67,9 @@ from gateway.domain.llm import (
     ToolCallDelta,
     Usage,
 )
-from gateway.domain.pricing import ModelKind, ModelPrice
+from gateway.domain.pricing import Catalog, ModelKind, ModelPrice
 from gateway.domain.retrieval import Hit
+from gateway.domain.routing import ROUTER
 from gateway.domain.savings import (
     OverheadRates,
     baseline_cost,
@@ -80,6 +81,7 @@ from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.cache import CacheHit, Lookup, ResponseCache
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
+from gateway.pipeline.routing import Verifier, said
 from gateway.pipeline.stages import StageRunner
 from gateway.ports.llm import LLMAdapter
 
@@ -97,6 +99,7 @@ class _RolledBack(Exception):
 
 
 _DB_ATTEMPTS: Final = 3
+_MAX_JUDGES: Final = 8  # quality checks in flight at once; past that a sample is skipped
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,10 +173,12 @@ class _Call:
     notes: dict[str, object] = field(default_factory=dict)  # more ledger flags (attachments)
     reports: list[StageReport] = field(default_factory=list)  # what the stages did
     cache: list[Lookup] = field(default_factory=list)  # the cache keys (at most one), if cached
+    requested: ModelPrice | None = None  # the model asked for, when the router picked `r`
 
     @property
     def origin(self) -> Origin:
-        return Origin(self.who.request_id, self.who.at)
+        served = self.r.entry.public_name if self.requested is not None else None
+        return Origin(self.who.request_id, self.who.at, model=served)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +201,38 @@ def estimate_tokens(text: str) -> int:
 
 def _spent(usage: Usage, cost: int) -> Demand:
     return Demand(usd_micro=cost, tokens=usage.input_tokens + usage.output_tokens)
+
+
+def _measured(req: CanonicalRequest, response: CanonicalResponse) -> Usage:
+    """The provider's usage report, or an estimate when it reported nothing."""
+    if not response.usage.estimated:
+        return response.usage
+    prompt = "".join(m.text() for m in req.messages)
+    return Usage(
+        input_tokens=estimate_tokens(prompt),
+        output_tokens=estimate_tokens(response.content or ""),
+        estimated=True,
+    )
+
+
+def _route_tier(reports: Sequence[StageReport]) -> str | None:
+    """The tier the router sent the request to; None when it did not route it."""
+    for report in reports:
+        if report.stage == ROUTER and not report.shadow:
+            tier = report.decisions.get("tier")
+            return str(tier) if tier else None
+    return None
+
+
+def _price_route(reports: list[StageReport], catalog: Catalog, used: Usage) -> None:
+    """Price the router's choice on the tokens the request used (it reports zero until then)."""
+    for i, report in enumerate(reports):
+        if report.stage == ROUTER and report.applied:
+            small = catalog.resolve(str(report.decisions.get("to")))
+            large = catalog.resolve(str(report.decisions.get("from")))
+            if small is not None and large is not None:
+                delta = small.cost(used) - large.cost(used)
+                reports[i] = replace(report, cost_delta_micro_usd=delta)
 
 
 async def _replay_stream(
@@ -391,6 +428,7 @@ class ChatService:
         overhead: OverheadRates,
         baselines: BaselineModels,
         cache: ResponseCache,
+        verifier: Verifier | None = None,
         org_adapters: OrgAdapters | None = None,
     ) -> None:
         self._org_adapters = org_adapters
@@ -409,6 +447,8 @@ class ChatService:
         self._overhead = overhead
         self._baselines = baselines
         self._cache = cache
+        self._verifier = verifier
+        self._judging = 0  # quality checks in flight
         self._background: set[asyncio.Task[None]] = set()
 
     async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
@@ -587,6 +627,7 @@ class ChatService:
             baseline_micro_usd=baseline,
             overhead_micro_usd=overhead,
             cache_hit=cache_hit,
+            route_tier=_route_tier(call.reports),
             status=status,
             latency_ms=int((time.perf_counter() - call.started) * 1000),
             flags={
@@ -749,6 +790,85 @@ class ChatService:
         except Exception:
             log.exception("caching an answer failed", extra={"request_id": call.who.request_id})
 
+    def _verify(self, call: _Call, req: CanonicalRequest, answer: CanonicalResponse) -> None:
+        """US-19: when the router sampled this request, the other tier answers it too, in the
+        background, and the agreement of the two answers is recorded. Past the limit of checks
+        in flight, a sample is skipped."""
+        report = next(
+            (r for r in call.reports if r.stage == ROUTER and r.decisions.get("judge")), None
+        )
+        if report is None or self._verifier is None or self._judging >= _MAX_JUDGES:
+            return
+        self._judging += 1
+        self._spawn(self._judge(self._verifier, call, req, answer, report))
+
+    async def _judge(
+        self,
+        verifier: Verifier,
+        call: _Call,
+        req: CanonicalRequest,
+        answer: CanonicalResponse,
+        report: StageReport,
+    ) -> None:
+        of = call.who.request_id
+        try:
+            await self._replay(verifier, call, req, answer, report)
+        except BudgetExceeded:
+            log.info("quality check skipped: over budget", extra={"request_id": of})
+        except Exception:
+            log.exception("quality check failed", extra={"request_id": of})
+        finally:
+            self._judging -= 1
+
+    async def _replay(
+        self,
+        verifier: Verifier,
+        call: _Call,
+        req: CanonicalRequest,
+        answer: CanonicalResponse,
+        report: StageReport,
+    ) -> None:
+        """The other tier's answer, charged as its own request (`<request id>.judge`) with no
+        baseline: checking the router's quality is overhead of the router."""
+        routed = not report.shadow  # the small tier answered; the large one is the reference
+        other = (await self._catalog.get()).resolve(
+            str(report.decisions["from" if routed else "to"])
+        )
+        if other is None:
+            return
+        of = call.who.request_id
+        who = replace(call.who, request_id=f"{of}.judge")
+        r = Resolved(other, call.r.adapter)  # a model of the same provider
+        replay = replace(req, model=other.model)
+        demand = chat_demand(other, replay)
+        judged = await self._begin(who, r, "chat", demand, None, {"judge": {"of": of}})
+        if isinstance(judged, bytes):  # pragma: no cover - a replay has no idempotency key
+            return
+        with self._telemetry.provider_call(
+            "chat", other.provider, other.model, replay.max_tokens
+        ) as span:
+            response = await self._call_provider(judged, lambda: r.adapter.complete(replay))
+            usage = _measured(replay, response)
+            cost = other.cost(usage)
+            self._telemetry.annotate(span, usage, cost, response.finish_reason)
+        small, large = (answer, response) if routed else (response, answer)
+        score: float | None = None
+        embedded = 0
+        try:
+            score, embedded = await verifier.agreement(said(small), said(large))
+        except Exception:
+            log.exception("scoring a quality check failed", extra={"request_id": of})
+        judged.notes["judge"] = {"of": of, "query_tokens": embedded}
+        await self._settle(self._end(judged, usage, cost, "ok", charged=True))
+        if score is not None:
+            await verifier.record(
+                who.org_id,
+                request_id=of,
+                candidate=str(report.decisions["to"]),
+                reference=str(report.decisions["from"]),
+                score=score,
+            )
+
     async def _savings(
         self, call: _Call, usage: Usage, *, charged: bool, counterfactual: Usage | None = None
     ) -> tuple[int, int]:
@@ -758,26 +878,32 @@ class ChatService:
         overhead = overhead_cost(
             self._overhead, gpu_seconds=gpu, classifier_calls=calls, embedded_tokens=embedded
         )
-        if not charged and counterfactual is None:
-            return 0, overhead
-        price = call.r.entry
+        if "judge" in call.notes or (not charged and counterfactual is None):
+            return 0, overhead  # a quality check saves nothing: all of it is overhead
+        used = counterfactual or usage
+        price = call.requested or call.r.entry  # the model asked for, before routing
         try:
+            catalog = await self._catalog.get()
+            _price_route(call.reports, catalog, used)
             name = await self._baselines.get(call.who.org_id)
-            chosen = (await self._catalog.get()).resolve(name) if name else None
+            chosen = catalog.resolve(name) if name else None
         except Exception:  # the counterfactual must never stop a settlement
-            log.exception("baseline model lookup failed; the request model is used")
+            log.exception("pricing the counterfactual failed; the request model is used")
             chosen = None
         if chosen is not None and chosen.kind == price.kind:
             price = chosen
         reports = [r for r in call.reports if r.stage not in CACHE_STAGES]
-        return baseline_cost(price, counterfactual or usage, reports), overhead
+        return baseline_cost(price, used, reports), overhead
 
-    async def _optimize(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
-        """Spec section 4, step 7: the optimization stages, after the input guardrails."""
-        ctx = RequestContext(call.who.org_id, req, call.r.entry)
+    async def _optimize(self, call: _Call, req: CanonicalRequest) -> tuple[_Call, CanonicalRequest]:
+        """Spec section 4, steps 7-8: the optimization stages, after the input guardrails.
+        The router may pick a cheaper model of the same provider: the call then carries both."""
+        ctx = RequestContext(call.who.org_id, req, call.r.entry, call.who.team_id)
         async with self._settles_on_failure(call):
             call.reports.extend(await self._stages.run(ctx, "pre_llm"))
-        return ctx.request
+        if ctx.price is not call.r.entry:
+            call = replace(call, r=Resolved(ctx.price, call.r.adapter), requested=call.r.entry)
+        return call, ctx.request
 
     async def _call_provider(self, call: _Call, attempt: Callable[[], Awaitable[T]]) -> T:
         """Run the provider call with retries; any failure releases the hold and is recorded."""
@@ -805,7 +931,8 @@ class ChatService:
         if isinstance(call, bytes):
             return ChatResult(*load_chat(call))
         inspection = await self._inspect(call, req)
-        req = await self._optimize(call, inspection.request)
+        call, req = await self._optimize(call, inspection.request)
+        r = call.r
         hit = await self._cached(call, req)
         if hit is not None:
             stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
@@ -815,14 +942,7 @@ class ChatService:
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
             response = await self._call_provider(call, lambda: r.adapter.complete(req))
-            usage = response.usage
-            if usage.estimated:
-                prompt = "".join(m.text() for m in req.messages)
-                usage = Usage(
-                    input_tokens=estimate_tokens(prompt),
-                    output_tokens=estimate_tokens(response.content or ""),
-                    estimated=True,
-                )
+            usage = _measured(req, response)
             cost = r.entry.cost(usage)
             self._telemetry.annotate(span, usage, cost, response.finish_reason)
         async with self._settles_on_failure(call, usage, cost):  # the provider has charged
@@ -833,6 +953,7 @@ class ChatService:
         stored = dump_chat(call.origin, cost, response) if idem is not None else None
         await self._settle(self._end(call, usage, cost, "ok", charged=True, result=stored))
         await self._remember(call, response, cost)  # so the next identical request hits
+        self._verify(call, req, response)
         return ChatResult(response, cost, call.origin)
 
     async def stream(
@@ -852,7 +973,8 @@ class ChatService:
             response, cost, origin = load_chat(call)
             return StreamResult(_replay_stream(response, cost, outcome), origin)
         inspection = await self._inspect(call, req)
-        req = await self._optimize(call, inspection.request)
+        call, req = await self._optimize(call, inspection.request)
+        r = call.r
         hit = await self._cached(call, req)
         if hit is not None:
             stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
@@ -880,7 +1002,7 @@ class ChatService:
             if output is not None and (decisions := output.decisions()):
                 call.decisions.extend(decisions)
                 self._guardrails.record_output(decisions, who.request_id)
-            self._spawn(self._finish_stream(call, current[0], end, span))
+            self._spawn(self._finish_stream(call, req, current[0], end, span))
 
         relay = _Relay(call, req, first, current[0], outcome, on_end, output)
         return StreamResult(relay, call.origin)
@@ -888,6 +1010,7 @@ class ChatService:
     async def _finish_stream(
         self,
         call: _Call,
+        req: CanonicalRequest,
         upstream: AsyncIterator[CanonicalChunk],
         end: _StreamEnd,
         span: Span,
@@ -913,6 +1036,7 @@ class ChatService:
         )
         if end.response is not None:
             await self._remember(call, end.response, end.cost)
+            self._verify(call, req, end.response)
 
     async def embed(
         self, who: Attribution, r: Resolved, req: EmbedRequest, idem: Idempotency | None = None

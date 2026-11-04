@@ -11,6 +11,7 @@ from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
+from control_plane.services.routing import RoutingService
 from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
 from control_plane.services.stages import StageAdminService
@@ -44,6 +45,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def savings_service(self) -> SavingsService: ...
     @property
     def cache_settings_service(self) -> CacheSettingsService: ...
+    @property
+    def routing_service(self) -> RoutingService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

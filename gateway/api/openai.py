@@ -341,12 +341,14 @@ async def chat_completions(
             headers["idempotent-replayed"] = "true"
         if stream.cache_hit != "none":
             headers["x-finops-cache"] = stream.cache_hit
+        model = stream.origin.model or resolved.entry.public_name  # the router's pick
+        headers["x-finops-model"] = model
         frames = _sse(
             stream.chunks,
             outcome,
             _completion_id(stream.origin),
             int(stream.origin.at.timestamp()),
-            resolved.entry.public_name,
+            model,
             include_usage,
         )
         return _SettlingStream(
@@ -359,6 +361,8 @@ async def chat_completions(
         headers["idempotent-replayed"] = "true"
     if result.cache_hit != "none":
         headers["x-finops-cache"] = result.cache_hit
+    model = result.origin.model or resolved.entry.public_name  # the router's pick
+    headers["x-finops-model"] = model
     message: dict[str, Any] = {"role": "assistant", "content": response.content}
     if response.tool_calls:
         message["tool_calls"] = [
@@ -370,7 +374,7 @@ async def chat_completions(
         "id": completion_id,
         "object": "chat.completion",
         "created": created,
-        "model": resolved.entry.public_name,
+        "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": response.finish_reason}],
         "usage": _usage_json(u.input_tokens, u.output_tokens, u.cached_tokens, u.reasoning_tokens),
     }

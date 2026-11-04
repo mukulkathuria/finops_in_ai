@@ -79,7 +79,8 @@ class RequestContext:
 
     org_id: UUID
     request: CanonicalRequest
-    price: ModelPrice
+    price: ModelPrice  # the router may pick a cheaper model of the same provider
+    team_id: UUID | None = None
 
     def fork(self) -> RequestContext:
         """A copy to work on: requests are immutable, so the original cannot change through it."""

@@ -69,7 +69,7 @@ class StageRunner:
                 )
             shadow = mode == "shadow"
             if report.applied and not shadow:
-                ctx.request = work.request
+                ctx.request, ctx.price = work.request, work.price
             elapsed = int((time.perf_counter() - started) * 1000)
             reports.append(replace(report, latency_ms=elapsed, shadow=shadow))
         return reports

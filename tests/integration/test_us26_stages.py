@@ -59,12 +59,11 @@ async def test_a_new_stage_runs_in_shadow_and_goes_on_only_after_its_eval_passes
         admin = await signup(client)
         auth = bearer(admin["access_token"])
         key = await _team_key(client, admin)
-        (stage,) = (await client.get("/v1/admin/stages", headers=auth)).json()["data"]
-        assert (stage["name"], stage["mode"], stage["latest_eval"]) == (
-            "compression",
-            "shadow",
-            None,
-        )
+        listed = (await client.get("/v1/admin/stages", headers=auth)).json()["data"]
+        assert [(s["name"], s["mode"], s["latest_eval"]) for s in listed] == [
+            ("compression", "shadow", None),
+            ("router", "off", None),  # US-19: ships off
+        ]
 
         log.clear()
         shadow = await _chat(client, key)
