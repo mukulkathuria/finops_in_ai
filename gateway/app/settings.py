@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     parser_base_url: str = "http://docparse:8000/v1"  # MarkItDown: Office files and HTML
     parse_timeout_s: float = Field(default=600.0, gt=0, le=3600)
 
+    # Retrieval (US-13): embeddings from an OpenAI-compatible server (bge-m3: 1024 dimensions,
+    # the width of the chunks column).
+    embedder_base_url: str = "http://embedder:8000/v1"
+    embedder_model: str = "bge-m3"
+    embedder_api_key: SecretStr | None = None
+    embedder_timeout_s: float = Field(default=30.0, gt=0, le=300)
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"

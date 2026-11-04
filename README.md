@@ -167,6 +167,17 @@ every artifact records the backend that made it. The sidecar (`sidecars/docparse
 contract (`POST /v1/parse`, `GET /v1/info`) and calls the OCR model through an OpenAI-compatible
 server (vLLM) at `DOCPARSE_VLM_BASE_URL`; run one sidecar per backend in production.
 
+## Retrieval under your permissions
+
+`POST /v1/documents` indexes text (or a stored file, converted to Markdown) and shares it with
+the org, teams, users or org-level roles; only org admins may share with groups they are not in
+themselves. `POST /v1/retrieval/search` returns the nearest chunks the caller may see, and a chat
+request adds them with `"retrieval": {"k": 5}` (OpenAI SDK: `extra_body`). The permission filter
+runs inside the same SQL statement as the pgvector search (HNSW, cosine, iterative scans), never
+after it, so the model never receives a row the caller may not see, whatever the prompt. Retrieved
+passages reach the model as lower-trust reference data and pass through the guardrails.
+Embeddings come from an OpenAI-compatible server (`EMBEDDER_BASE_URL`, bge-m3, 1024 dimensions).
+
 ## Repository layout
 
 | Path | Purpose |

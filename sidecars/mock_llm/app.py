@@ -250,14 +250,21 @@ async def _stream(
 
 
 def embedding_for(text: str, dims: int) -> list[float]:
-    """Deterministic unit vector: equal inputs give equal vectors."""
-    out: list[float] = []
-    counter = 0
-    while len(out) < dims:
-        digest = hashlib.sha256(f"{counter}:{text}".encode()).digest()
-        out.extend(v / 2**31 for v in struct.unpack(">8i", digest))
-        counter += 1
-    vec = out[:dims]
+    """A deterministic embedding: lower-cased words hashed into signed buckets, so texts that
+    share words point in similar directions (enough for retrieval tests). Text without a word
+    falls back to a hash of the whole text."""
+    vec = [0.0] * dims
+    for word in re.findall(r"[a-z0-9]+", text.lower()):
+        digest = hashlib.sha256(word.encode()).digest()
+        vec[int.from_bytes(digest[:4], "big") % dims] += 1.0 if digest[4] & 1 else -1.0
+    if not any(vec):
+        counter = 0
+        out: list[float] = []
+        while len(out) < dims:
+            block = hashlib.sha256(f"{counter}:{text}".encode()).digest()
+            out.extend(v / 2**31 for v in struct.unpack(">8i", block))
+            counter += 1
+        vec = out[:dims]
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [v / norm for v in vec]
 

@@ -21,6 +21,7 @@ from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
 from gateway.adapters.classifiers.registry import build_classifier
+from gateway.adapters.embeddings.openai_compat import OpenAICompatEmbedder
 from gateway.adapters.files.clamav import ClamAV
 from gateway.adapters.files.pdf import PdfProbe
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
@@ -35,6 +36,7 @@ from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
 from gateway.adapters.postgres.database import Database
+from gateway.adapters.postgres.documents import DocumentRepository
 from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
@@ -55,6 +57,7 @@ from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.parsing import ParseService
+from gateway.pipeline.retrieval import RetrievalService
 from gateway.pipeline.usage import UsageReporter
 from gateway.ports.storage import ObjectStore
 
@@ -89,6 +92,7 @@ class Container:
     object_store: ObjectStore
     file_service: FileService
     parse_service: ParseService
+    retrieval_service: RetrievalService
     metrics: GatewayMetrics
     telemetry: Telemetry
 
@@ -201,6 +205,19 @@ def build_container(
         min_confidence=settings.ocr_min_confidence,
         metrics=observability.metrics,
     )
+    retrieval_service = RetrievalService(
+        db=db,
+        repo=DocumentRepository(),
+        embedder=OpenAICompatEmbedder(
+            settings.embedder_base_url,
+            settings.embedder_model,
+            api_key=_secret(settings.embedder_api_key),
+            http=http,
+            timeout_s=settings.embedder_timeout_s,
+        ),
+        parsing=parse_service,
+        metrics=observability.metrics,
+    )
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
@@ -297,6 +314,7 @@ def build_container(
         object_store=object_store,
         file_service=file_service,
         parse_service=parse_service,
+        retrieval_service=retrieval_service,
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,

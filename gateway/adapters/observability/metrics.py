@@ -82,6 +82,12 @@ class GatewayMetrics:
             ("stage", "check", "action", "backend"),
             registry=r,
         )
+        self.retrievals = Counter(
+            "finops_retrievals",
+            "Retrieval operations by source (api search, chat, ingest).",
+            ("source",),
+            registry=r,
+        )
         self.document_parses = Counter(
             "finops_document_parses",
             "Document conversions by backend and outcome (parsed, cached, failed).",

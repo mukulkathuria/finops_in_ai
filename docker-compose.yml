@@ -53,6 +53,10 @@ x-app-env: &app-env
   PADDLEOCR_VL_MODEL: ${PADDLEOCR_VL_MODEL:-PaddleOCR-VL-1.5-0.9B}
   PARSER_BASE_URL: ${PARSER_BASE_URL:-http://docparse:8000/v1}
   PARSE_TIMEOUT_S: ${PARSE_TIMEOUT_S:-600}
+  EMBEDDER_BASE_URL: ${EMBEDDER_BASE_URL:-http://mock-llm:8000/v1}
+  EMBEDDER_MODEL: ${EMBEDDER_MODEL:-bge-m3}
+  EMBEDDER_API_KEY: ${EMBEDDER_API_KEY:-dev-only}
+  EMBEDDER_TIMEOUT_S: ${EMBEDDER_TIMEOUT_S:-30}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 

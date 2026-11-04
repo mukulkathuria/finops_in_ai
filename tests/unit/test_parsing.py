@@ -6,8 +6,9 @@ import orjson
 import pytest
 
 from gateway.adapters.parsers.registry import OCR_MIMES, OFFICE_MIMES, build_parsers
-from gateway.adapters.parsers.sidecar import CircuitBreaker, SidecarParser
+from gateway.adapters.parsers.sidecar import SidecarParser
 from gateway.adapters.parsers.text import TextParser
+from gateway.adapters.resilience import CircuitBreaker
 from gateway.domain.errors import InvalidInput, Unavailable
 from gateway.domain.parsing import ParseOptions, StoredDocument, image_tokens, text_tokens
 from tests.support import fake_docparse

@@ -18,6 +18,7 @@ from gateway.api.markers import authz_dependency
 from gateway.domain.api_keys import api_key_digest, looks_like_api_key
 from gateway.domain.errors import Forbidden, InvalidInput, Unauthenticated
 from gateway.domain.policy import Permission
+from gateway.domain.retrieval import caller_groups
 
 
 class CallerServices(GatewayServices, Protocol):
@@ -43,6 +44,9 @@ class Caller:
     # A JWT user in several teams who sent no X-FinOps-Team: fine for self-inspection, but a
     # model call must say which team pays (team and member budgets key on the team).
     team_ambiguous: bool = False
+    # Who the caller is for document permissions (US-13): the org, itself, its teams, its
+    # org-level roles. A team key is its team (and its bound user), nothing more.
+    groups: frozenset[str] = frozenset()
 
     def can(self, permission: Permission) -> bool:
         return permission.value in self.permissions
@@ -73,6 +77,7 @@ async def _from_api_key(services: CallerServices, raw: str) -> Caller:
         api_key_id=identity.key_id,
         permissions=identity.scopes,
         auth_method="api_key",
+        groups=caller_groups(user_id=identity.user_id, team_ids=(identity.team_id,), roles=()),
     )
 
 
@@ -102,6 +107,11 @@ async def _from_jwt(services: CallerServices, token: str, team_header: str | Non
         permissions=permissions,
         auth_method="jwt",
         team_ambiguous=team_id is None and len(user.team_ids) > 1,
+        groups=caller_groups(
+            user_id=user.id,
+            team_ids=user.team_ids,
+            roles=(g.role for g in user.grants if g.team_id is None),
+        ),
     )
 
 

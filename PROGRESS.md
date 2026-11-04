@@ -23,6 +23,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-09 own usage and remaining budget equal to the ledger | `663f03c` | `tests/integration/test_us09_own_usage.py` |
 | US-10 zero overshoot under 500 parallel requests, Idempotency-Key, janitor | `15fd84a` | `tests/integration/test_us10_concurrency.py`, `tests/unit/test_idempotency.py` |
 | US-29 liveness/readiness, Prometheus metrics, one trace per request with stage spans | `51565ac` | `tests/integration/test_us29_observability.py`, `tests/unit/test_metrics_guard.py` |
+| US-13 an employee asking for another person's salary gets nothing from retrieval and the model never sees the row (direct, indirect, multi-turn, other language, encoded and injection prompts; every provider request recorded) | `feat(US-13)` | `tests/integration/test_us13_retrieval_acl.py`, `tests/unit/test_retrieval.py` |
 | US-15 text PDFs and scans become Markdown with tokens before and after; low-confidence pages keep the original. US-16 OCR_BACKEND switches GLM-OCR and PaddleOCR-VL by config, backend stored per artifact | `feat(US-15, US-16)` | `tests/integration/test_us15_us16_parsing.py`, `tests/unit/test_parsing.py`, `sidecars/docparse/tests/test_docparse.py` (CI job `docparse`) |
 | US-14 uploads validated from their bytes: type mismatch, oversize, page limit, zip bombs, malware test file, encrypted and corrupt PDFs, path names refused with a reason | `feat(US-14)` | `tests/unit/test_files.py`, `tests/integration/test_us14_files.py` |
 | US-11 PII and secrets blocked or redacted per policy, logged without values; US-12 injection corpus blocked, benign corpus under 2% false positives | `feat(US-11, US-12)` | `tests/integration/test_us11_us12_guardrails.py`, `tests/unit/test_detectors.py`, `tests/unit/test_output_filter.py`, `tests/contract/test_classifier_contract.py` |
@@ -58,11 +59,11 @@ policy (closed by default). Answers are filtered too; streams are released only 
 can be cut in two, tool-call arguments included. Detection is linear in the text and the number
 of findings, and inputs over 64 KiB are scanned off the event loop.
 
-## Next: Phase 2 (US-13 ACL-aware retrieval, OCR evaluation report, Phase 2 review loop)
+## Next: Phase 2 exit (OCR evaluation harness and report, Phase 2 review loop)
 
 ## Remaining stories
 
-Phase 2 US-13; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
+Phase 2 exit items; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
 US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 
 ## Findings and deviations from the spec
@@ -88,6 +89,7 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-17 | Originals are stored by the local-disk `ObjectStore` (a volume, or a shared mount for several replicas); the S3-compatible adapter is not built yet. TIFF is not accepted; Office page limits apply to slides only | The port is in place; an S3 adapter needs a test target (Garage or SeaweedFS in the dev stack) |
 | D-18 | The OCR sidecar recognises whole pages with each model's task prompt (GLM-OCR "Text Recognition:", PaddleOCR-VL "OCR:") through the vLLM OpenAI-compatible API, with confidence from token log-probabilities; the vendors' full pipelines add a layout model first | A layout-aware pipeline can replace the sidecar behind the same contract. Reload: switching OCR_BACKEND takes a restart (no reload endpoint) |
 | D-19 | Kept pages are attached as images, which only vision-capable models accept; tokens before are estimates (1,600 per PDF page, the image formula for pictures). OCR time is recorded per artifact (`gpu_seconds`) but not yet charged to budgets | Savings reports (Phase 3) subtract the conversion cost |
+| D-20 | The chunks column is `vector(1024)` (bge-m3): an embedder of another width needs a migration; one HNSW index serves all orgs (per-org partitions come with the load tests); chat retrieval queries with the last user message and has no reranker or relevance threshold until US-21 | Every row records its embedding model, and vectors of different models are never compared |
 
 ## Blocked
 

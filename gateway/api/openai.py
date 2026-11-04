@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.types import Receive, Scope, Send
 
 from gateway.api.caller import Caller, ModelCaller
+from gateway.api.documents import Retrieval
 from gateway.api.files import Parsing, file_owner
 from gateway.domain.errors import InvalidInput, MalformedRequest
 from gateway.domain.idempotency import Idempotency
@@ -33,6 +34,7 @@ from gateway.domain.llm import (
 from gateway.domain.pricing import usd
 from gateway.pipeline.chat import Attribution, ChatService, ChunkStream, StreamOutcome
 from gateway.pipeline.idempotency import Origin
+from gateway.pipeline.retrieval import retrieval_report, with_retrieved
 
 router = APIRouter(tags=["data-plane"])
 
@@ -63,6 +65,14 @@ class _Tool(BaseModel):
     function: _Function
 
 
+class _RetrievalIn(BaseModel):
+    """`"retrieval": {"k": 5}`: add the k passages nearest to the question that the caller may
+    see (send it with the OpenAI SDK through `extra_body`)."""
+
+    model_config = ConfigDict(extra="forbid")
+    k: int = Field(default=5, ge=1, le=50)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model: str = Field(min_length=1, max_length=200)
@@ -79,6 +89,7 @@ class ChatRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=1)
     stream: bool = False
     stream_options: dict[str, Any] | None = None
+    retrieval: _RetrievalIn | None = None
 
 
 class EmbeddingsRequest(BaseModel):
@@ -106,6 +117,25 @@ def _validate[M: BaseModel](model: type[M], data: Any) -> M:
             code="invalid_request",
             param=".".join(str(p) for p in first.get("loc", ())),
         ) from exc
+
+
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    """The question to retrieve for: the text of the last user message (not its files)."""
+    for m in reversed(messages):
+        if not (isinstance(m, dict) and m.get("role") == "user"):
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                str(p["text"])
+                for p in content
+                if isinstance(p, dict)
+                and p.get("type") == "text"
+                and isinstance(p.get("text"), str)
+            )
+    return ""
 
 
 def _file_ids(messages: list[dict[str, Any]]) -> list[str]:
@@ -256,7 +286,7 @@ def _usage_json(
 
 @router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
-    request: Request, caller: ModelCaller, chat: Chat, parsing: Parsing
+    request: Request, caller: ModelCaller, chat: Chat, parsing: Parsing, retrieval: Retrieval
 ) -> Response:
     body = _validate(ChatRequest, await _json(request))
     resolved = await chat.resolve(body.model, "chat", caller.org_id)
@@ -276,6 +306,17 @@ async def chat_completions(
         headers["x-finops-file-tokens-before"] = str(attached.tokens_before)
         headers["x-finops-file-tokens-after"] = str(attached.tokens_after)
         notes = {"files": list(attached.reports)}
+    if body.retrieval is not None:  # the permission filter runs inside the vector search
+        hits = await retrieval.search(
+            file_owner(caller),
+            caller.groups,
+            _last_user_text(body.messages),
+            body.retrieval.k,
+            source="chat",
+        )
+        req = with_retrieved(req, hits)
+        headers["x-finops-retrieved-chunks"] = str(len(hits))
+        notes = {**(notes or {}), "retrieval": retrieval_report(hits)}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))

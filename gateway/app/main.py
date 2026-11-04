@@ -24,7 +24,7 @@ from control_plane.api import (
 )
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
-from gateway.api import files, health, metrics, openai, usage, whoami
+from gateway.api import documents, files, health, metrics, openai, usage, whoami
 from gateway.api.caller import CallerServices
 from gateway.api.errors import install_error_handlers
 from gateway.api.metrics import MetricsServices
@@ -100,6 +100,7 @@ def create_app(
     app.include_router(webhooks.router)
     app.include_router(guardrails.router)
     app.include_router(files.router)
+    app.include_router(documents.router)
     app.include_router(whoami.router)
     app.include_router(usage.router)
     app.include_router(openai.router)

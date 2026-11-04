@@ -34,10 +34,25 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "glm_ocr_base_url": "http://docparse:8000/v1",
         "paddleocr_vl_base_url": "http://docparse:8000/v1",
         "parser_base_url": "http://docparse:8000/v1",
+        "embedder_base_url": "http://mock-llm:8000/v1",
+        "embedder_api_key": SecretStr("test-key"),
         "log_level": "WARNING",
     }
     values.update(overrides)
     return Settings(**values)
+
+
+class _Recording(httpx2.AsyncBaseTransport):
+    """The mock provider, keeping the body of every request the gateway sends it, so a test can
+    prove what a model was (and was not) shown."""
+
+    def __init__(self, log: list[str]) -> None:
+        self._inner = httpx2.ASGITransport(app=mock_provider)
+        self._log = log
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        self._log.append((await request.aread()).decode("utf-8", "replace"))
+        return await self._inner.handle_async_request(request)
 
 
 @asynccontextmanager
@@ -46,10 +61,15 @@ async def app_client(
     *,
     client_ip: str = "127.0.0.1",
     span_exporter: SpanExporter | None = None,
+    provider_log: list[str] | None = None,
 ) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
     providers = httpx2.AsyncClient(
         mounts={
-            "http://mock-llm:8000": httpx2.ASGITransport(app=mock_provider),
+            "http://mock-llm:8000": (
+                _Recording(provider_log)
+                if provider_log is not None
+                else httpx2.ASGITransport(app=mock_provider)
+            ),
             "http://docparse:8000": httpx2.ASGITransport(app=fake_docparse.app),
         }
     )
