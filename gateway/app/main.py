@@ -16,6 +16,7 @@ from control_plane.api import (
     audit,
     auth,
     budgets,
+    cache,
     guardrails,
     invitations,
     providers,
@@ -103,6 +104,7 @@ def create_app(
     app.include_router(guardrails.router)
     app.include_router(stages.router)
     app.include_router(savings.router)
+    app.include_router(cache.router)
     app.include_router(files.router)
     app.include_router(documents.router)
     app.include_router(whoami.router)

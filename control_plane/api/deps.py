@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 
 from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.budgets import BudgetService
+from control_plane.services.cache import CacheSettingsService
 from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
@@ -41,6 +42,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def stage_admin_service(self) -> StageAdminService: ...
     @property
     def savings_service(self) -> SavingsService: ...
+    @property
+    def cache_settings_service(self) -> CacheSettingsService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

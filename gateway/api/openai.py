@@ -339,6 +339,8 @@ async def chat_completions(
         stream = await chat.stream(who, resolved, req, outcome, idem, notes=notes)
         if stream.origin.replayed:
             headers["idempotent-replayed"] = "true"
+        if stream.cache_hit != "none":
+            headers["x-finops-cache"] = stream.cache_hit
         frames = _sse(
             stream.chunks,
             outcome,
@@ -355,6 +357,8 @@ async def chat_completions(
     completion_id, created = _completion_id(result.origin), int(result.origin.at.timestamp())
     if result.origin.replayed:
         headers["idempotent-replayed"] = "true"
+    if result.cache_hit != "none":
+        headers["x-finops-cache"] = result.cache_hit
     message: dict[str, Any] = {"role": "assistant", "content": response.content}
     if response.tool_calls:
         message["tool_calls"] = [

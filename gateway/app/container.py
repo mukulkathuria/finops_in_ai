@@ -13,6 +13,7 @@ from pydantic import SecretStr
 from control_plane.services.api_keys import ApiKeyService
 from control_plane.services.authz import Authorizer
 from control_plane.services.budgets import BudgetService
+from control_plane.services.cache import CacheSettingsService
 from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
@@ -34,6 +35,7 @@ from gateway.adapters.postgres.api_keys import ApiKeyRepository
 from gateway.adapters.postgres.artifacts import ArtifactRepository
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.budgets import BudgetRepository
+from gateway.adapters.postgres.cache import CacheRepository, CacheSettingsCache
 from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
@@ -58,6 +60,7 @@ from gateway.app.observability import Observability, build_observability
 from gateway.app.settings import Settings
 from gateway.domain.files import FileLimits
 from gateway.domain.savings import OverheadRates
+from gateway.pipeline.cache import ResponseCache
 from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
@@ -95,6 +98,7 @@ class Container:
     guardrail_service: GuardrailService
     stage_admin_service: StageAdminService
     savings_service: SavingsService
+    cache_settings_service: CacheSettingsService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -215,16 +219,17 @@ def build_container(
         min_confidence=settings.ocr_min_confidence,
         metrics=observability.metrics,
     )
+    embedder = OpenAICompatEmbedder(
+        settings.embedder_base_url,
+        settings.embedder_model,
+        api_key=_secret(settings.embedder_api_key),
+        http=http,
+        timeout_s=settings.embedder_timeout_s,
+    )
     retrieval_service = RetrievalService(
         db=db,
         repo=DocumentRepository(),
-        embedder=OpenAICompatEmbedder(
-            settings.embedder_base_url,
-            settings.embedder_model,
-            api_key=_secret(settings.embedder_api_key),
-            http=http,
-            timeout_s=settings.embedder_timeout_s,
-        ),
+        embedder=embedder,
         parsing=parse_service,
         metrics=observability.metrics,
         max_chunks_per_org=settings.max_indexed_chunks_per_org,
@@ -232,6 +237,8 @@ def build_container(
     catalog = CatalogCache(db, CatalogRepository())
     savings_repo = SavingsRepository()
     baselines = BaselineModels(db, savings_repo)
+    cache_repo = CacheRepository()
+    cache_settings = CacheSettingsCache(db, cache_repo)
     stage_repo = StageRepository()
     stage_modes = StageModeCache(db, stage_repo)
     stage_runner = StageRunner([CompressionStage()], stage_modes)
@@ -325,6 +332,13 @@ def build_container(
                 embedding_per_mtok=settings.embedding_micro_usd_per_mtok,
             ),
             baselines=baselines,
+            cache=ResponseCache(
+                db=db,
+                repo=cache_repo,
+                settings=cache_settings,
+                policies=policy_cache,
+                embedder=embedder,
+            ),
             org_adapters=OrgAdapters(
                 org_key_lookup(db, credentials, envelope), provider_configs, http
             ),
@@ -364,6 +378,9 @@ def build_container(
             catalog=catalog,
             audit=audit,
             authz=authz,
+        ),
+        cache_settings_service=CacheSettingsService(
+            db=db, repo=cache_repo, cache=cache_settings, audit=audit, authz=authz
         ),
         webhook_service=WebhookService(
             db=db,

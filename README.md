@@ -201,6 +201,23 @@ the request. Reports are written to `stage_reports` with the ledger row. The fir
 `compression`, removes redundant whitespace from user and tool text and leaves fenced code and
 indentation as they were.
 
+## Response cache (exact and semantic)
+
+`PUT /v1/admin/cache-settings` with `{"mode": "exact" | "semantic" | "off", "ttl_s": 86400,
+"threshold": 0.95}` (off by default) serves repeated requests from the cache. The key covers:
+
+- the org and the caller's scope (team and user);
+- the model and every parameter;
+- the system prompt and the whole conversation;
+- the org's guardrail policy.
+
+So an answer never crosses an org or a permission scope, and never outlives a policy change.
+`semantic` also matches a single-turn question by meaning (embeddings, cosine similarity at or
+above the threshold) inside that same partition. A hit, streamed or not, is served without calling
+the model and charges nothing. It carries `x-finops-cache: exact|semantic`, and the savings report
+shows it as `exact_cache` or `semantic_cache` with what the answer would have cost. Only complete
+answers without tool calls are kept, for `ttl_s` seconds.
+
 ## Savings (baseline versus actual)
 
 Every ledger row records a baseline: the request as the client sent it (its input before any

@@ -52,6 +52,7 @@ from gateway.adapters.postgres.savings import BaselineModels
 from gateway.adapters.postgres.stages import StageRepository
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
+from gateway.domain.cache import CACHE_STAGES, cacheable
 from gateway.domain.errors import DomainError, NotFound, Unavailable
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
@@ -76,6 +77,7 @@ from gateway.domain.savings import (
     overhead_inputs,
 )
 from gateway.domain.stages import RequestContext, StageReport
+from gateway.pipeline.cache import CacheHit, Lookup, ResponseCache
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
 from gateway.pipeline.stages import StageRunner
@@ -136,6 +138,7 @@ class ChatResult:
     response: CanonicalResponse
     cost: int
     origin: Origin
+    cache_hit: str = "none"  # exact or semantic when the answer came from the cache
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +152,7 @@ class EmbedResult:
 class StreamResult:
     chunks: ChunkStream
     origin: Origin
+    cache_hit: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +169,7 @@ class _Call:
     decisions: list[dict[str, object]] = field(default_factory=list)
     notes: dict[str, object] = field(default_factory=dict)  # more ledger flags (attachments)
     reports: list[StageReport] = field(default_factory=list)  # what the stages did
+    cache: list[Lookup] = field(default_factory=list)  # the cache keys (at most one), if cached
 
     @property
     def origin(self) -> Origin:
@@ -181,6 +186,7 @@ class _StreamEnd:
     charged: bool
     finish: FinishReason | None
     stored: bytes | None
+    response: CanonicalResponse | None = None  # the whole answer, when it ended well
 
 
 def estimate_tokens(text: str) -> int:
@@ -340,8 +346,9 @@ class _Relay:
         charged = status != "error" or bool(self._produced or self._calls or held)
         cost = call.r.entry.cost(usage) if charged else 0
         self._outcome.append(StreamOutcome(usage, self._finish, cost))
+        assembled: CanonicalResponse | None = None
         stored = None
-        if status == "ok" and call.idem is not None:
+        if status == "ok":
             assembled = CanonicalResponse(
                 id="",
                 model=call.r.entry.model,
@@ -350,9 +357,18 @@ class _Relay:
                 finish_reason=self._finish or "stop",
                 usage=usage,
             )
-            stored = dump_chat(call.origin, cost, assembled)
+            if call.idem is not None:
+                stored = dump_chat(call.origin, cost, assembled)
         self._on_end(
-            _StreamEnd(usage if charged else Usage(), cost, status, charged, self._finish, stored)
+            _StreamEnd(
+                usage if charged else Usage(),
+                cost,
+                status,
+                charged,
+                self._finish,
+                stored,
+                assembled,
+            )
         )
 
 
@@ -374,6 +390,7 @@ class ChatService:
         stage_reports: StageRepository,
         overhead: OverheadRates,
         baselines: BaselineModels,
+        cache: ResponseCache,
         org_adapters: OrgAdapters | None = None,
     ) -> None:
         self._org_adapters = org_adapters
@@ -391,6 +408,7 @@ class ChatService:
         self._stage_reports = stage_reports
         self._overhead = overhead
         self._baselines = baselines
+        self._cache = cache
         self._background: set[asyncio.Task[None]] = set()
 
     async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
@@ -544,11 +562,15 @@ class ChatService:
         *,
         charged: bool,
         result: bytes | None = None,
+        cache_hit: str = "none",
+        counterfactual: Usage | None = None,
     ) -> None:
         """Spec section 6, steps 5-6: settle the hold (or release it when nothing was charged),
         append the ledger row and complete (or forget) the idempotency key, atomically."""
         who, r = call.who, call.r
-        baseline, overhead = await self._savings(call, usage, charged=charged)
+        baseline, overhead = await self._savings(
+            call, usage, charged=charged, counterfactual=counterfactual
+        )
         event = UsageEvent(
             org_id=who.org_id,
             team_id=who.team_id,
@@ -564,6 +586,7 @@ class ChatService:
             cost_micro_usd=cost,
             baseline_micro_usd=baseline,
             overhead_micro_usd=overhead,
+            cache_hit=cache_hit,
             status=status,
             latency_ms=int((time.perf_counter() - call.started) * 1000),
             flags={
@@ -663,14 +686,79 @@ class ChatService:
             await self._block(call, inspection.blocked)
         return inspection
 
-    async def _savings(self, call: _Call, usage: Usage, *, charged: bool) -> tuple[int, int]:
+    async def _cached(self, call: _Call, req: CanonicalRequest) -> CacheHit | None:
+        """Spec section 4, step 6: an answer from the cache, exact first, then semantic, inside
+        the request's org and permission scope. A cache failure is a miss, never an error."""
+        who = call.who
+        try:
+            lookup = await self._cache.prepare(
+                org_id=who.org_id, team_id=who.team_id, user_id=who.user_id, req=req
+            )
+            hit = (
+                await self._cache.find(who.org_id, lookup, request_id=who.request_id)
+                if lookup is not None
+                else None
+            )
+        except Exception:
+            log.exception("cache lookup failed; a miss", extra={"request_id": who.request_id})
+            return None
+        if lookup is not None:
+            call.cache.append(lookup)
+            if lookup.embedded_tokens:
+                call.notes["cache"] = {"query_tokens": lookup.embedded_tokens}
+        if hit is not None:
+            used = hit.response.usage
+            similarity = (
+                {"similarity": round(hit.similarity, 4)} if hit.similarity is not None else {}
+            )
+            call.reports.append(
+                StageReport(
+                    f"{hit.kind}_cache",
+                    "1",
+                    "pre_llm",
+                    used.input_tokens + used.output_tokens,
+                    0,
+                    -hit.cost,
+                    applied=True,
+                    decisions=similarity,
+                )
+            )
+        return hit
+
+    async def _served(self, call: _Call, hit: CacheHit, result: bytes | None) -> None:
+        """Settle a request answered from the cache: nothing is charged, and its baseline is
+        what the answer would have cost."""
+        await self._end(
+            call,
+            Usage(),
+            0,
+            "ok",
+            charged=False,
+            result=result,
+            cache_hit=hit.kind,
+            counterfactual=hit.response.usage,
+        )
+
+    async def _remember(self, call: _Call, response: CanonicalResponse, cost: int) -> None:
+        """Keep a complete, plain answer for the cache (one insert, only when the org caches);
+        a failure only loses the entry, never the answer."""
+        if not call.cache or not cacheable(response):
+            return
+        try:
+            await self._cache.store(call.who.org_id, call.cache[0], response, cost)
+        except Exception:
+            log.exception("caching an answer failed", extra={"request_id": call.who.request_id})
+
+    async def _savings(
+        self, call: _Call, usage: Usage, *, charged: bool, counterfactual: Usage | None = None
+    ) -> tuple[int, int]:
         """US-17: the counterfactual cost of the request, and the overhead of the gateway's own
         work (OCR, classifier calls, embeddings)."""
         gpu, calls, embedded = overhead_inputs(call.notes, call.decisions)
         overhead = overhead_cost(
             self._overhead, gpu_seconds=gpu, classifier_calls=calls, embedded_tokens=embedded
         )
-        if not charged:
+        if not charged and counterfactual is None:
             return 0, overhead
         price = call.r.entry
         try:
@@ -681,7 +769,8 @@ class ChatService:
             chosen = None
         if chosen is not None and chosen.kind == price.kind:
             price = chosen
-        return baseline_cost(price, usage, call.reports), overhead
+        reports = [r for r in call.reports if r.stage not in CACHE_STAGES]
+        return baseline_cost(price, counterfactual or usage, reports), overhead
 
     async def _optimize(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
         """Spec section 4, step 7: the optimization stages, after the input guardrails."""
@@ -717,6 +806,11 @@ class ChatService:
             return ChatResult(*load_chat(call))
         inspection = await self._inspect(call, req)
         req = await self._optimize(call, inspection.request)
+        hit = await self._cached(call, req)
+        if hit is not None:
+            stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
+            await self._settle(self._served(call, hit, stored))
+            return ChatResult(hit.response, 0, call.origin, cache_hit=hit.kind)
         with self._telemetry.provider_call(
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
@@ -738,6 +832,7 @@ class ChatService:
         call.decisions.extend(output)
         stored = dump_chat(call.origin, cost, response) if idem is not None else None
         await self._settle(self._end(call, usage, cost, "ok", charged=True, result=stored))
+        await self._remember(call, response, cost)  # so the next identical request hits
         return ChatResult(response, cost, call.origin)
 
     async def stream(
@@ -758,6 +853,12 @@ class ChatService:
             return StreamResult(_replay_stream(response, cost, outcome), origin)
         inspection = await self._inspect(call, req)
         req = await self._optimize(call, inspection.request)
+        hit = await self._cached(call, req)
+        if hit is not None:
+            stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
+            await self._settle(self._served(call, hit, stored))
+            replay = _replay_stream(hit.response, 0, outcome)
+            return StreamResult(replay, call.origin, cache_hit=hit.kind)
         current: list[AsyncIterator[CanonicalChunk]] = []
 
         async def open_stream() -> CanonicalChunk | None:
@@ -810,6 +911,8 @@ class ChatService:
         await self._end_quietly(
             call, end.usage, end.cost, end.status, charged=end.charged, result=end.stored
         )
+        if end.response is not None:
+            await self._remember(call, end.response, end.cost)
 
     async def embed(
         self, who: Attribution, r: Resolved, req: EmbedRequest, idem: Idempotency | None = None

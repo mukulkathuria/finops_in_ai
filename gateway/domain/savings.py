@@ -57,8 +57,11 @@ def overhead_inputs(
         and d.get("backend") != "rules"
         and d.get("action") in _CLASSIFIER_CALLED
     )
-    retrieval = notes.get("retrieval")
-    embedded = int(retrieval.get("query_tokens") or 0) if isinstance(retrieval, Mapping) else 0
+    embedded = 0
+    for step in ("retrieval", "cache"):  # questions embedded to retrieve or to match
+        record = notes.get(step)
+        if isinstance(record, Mapping):
+            embedded += int(record.get("query_tokens") or 0)
     return gpu, calls, embedded
 
 
