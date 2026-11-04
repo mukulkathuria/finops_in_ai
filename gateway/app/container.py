@@ -44,7 +44,7 @@ from gateway.adapters.postgres.credentials import CredentialRepository, org_key_
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.documents import DocumentRepository
 from gateway.adapters.postgres.files import FileRepository
-from gateway.adapters.postgres.graph import PostgresGraphStore
+from gateway.adapters.postgres.graph import GraphRepository, PostgresGraphStore
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
@@ -68,6 +68,7 @@ from gateway.domain.files import FileLimits
 from gateway.domain.savings import OverheadRates
 from gateway.pipeline.cache import ResponseCache
 from gateway.pipeline.chat import HOLD_TTL, ChatService
+from gateway.pipeline.code import CodeService
 from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.parsing import ParseService
@@ -115,6 +116,7 @@ class Container:
     parse_service: ParseService
     retrieval_service: RetrievalService
     graph_store: PostgresGraphStore
+    code_service: CodeService
     metrics: GatewayMetrics
     telemetry: Telemetry
 
@@ -303,6 +305,7 @@ def build_container(
         family_ttl=timedelta(seconds=settings.refresh_family_ttl_seconds),
         max_failed_logins=settings.login_max_failures,
     )
+    graph_store = PostgresGraphStore(db)
     return Container(
         settings=settings,
         db=db,
@@ -390,7 +393,10 @@ def build_container(
         file_service=file_service,
         parse_service=parse_service,
         retrieval_service=retrieval_service,
-        graph_store=PostgresGraphStore(db),
+        graph_store=graph_store,
+        code_service=CodeService(
+            db=db, graph=graph_store, repo=GraphRepository(), files=file_service
+        ),
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,

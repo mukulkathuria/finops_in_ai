@@ -5,6 +5,8 @@ the same statement, under row-level security. The writer replaces a project's gr
 a reader sees the old graph or the new one, never a mix."""
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Final
 from uuid import UUID
 
@@ -14,10 +16,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from gateway.adapters.postgres.database import Database, TenantContext, fetch_all, fetch_one
+from gateway.domain.code import Pack
 from gateway.domain.errors import NotFound
 from gateway.domain.graph import (
     MAX_DEPTH,
     MAX_FIXED_DEPTH,
+    MAX_RESULTS,
+    VERTEX_KINDS,
     Direction,
     Edge,
     Reached,
@@ -173,12 +178,44 @@ _NEIGHBORS: Final[Mapping[tuple[Direction, int], str]] = {
     ("in", 3): _IN_3,
 }
 _REACH: Final[Mapping[Direction, str]] = {"out": _REACH_OUT, "in": _REACH_IN}
+_FIND: Final = """
+SELECT v.id, v.kind, v.name, v.path, v.props
+FROM graph_vertex v
+WHERE v.project_id = :project
+  AND lower(split_part(v.name, '.', -1)) = ANY(CAST(:terms AS text[]))
+  AND v.kind = ANY(CAST(:kinds AS text[]))
+  AND EXISTS (SELECT 1 FROM projects p
+              WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
+ORDER BY v.kind, v.name
+LIMIT :limit
+"""
 _PGQ: Final = "SELECT to_regclass('pg_catalog.pg_propgraph_element') IS NOT NULL AS present"
 
 _PROJECT: Final = """
-INSERT INTO projects (org_id, name, acl_groups, created_by)
-VALUES (app_current_org(), :name, CAST(:groups AS text[]), :created_by)
+INSERT INTO projects (org_id, name, acl_groups, created_by, created_by_team)
+VALUES (app_current_org(), :name, CAST(:groups AS text[]), :created_by, :created_by_team)
 RETURNING id
+"""
+_GET_PROJECT: Final = """
+SELECT p.id, p.name, p.acl_groups, p.created_by, p.created_by_team, p.indexed_at,
+       p.created_at
+FROM projects p
+WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[])
+"""
+_LIST_PROJECTS: Final = """
+SELECT p.id, p.name, p.acl_groups, p.created_by, p.created_by_team, p.indexed_at,
+       p.created_at
+FROM projects p
+WHERE p.acl_groups && CAST(:groups AS text[])
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT :limit
+"""
+_PACKS: Final = """
+SELECT c.module_id, c.path, c.pack, c.token_count, c.source_tokens
+FROM context_packs c
+WHERE c.project_id = :project AND c.path = ANY(CAST(:paths AS text[]))
+  AND EXISTS (SELECT 1 FROM projects p
+              WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
 """
 _LOCK_PROJECT: Final = "SELECT id FROM projects WHERE id = :project FOR UPDATE"
 _CLEAR_EDGES: Final = "DELETE FROM graph_edge WHERE project_id = :project"
@@ -192,7 +229,34 @@ _EDGE: Final = """
 INSERT INTO graph_edge (org_id, project_id, src, dst, kind, confidence)
 VALUES (app_current_org(), :project, :src, :dst, :kind, :confidence)
 """
+_PACK: Final = """
+INSERT INTO context_packs (org_id, project_id, module_id, path, pack, token_count, source_tokens)
+VALUES (app_current_org(), :project, :module, :path, :pack, :tokens, :source_tokens)
+"""
 _INDEXED: Final = "UPDATE projects SET indexed_at = now() WHERE id = :project RETURNING id"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRecord:
+    id: UUID
+    name: str
+    acl_groups: tuple[str, ...]
+    created_by: UUID | None
+    created_by_team: UUID | None  # the team whose key created it (no user did)
+    indexed_at: datetime | None
+    created_at: datetime
+
+
+def _project(row: RowMapping) -> ProjectRecord:
+    return ProjectRecord(
+        row["id"],
+        row["name"],
+        tuple(row["acl_groups"]),
+        row["created_by"],
+        row["created_by_team"],
+        row["indexed_at"],
+        row["created_at"],
+    )
 
 
 def _vertex(row: RowMapping) -> Vertex:
@@ -206,6 +270,33 @@ class PostgresGraphStore:
     def __init__(self, db: Database) -> None:
         self._db = db
         self._pgq: bool | None = None
+
+    async def find(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID,
+        groups: frozenset[str],
+        terms: frozenset[str],
+        kinds: Sequence[str],
+        limit: int = 200,
+    ) -> list[Vertex]:
+        if not kinds or not set(kinds) <= VERTEX_KINDS:
+            raise ValueError(f"vertex kinds are among {sorted(VERTEX_KINDS)}")
+        if not 1 <= limit <= MAX_RESULTS:
+            raise ValueError(f"limit is between 1 and {MAX_RESULTS}")
+        if not terms or not groups:
+            return []
+        params = {
+            "project": project_id,
+            "terms": sorted(terms),
+            "kinds": sorted(set(kinds)),
+            "groups": sorted(groups),
+            "limit": limit,
+        }
+        async with self._db.transaction(TenantContext(org_id)) as conn:
+            rows = await fetch_all(conn, _FIND, params)
+        return [_vertex(r) for r in rows]
 
     async def neighbors(
         self,
@@ -284,14 +375,56 @@ class PostgresGraphStore:
 
 
 class GraphRepository:
-    """The code graph's writes: a project, and its whole graph replaced in one transaction."""
+    """A project, its whole graph and packs replaced in one transaction, and the reads that go
+    with them: each checks the project's ACL in the same statement."""
+
+    async def project(
+        self, conn: AsyncConnection, project_id: UUID, *, groups: frozenset[str]
+    ) -> ProjectRecord | None:
+        row = await fetch_one(conn, _GET_PROJECT, {"project": project_id, "groups": sorted(groups)})
+        return _project(row) if row is not None else None
+
+    async def projects(
+        self, conn: AsyncConnection, *, groups: frozenset[str], limit: int
+    ) -> list[ProjectRecord]:
+        rows = await fetch_all(conn, _LIST_PROJECTS, {"groups": sorted(groups), "limit": limit})
+        return [_project(r) for r in rows]
+
+    async def packs(
+        self,
+        conn: AsyncConnection,
+        project_id: UUID,
+        *,
+        groups: frozenset[str],
+        paths: Sequence[str],
+    ) -> list[Pack]:
+        if not paths or not groups:
+            return []
+        params = {"project": project_id, "groups": sorted(groups), "paths": list(paths)}
+        rows = await fetch_all(conn, _PACKS, params)
+        return [
+            Pack(
+                r["module_id"], r["path"], r["pack"], int(r["token_count"]), int(r["source_tokens"])
+            )
+            for r in rows
+        ]
 
     async def create_project(
-        self, conn: AsyncConnection, *, name: str, groups: Sequence[str], created_by: UUID | None
+        self,
+        conn: AsyncConnection,
+        *,
+        name: str,
+        groups: Sequence[str],
+        created_by: UUID | None,
+        created_by_team: UUID | None = None,
     ) -> UUID:
-        row = await fetch_one(
-            conn, _PROJECT, {"name": name, "groups": sorted(groups), "created_by": created_by}
-        )
+        params = {
+            "name": name,
+            "groups": sorted(groups),
+            "created_by": created_by,
+            "created_by_team": created_by_team,
+        }
+        row = await fetch_one(conn, _PROJECT, params)
         if row is None:
             raise RuntimeError("project insert returned no row")
         project_id: UUID = row["id"]
@@ -304,8 +437,14 @@ class GraphRepository:
         project_id: UUID,
         vertices: Sequence[Vertex],
         edges: Sequence[Edge],
+        packs: Sequence[Pack] = (),
     ) -> None:
         check_graph(vertices, edges)
+        modules = {v.id for v in vertices}
+        if len({p.module_id for p in packs}) != len(packs) or any(
+            p.module_id not in modules for p in packs
+        ):
+            raise ValueError("each pack belongs to one vertex of the graph")
         if await fetch_one(conn, _LOCK_PROJECT, {"project": project_id}) is None:
             raise NotFound("project not found", code="project_not_found")
         for clear in (_CLEAR_EDGES, _CLEAR_PACKS, _CLEAR_VERTICES):
@@ -337,6 +476,21 @@ class GraphRepository:
                         "confidence": e.confidence,
                     }
                     for e in edges
+                ],
+            )
+        if packs:
+            await conn.execute(
+                text(_PACK),
+                [
+                    {
+                        "project": project_id,
+                        "module": p.module_id,
+                        "path": p.path,
+                        "pack": p.text,
+                        "tokens": p.tokens,
+                        "source_tokens": p.source_tokens,
+                    }
+                    for p in packs
                 ],
             )
         await fetch_one(conn, _INDEXED, {"project": project_id})

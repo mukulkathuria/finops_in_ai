@@ -6,10 +6,24 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from gateway.domain.graph import Direction, Reached
+from gateway.domain.graph import Direction, Reached, Vertex
 
 
 class GraphStore(Protocol):
+    async def find(
+        self,
+        org_id: UUID,
+        *,
+        project_id: UUID,
+        groups: frozenset[str],
+        terms: frozenset[str],
+        kinds: Sequence[str],
+        limit: int = 200,
+    ) -> list[Vertex]:
+        """The vertices of `kinds` whose name (its last dotted part) is one of `terms`,
+        lower-cased."""
+        ...
+
     async def neighbors(
         self,
         org_id: UUID,

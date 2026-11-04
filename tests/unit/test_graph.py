@@ -10,11 +10,13 @@ from gateway.domain.graph import Edge, Vertex, check_graph, check_read
 
 
 def test_every_graph_query_checks_the_project_acl_in_the_same_statement() -> None:
-    queries = [*store._NEIGHBORS.values(), *store._REACH.values()]
-    assert len(queries) == 8
+    queries = [*store._NEIGHBORS.values(), *store._REACH.values(), store._FIND, store._PACKS]
+    assert len(queries) == 10
     for sql in queries:
         assert "p.acl_groups && CAST(:groups AS text[])" in sql
         assert "project_id = :project" in sql
+    for sql in (store._GET_PROJECT, store._LIST_PROJECTS):
+        assert "p.acl_groups && CAST(:groups AS text[])" in sql
 
 
 def test_reads_keep_their_limits() -> None:

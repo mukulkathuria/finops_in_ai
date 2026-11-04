@@ -7,6 +7,8 @@
   speed plan). They lead with `src` and `dst` and include `org_id`, so they also serve foreign
   key cascades and the row-level security predicate. `context_packs` hold one precomputed pack
   per module: serving one is a single-row read.
+- `graph_vertex_term` finds the vertices a question names, by the last part of their
+  dotted name, lower-cased (`Cart.total` is found by `total`).
 - No SQL/PGQ property graph: PostgreSQL 19 ships without it (ADR 0004). `GraphStore` answers
   fixed-depth patterns with joins and variable depth with recursive CTEs.
 
@@ -32,6 +34,7 @@ def upgrade() -> None:
       name        text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
       acl_groups  text[] NOT NULL CHECK (cardinality(acl_groups) BETWEEN 1 AND 200),
       created_by  uuid REFERENCES users (id) ON DELETE SET NULL,
+      created_by_team uuid REFERENCES teams (id) ON DELETE SET NULL,  -- a team key's project
       indexed_at  timestamptz,
       created_at  timestamptz NOT NULL DEFAULT now(),
       UNIQUE (org_id, name)
@@ -48,6 +51,8 @@ def upgrade() -> None:
       props       jsonb NOT NULL DEFAULT '{}'::jsonb
     );
     CREATE INDEX graph_vertex_lookup ON graph_vertex (project_id, kind, name) INCLUDE (org_id);
+    CREATE INDEX graph_vertex_term
+      ON graph_vertex (project_id, lower(split_part(name, '.', -1)));
 
     CREATE TABLE graph_edge (
       id          uuid PRIMARY KEY DEFAULT uuidv7(),

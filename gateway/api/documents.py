@@ -105,12 +105,14 @@ class SearchOut(BaseModel):
     data: list[HitOut]
 
 
-def _default_group(caller: Caller) -> str:
+def default_group(caller: Caller) -> str:
+    """Who owns what a caller shares when it names no one: itself, or its team for a team
+    key."""
     if caller.user_id is not None:
         return user_group(caller.user_id)
     if caller.team_id is not None:
         return team_group(caller.team_id)
-    raise NotFound("this credential has no user or team to own a document")
+    raise NotFound("this credential has no user or team to own what it shares")
 
 
 @router.post("/v1/documents")
@@ -126,7 +128,7 @@ async def create_document(
     groups = share_groups(
         access,
         own=caller.groups,
-        default=_default_group(caller),
+        default=default_group(caller),
         admin=caller.can(Permission.ORG_MANAGE),
     )
     file_id = file_id_of(body.file_id) if body.file_id is not None else None

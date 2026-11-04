@@ -210,6 +210,35 @@ Set the threshold, budget and candidates with `PUT /v1/admin/retrieval-settings`
 In shadow the k nearest go out and the report says what the filter would have pruned. If the
 reranker fails, the k nearest go out and the ledger records `rerank: failed`.
 
+## Code context (the code graph)
+
+A code question needs the modules it names, not whole files. A project holds a code graph and
+one context pack per module: its path, docstring, imports, importers and signatures, at a
+fraction of the source's tokens. A project is shared like a document (`access`). Who can do what:
+
+- Anyone who may read the project can ask for context.
+- Only an org admin, the user who created the project, or the team whose key created it can
+  index it.
+
+1. Create a project: `POST /v1/projects` (`{"name": "shop", "access": {"org": true}}`).
+2. Upload its sources to `/v1/files` in one of two forms:
+   - a source bundle that `python scripts/pack_sources.py <repo> bundle.json` writes;
+   - Graphify's `graph.json`.
+3. Index the project: `POST /v1/projects/{id}/index` (`{"file_id": "file-..."}`). Indexing
+   replaces the graph and packs whole, in one transaction.
+4. Ask: `GET /v1/projects/{id}/context?q=How does Cart compute its total?&max_tokens=4000`
+   returns the packs of the best-matching modules within the budget, with their token counts
+   and what the whole files would have cost.
+
+How the indexers read the code:
+
+- The Python indexer reads modules with the standard library's `ast`, and never runs them.
+- A call between modules gets confidence 0.6 when only a project-wide unique name resolves it.
+- Graphify relations outside the gateway's edge kinds are skipped and counted.
+
+Every graph read checks the project's ACL in the same statement (`GraphStore`, ADR 0004: joins
+for fixed depth, recursive CTEs for reachability).
+
 ## Optimization stages (shadow mode and the eval gate)
 
 Every optimization is a stage with one contract (spec section 4): it may make the request cheaper
