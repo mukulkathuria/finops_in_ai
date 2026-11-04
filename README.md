@@ -151,7 +151,10 @@ afterwards; a chat message can attach files with `{"type": "file", "file": {"fil
 The gateway resolves them before the budget hold and the guardrails, so document text is checked
 for PII, secrets and injections like anything a user types, and the provider receives Markdown in
 a `<document name="...">` frame. Responses carry `x-finops-file-tokens-before` and
-`x-finops-file-tokens-after`; the ledger row records backend, version and tokens per file.
+`x-finops-file-tokens-after`; the ledger row records backend, version and tokens per file. A
+request its budgets cannot cover is refused before any file is converted (its worst-case hold is
+tried and rolled back first), and one request takes at most 20 files and 20 MiB of page images
+(`too_many_files`, `attachments_too_large`).
 
 | Content | Converted by |
 | --- | --- |
@@ -176,8 +179,24 @@ themselves. `POST /v1/retrieval/search` returns the nearest chunks the caller ma
 request adds them with `"retrieval": {"k": 5}` (OpenAI SDK: `extra_body`). The permission filter
 runs inside the same SQL statement as the pgvector search (HNSW, cosine, iterative scans), never
 after it, so the model never receives a row the caller may not see, whatever the prompt. Retrieved
-passages reach the model as lower-trust reference data and pass through the guardrails.
-Embeddings come from an OpenAI-compatible server (`EMBEDDER_BASE_URL`, bge-m3, 1024 dimensions).
+passages reach the model as lower-trust reference data and pass through the guardrails; a passage
+the org's policy would block on (a secret, PII under `block`, an injection under `block`) is
+dropped instead of blocking the request, and recorded in the ledger (`flags.retrieval.dropped`).
+When the index scan finds fewer than k chunks the caller may read, an exact search over those
+chunks runs. Pages read with low confidence are not indexed (the response names them in
+`warnings`). Embeddings come from an OpenAI-compatible server (`EMBEDDER_BASE_URL`, bge-m3, 1024
+dimensions).
+
+## Limits
+
+| Limit | Default (setting) | Refusal |
+| --- | --- | --- |
+| Requests per API key or user | 1,200 a minute (`RATE_LIMIT_PER_MINUTE`) | 429 `rate_limited`, with `retry-after` |
+| Uploads, document ingests and Markdown conversions per API key or user | 60 a minute (`HEAVY_RATE_LIMIT_PER_MINUTE`) | 429 `rate_limited` |
+| Request body; upload | 10 MiB (`MAX_REQUEST_BYTES`); 25 MiB (`MAX_UPLOAD_BYTES`) | 413 `request_too_large`, `file_too_large` |
+| Text the input guardrails read per request | 2,000,000 characters (`GUARDRAIL_MAX_INPUT_CHARS`) | 413 `input_too_large` |
+| Chunks in an organisation's retrieval index | 1,000,000 (`MAX_INDEXED_CHUNKS_PER_ORG`) | 403 `index_quota_exceeded` |
+| Sign-in and signup attempts per client address | 30 a minute (`AUTH_RATE_LIMIT_PER_MINUTE`) | 429 `rate_limited` |
 
 ## Repository layout
 

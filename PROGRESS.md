@@ -27,6 +27,8 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-15 text PDFs and scans become Markdown with tokens before and after; low-confidence pages keep the original. US-16 OCR_BACKEND switches GLM-OCR and PaddleOCR-VL by config, backend stored per artifact | `feat(US-15, US-16)` | `tests/integration/test_us15_us16_parsing.py`, `tests/unit/test_parsing.py`, `sidecars/docparse/tests/test_docparse.py` (CI job `docparse`) |
 | US-14 uploads validated from their bytes: type mismatch, oversize, page limit, zip bombs, malware test file, encrypted and corrupt PDFs, path names refused with a reason | `feat(US-14)` | `tests/unit/test_files.py`, `tests/integration/test_us14_files.py` |
 | US-11 PII and secrets blocked or redacted per policy, logged without values; US-12 injection corpus blocked, benign corpus under 2% false positives | `feat(US-11, US-12)` | `tests/integration/test_us11_us12_guardrails.py`, `tests/unit/test_detectors.py`, `tests/unit/test_output_filter.py`, `tests/contract/test_classifier_contract.py` |
+| US-20 Jev is optional: with `JEV_API_KEY` set and `CLASSIFIER_BACKEND=jev` decisions use it; without the key the gateway refuses to start with a clear error; Laya stays the default | `feat(US-11, US-12)` | `tests/contract/test_classifier_contract.py::test_jev_without_a_key_fails_closed_at_startup`, `tests/integration/test_us11_us12_guardrails.py` |
+| Phase 2 review loop: per-credential and heavy-work limits, budget precheck before conversion and retrieval, blocked passages dropped, exact search behind HNSW, linear detectors, input size cap | `c8740df`, `4ce7d06`, `201a9a2` | `docs/audits/2026-11-04-phase2-review.md`, `tests/integration/test_phase2_review.py`, `tests/unit/test_relay.py` |
 
 Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
 tier-safe price bound) on every applicable budget with an ordered upsert, so `committed + reserved`
@@ -63,12 +65,18 @@ OCR evaluation: `scripts/ocr_eval.py` scores both backends (CER, WER, confidence
 and document type and names the backend to set ([docs/ocr-evaluation.md](docs/ocr-evaluation.md)).
 The report itself needs the GPU-served models and your document set (none are available here).
 
-## Next: Phase 2 review loop, then Phase 3 (US-17..US-20, US-26: savings engine)
+Phase 2 review loop (spec section 12): the same two-reviewer loop over US-11 to US-16; every High
+and Medium finding fixed with a regression test, re-reviewed twice; no open Critical, High or
+Medium finding. See `docs/audits/2026-11-04-phase2-review.md` (accepted Lows: D-21).
+
+## Next: Phase 3 (US-17..US-19, US-26: savings engine)
+
+Plan: `docs/superpowers/plans/2026-11-04-phase3-savings.md`.
 
 ## Remaining stories
 
-Phase 2 exit items; Phase 3 US-17..US-20, US-26; Phase 4 US-21,
-US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
+Phase 3 US-17..US-19, US-26 (plus provider prompt caching, compression, price sync, the optional
+LiteLLM adapter); Phase 4 US-21, US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30.
 
 ## Findings and deviations from the spec
 
@@ -94,6 +102,7 @@ US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30; web dashboard.
 | D-18 | The OCR sidecar recognises whole pages with each model's task prompt (GLM-OCR "Text Recognition:", PaddleOCR-VL "OCR:") through the vLLM OpenAI-compatible API, with confidence from token log-probabilities; the vendors' full pipelines add a layout model first | A layout-aware pipeline can replace the sidecar behind the same contract. Reload: switching OCR_BACKEND takes a restart (no reload endpoint) |
 | D-19 | Kept pages are attached as images, which only vision-capable models accept; tokens before are estimates (1,600 per PDF page, the image formula for pictures). OCR time is recorded per artifact (`gpu_seconds`) but not yet charged to budgets | Savings reports (Phase 3) subtract the conversion cost |
 | D-20 | The chunks column is `vector(1024)` (bge-m3): an embedder of another width needs a migration; one HNSW index serves all orgs (per-org partitions come with the load tests); chat retrieval queries with the last user message and has no reranker or relevance threshold until US-21 | Every row records its embedding model, and vectors of different models are never compared |
+| D-21 | Phase 2 accepted Lows: detection costs about two seconds of CPU per million characters below the input cap; images, tool definitions and message names are not scanned; passages are screened by the rules only; search returns unredacted text to the readers the ACL allows; limits are per credential; the chunk quota is unlocked; documents indexed from a deleted file stay until deleted; a key glued to a letter is not detected | `docs/audits/2026-11-04-phase2-review.md` (each item with its reason and upgrade path) |
 
 ## Blocked
 
