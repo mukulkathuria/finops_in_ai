@@ -290,7 +290,10 @@ def build_container(
         chat_service=ChatService(
             db=db,
             guardrails=Guardrails(
-                classifier=classifier, policies=policy_cache, telemetry=observability.telemetry
+                classifier=classifier,
+                policies=policy_cache,
+                telemetry=observability.telemetry,
+                max_input_chars=settings.guardrail_max_input_chars,
             ),
             catalog=CatalogCache(db, CatalogRepository()),
             adapters=adapters,

@@ -34,7 +34,7 @@ from gateway.domain.detectors import (
     reveal_hidden,
     strip_invisible,
 )
-from gateway.domain.errors import DomainError, Unavailable
+from gateway.domain.errors import DomainError, PayloadTooLarge, Unavailable
 from gateway.domain.guardrails import GuardrailBlocked, GuardrailPolicy
 from gateway.domain.llm import CanonicalRequest, CanonicalResponse, Message, TextPart
 from gateway.domain.retrieval import Hit
@@ -291,12 +291,29 @@ class OutputStream:
 
 class Guardrails:
     def __init__(
-        self, *, classifier: Classifier, policies: PolicyCache, telemetry: Telemetry
+        self,
+        *,
+        classifier: Classifier,
+        policies: PolicyCache,
+        telemetry: Telemetry,
+        max_input_chars: int = 2_000_000,
     ) -> None:
         self._classifier = classifier
         self._rules = RulesClassifier()
         self._policies = policies
         self._telemetry = telemetry
+        self._max_chars = max_input_chars
+
+    def _readable(self, chars: int) -> int:
+        """The checks cost about two seconds of CPU per million characters, so a request holding
+        more text than the limit is refused before any of it is read."""
+        if chars > self._max_chars:
+            raise PayloadTooLarge(
+                f"the request holds {chars} characters of text; at most {self._max_chars} are"
+                " accepted",
+                code="input_too_large",
+            )
+        return chars
 
     async def policy(self, org_id: UUID) -> GuardrailPolicy:
         return await self._policies.get(org_id)
@@ -341,8 +358,9 @@ class Guardrails:
     async def inspect_chat(
         self, org_id: UUID, req: CanonicalRequest, *, request_id: str
     ) -> Inspection:
+        chars = self._readable(_chat_chars(req))
         policy = await self._policies.get(org_id)
-        scan = await _offload(_chat_chars(req), lambda: self._scan_chat(policy, req))
+        scan = await _offload(chars, lambda: self._scan_chat(policy, req))
         decisions = scan.findings.decisions("input")
         blocked: DomainError | None = None
         if rules := scan.findings.blocking():
@@ -450,9 +468,10 @@ class Guardrails:
         self, org_id: UUID, inputs: Sequence[str], *, request_id: str
     ) -> tuple[tuple[str, ...], tuple[Decision, ...], DomainError | None]:
         """Embedding inputs: PII and secrets only (injection does not apply to embeddings)."""
+        chars = self._readable(sum(map(len, inputs)))
         policy = await self._policies.get(org_id)
         findings = _Findings(policy)
-        cleaned = await _offload(sum(map(len, inputs)), lambda: tuple(map(findings.text, inputs)))
+        cleaned = await _offload(chars, lambda: tuple(map(findings.text, inputs)))
         decisions = findings.decisions("input")
         blocked: DomainError | None = None
         if rules := findings.blocking():

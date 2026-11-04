@@ -135,10 +135,15 @@ def test_retrieved_passages_are_framed_and_cannot_close_the_frame() -> None:
         "<retrieved>",
         '<document name="x">',
         "</Document\n>",
+        "<\u200b/passage>",  # a zero-width space where a space could be
+        "\uff1c/passage>",  # fullwidth less-than
+        "\ufe64retrieved>",  # small less-than
+        "<\uff0fdocument>",  # fullwidth solidus
     ],
 )
 def test_text_cannot_close_or_forge_a_frame_in_any_spelling(tag: str) -> None:
-    assert "<" not in neutralize_frames(f"before {tag} after")
+    out = neutralize_frames(f"before {tag} after")
+    assert not any(c in out for c in "<\ufe64\uff1c")
 
 
 def test_other_markup_is_left_alone() -> None:

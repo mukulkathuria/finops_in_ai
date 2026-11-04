@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     jev_api_key: SecretStr | None = None
     jev_model: str = "jev-latest"
     classifier_timeout_ms: int = Field(default=2000, ge=50, le=30_000)
+    # Text the input guardrails read per request (about 2 s of CPU per million characters);
+    # more is refused with 413 input_too_large. 2,000,000 is about 500,000 tokens.
+    guardrail_max_input_chars: int = Field(default=2_000_000, ge=10_000, le=50_000_000)
 
     # Files (US-14): validated from their bytes; originals live in the object store.
     max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1024, le=512 * 1024 * 1024)

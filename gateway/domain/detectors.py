@@ -131,16 +131,75 @@ class Finding:
     end: int
 
 
-_Rule = tuple[str, Category, re.Pattern[str], Callable[[str], bool] | None]
+_Spans = Callable[[str], Iterator[tuple[int, int]]]
+_Rule = tuple[str, Category, re.Pattern[str] | _Spans, Callable[[str], bool] | None]
 
-# A key starts a token, never in its middle. Anchoring on that (rather than on \b, which a "-"
-# satisfies) keeps every pattern linear: without it, a run such as "eyJ-eyJ-eyJ-..." would be
-# rescanned up to the quantifier's limit from each start, quadratic on hostile input.
-_KEY_START: Final = r"(?<![A-Za-z0-9_-])"
+# A key starts where a word does (as with \b, a "-" before it is fine). None of these patterns
+# needs anything after its run, so a start inside a run either matches or stops at the next
+# break: linear. The two that do need text after a long run (a JWT's dots, an e-mail's "@") are
+# found from that text instead, below.
+_KEY_START: Final = r"(?<![A-Za-z0-9_])"
 
 
 def _key(pattern: str) -> re.Pattern[str]:
     return re.compile(_KEY_START + pattern)
+
+
+_JWT_SECOND: Final = re.compile(r"\.eyJ")  # where a JWT's second segment starts
+_JWT_REST: Final = re.compile(r"\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,2048}")
+_NOT_B64URL: Final = re.compile(r"[^A-Za-z0-9_-]")
+_JWT_FIRST_MAX: Final = 3 + 2048  # "eyJ" and up to 2,048 more
+
+
+def _jwt_spans(text: str) -> Iterator[tuple[int, int]]:
+    """JWTs (three base64url segments, the first two JSON), found from each ".eyJ": the first
+    segment is the leftmost "eyJ" in the run before it, whatever is glued in front. Every part
+    of the text is looked at a bounded number of times, so hostile runs stay linear."""
+    end = floor = 0
+    for second in _JWT_SECOND.finditer(text):
+        dot = second.start()
+        if dot < end:
+            continue  # inside the last token found
+        lo = max(floor, dot - _JWT_FIRST_MAX)
+        floor = dot + 1  # the next window starts after this dot: windows never overlap
+        for gap in _NOT_B64URL.finditer(text, lo, dot):
+            lo = gap.end()  # the run before the dot starts after its last gap
+        first = text.find("eyJ", lo, dot - 8)
+        rest = _JWT_REST.match(text, dot) if first >= 0 else None
+        if rest is not None:
+            end = rest.end()
+            yield first, end
+
+
+# An "@" with a local-part character before it and a whole domain after it (captured). The "@"
+# comes first, so the engine jumps from "@" to "@" instead of trying every position.
+_EMAIL_AT: Final = re.compile(
+    r"@(?<=[A-Za-z0-9._%+-]@)(?=([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}))"
+)
+_EMAIL_LOCAL: Final = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-"
+)
+
+
+def _email_spans(text: str) -> Iterator[tuple[int, int]]:
+    """E-mail addresses found from each "@": the local part is up to 64 characters back (so text
+    glued in front cannot hide an address), never into the previous address. Linear: each "@"
+    costs at most 64 steps back and one bounded match forward."""
+    end = 0
+    for at in _EMAIL_AT.finditer(text):
+        i = at.start()
+        start, floor = i, max(end, i - 64)
+        while start > floor and text[start - 1] in _EMAIL_LOCAL:
+            start -= 1
+        if start < i:
+            end = at.end(1)
+            yield start, end
+
+
+def _spans(matcher: re.Pattern[str] | _Spans, text: str) -> Iterator[tuple[int, int]]:
+    if isinstance(matcher, re.Pattern):
+        return (m.span() for m in matcher.finditer(text))
+    return matcher(text)
 
 
 # Priority order: secrets first, so an overlapping PII match never hides a secret.
@@ -180,22 +239,8 @@ _RULES: Final[tuple[_Rule, ...]] = (
     ("azure_storage_key", "secret", re.compile(r"AccountKey=[A-Za-z0-9+/]{86}=="), None),
     ("finops_api_key", "secret", _key(r"fo_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{20,255}"), None),
     ("finops_refresh_token", "secret", _key(r"frt_[A-Za-z0-9_-]{20,255}"), None),
-    (
-        "jwt",
-        "secret",
-        _key(r"eyJ[A-Za-z0-9_-]{8,2048}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,2048}"),
-        None,
-    ),
-    (
-        "email",
-        "pii",
-        # The local part starts where a run of its characters starts (linear, as above).
-        re.compile(
-            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}"
-            r"@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}"
-        ),
-        None,
-    ),
+    ("jwt", "secret", _jwt_spans, None),
+    ("email", "pii", _email_spans, None),
     (
         "iban",
         "pii",
@@ -257,41 +302,40 @@ def detect(
     text and in the number of findings: each rule's matches are merged into the claimed spans."""
     taken: list[tuple[int, int]] = []  # spans already claimed: disjoint, sorted
     found: list[Finding] = []
-    for rule, category, pattern, valid in _RULES:
+    for rule, category, matcher, valid in _RULES:
         if category not in categories:
             continue
         spans = [
-            m.span()
-            for m in _unclaimed(pattern.finditer(text), taken)
-            if valid is None or valid(m.group())
+            (start, end)
+            for start, end in _unclaimed(_spans(matcher, text), taken)
+            if valid is None or valid(text[start:end])
         ]
         if spans:
             found += (Finding(rule, category, start, end) for start, end in spans)
             taken = sorted(taken + spans)  # two sorted runs: Timsort merges them in linear time
     if "secret" in categories:
-        for m in _unclaimed(_BASE64_BLOB.finditer(text), taken):
-            decoded = _decode(m.group())
+        for start, end in _unclaimed(_spans(_BASE64_BLOB, text), taken):
+            decoded = _decode(text[start:end])
             if decoded is None:
                 continue
-            for rule, _, pattern, valid in _SECRET_RULES:
-                hit = pattern.search(decoded)
-                if hit and (valid is None or valid(hit.group())):
-                    found.append(Finding(f"{rule}_base64", "secret", m.start(), m.end()))
+            for rule, _, matcher, valid in _SECRET_RULES:
+                hit = next(_spans(matcher, decoded), None)
+                if hit and (valid is None or valid(decoded[hit[0] : hit[1]])):
+                    found.append(Finding(f"{rule}_base64", "secret", start, end))
                     break
     return sorted(found, key=lambda f: f.start)
 
 
 def _unclaimed(
-    matches: Iterator[re.Match[str]], taken: list[tuple[int, int]]
-) -> Iterator[re.Match[str]]:
-    """The matches (in position order) that overlap no claimed span."""
+    spans: Iterator[tuple[int, int]], taken: list[tuple[int, int]]
+) -> Iterator[tuple[int, int]]:
+    """The spans (in position order) that overlap no claimed span."""
     i = 0
-    for m in matches:
-        start, end = m.span()
+    for start, end in spans:
         while i < len(taken) and taken[i][1] <= start:
             i += 1
         if i == len(taken) or taken[i][0] >= end:
-            yield m
+            yield start, end
 
 
 class Placeholders:

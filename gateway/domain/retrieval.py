@@ -23,7 +23,13 @@ MAX_GROUPS: Final = 200
 _ROLE: Final = re.compile(r"[a-z][a-z_]{0,31}")
 _PARAGRAPH: Final = re.compile(r"\n\s*\n")
 _SENTENCE_END: Final = re.compile(r"(?<=[.!?])\s+")
-_FRAME_TAG: Final = re.compile(r"<(?=\s*/?\s*(?:document|passage|retrieved)\b)", re.IGNORECASE)
+# A frame tag's opening bracket, in any case and spacing: the ASCII "<" or its small and
+# fullwidth forms, with invisible characters (zero-width, soft hyphen, BOM) allowed where
+# spaces are.
+_GAP: Final = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"
+_FRAME_TAG: Final = re.compile(
+    rf"[<\ufe64\uff1c](?={_GAP}[/\uff0f]?{_GAP}(?:document|passage|retrieved)\b)", re.IGNORECASE
+)
 
 
 def user_group(user_id: UUID) -> str:

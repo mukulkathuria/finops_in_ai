@@ -127,17 +127,26 @@ def _fastest(scan: Callable[[str], object], text: str) -> float:
     return min(times)
 
 
+_HOSTILE_UNITS = (
+    *("eyJ-", "-eyJ", ".eyJ", "eyJ.", "eyJ-" * 600 + ".eyJ" + "a" * 9 + "."),  # JWT
+    *("a@", "@", "a@b.", "a@b.co ", "x" * 70 + "@b.co ", "a"),  # e-mail
+    *("sk-", "-sk-", "-AIza", "xoxb-", "-xoxb-", "-ghp_", "fo_aaaaaaaa_-", "SG."),  # keys
+    *("1 ", "1-", "1.1.", "a.", "QUFB", "-----BEGIN PRIVATE KEY-----"),  # numbers, base64, PEM
+)
+
+
 @pytest.mark.parametrize(
     ("scan", "unit"),
     [
-        *((detect, u) for u in ("eyJ-", "sk-", "xoxb-", "fo_aaaaaaaa_-", "a@", "a.", "1 ", "QUFB")),
+        *((detect, u) for u in _HOSTILE_UNITS),
         *((injection_rule, u) for u in ("ignore ", "ignore the ", "you are now ", "pretend ")),
     ],
 )
 def test_hostile_runs_cost_what_prose_costs(scan: Callable[[str], object], unit: str) -> None:
     """Text built so a pattern could begin at every position (each "eyJ" of "eyJ-eyJ-..." looks
-    like the start of a token) costs about what ordinary text of the same size does. Before keys
-    were anchored to a token start, "eyJ-" runs cost four times as much."""
+    like the start of a token) costs about what ordinary text of the same size does. Before the
+    Phase 2 review, "eyJ-" runs cost four times as much and a run of "a" rescanned 64 characters
+    from every position."""
     size = 100_000
     hostile, prose = ((u * (size // len(u) + 1))[:size] for u in (unit, PROSE))
     assert _fastest(scan, hostile) < 2.5 * _fastest(scan, prose)
@@ -163,8 +172,28 @@ AZURE = "Account" + "Key=" + "A" * 86 + "=="
     ],
 )
 def test_keys_are_found_wherever_a_token_starts(key: str, rule: str) -> None:
-    for text in (key, f"token={key}", f'"{key}"', f"Bearer {key}", f"url/{key}/x", f"k:{key};"):
+    contexts = (f"token={key}", f'"{key}"', f"Bearer {key}", f"url/{key}/x", f"k:{key};")
+    for text in (key, *contexts, f"my-{key}", f"prod-{key}."):  # a "-" in front hides nothing
         assert _rules(text) == [rule], text
+
+
+JWT = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJ" + "zdWIiOiIxMjMifQ" + "." + "s1gnature_Ab-9"
+
+
+def test_a_jwt_is_found_with_anything_glued_in_front() -> None:
+    for text in (JWT, f"Bearer {JWT}", f"x-{JWT}", f"x{JWT}", f"token={JWT}.", f"a.b {JWT}"):
+        (finding,) = detect(text)
+        assert (finding.rule, text[finding.start : finding.end]) == ("jwt", JWT), text
+    assert _rules("eyJ" + "a" * 20 + ".notjson.eyJ" + "b" * 20) == []  # the second is not JSON
+
+
+def test_an_address_behind_glued_text_is_still_found() -> None:
+    glued = "x" * 70 + "jane.doe@example.com"
+    (finding,) = detect(glued)
+    assert finding.rule == "email"
+    assert "jane.doe" not in redact(glued, [finding])
+    two = "x" * 70 + "a@b.co" + "y" * 60 + "@c.org"  # back to back: both are covered
+    assert redact(two, detect(two)) == "x" * 7 + "[EMAIL_1]" + "[EMAIL_2]"  # 64 before the "@"
 
 
 def _private_key(label: str = "RSA ") -> tuple[str, list[str]]:

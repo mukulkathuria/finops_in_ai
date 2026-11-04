@@ -24,6 +24,7 @@ from gateway.pipeline.guardrails import OutputFilter
 KEY = "AK" + "IA" + "QWERTYUIOPASDFGH"
 REQUEST = CanonicalRequest(model="m", messages=(Message("user", (TextPart("hi"),)),), max_tokens=50)
 USAGE = Usage(input_tokens=3, output_tokens=5)
+EVERYTHING = frozenset({"pii", "secret"})
 
 
 def _pieces(text: str, size: int) -> list[str]:
@@ -100,3 +101,27 @@ async def test_text_held_back_when_a_stream_fails_still_counts_toward_the_estima
     (end,) = ends
     assert end.status == "error"
     assert end.usage.output_tokens == estimate_tokens("Done. mail [EMAIL_1]")  # the held part too
+
+
+async def test_a_stream_failing_while_all_its_output_is_held_is_still_charged() -> None:
+    ends: list[Any] = []
+    entry = SimpleNamespace(cost=lambda usage: 7, model="m")
+    call: Any = SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None)
+
+    async def upstream() -> AsyncIterator[CanonicalChunk]:
+        raise ConnectionError("the provider dropped the stream")
+        yield CanonicalChunk()  # pragma: no cover - makes this an async generator
+
+    first = CanonicalChunk(content="mail a@x.io")  # held whole: it touches the end of the stream
+    relay = _Relay(call, REQUEST, first, upstream(), [], ends.append, OutputFilter(EVERYTHING))
+    released: list[CanonicalChunk] = []
+
+    async def read() -> None:
+        async for chunk in relay:
+            released.append(chunk)
+
+    with pytest.raises(ConnectionError):
+        await read()
+    assert not any(c.content for c in released)  # nothing was released
+    (end,) = ends
+    assert (end.status, end.charged, end.cost) == ("error", True, 7)

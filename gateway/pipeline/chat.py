@@ -312,21 +312,20 @@ class _Relay:
             return
         self._settled = True
         call, usage = self._call, self._usage
+        # What the guardrail still held when the stream failed was never sent, but the model
+        # produced it, so it counts (after a normal end the tail has already been sent).
+        tail = self._held() or CanonicalChunk()
+        held = (tail.content or "") + "".join(d.arguments for d in tail.tool_calls)
         if usage is None or usage.estimated:
             prompt = "".join(m.text() for m in self._req.messages)
-            # What the guardrail still held when the stream failed was never sent, but the model
-            # produced it, so it counts (after a normal end the tail has already been sent).
-            tail = self._held() or CanonicalChunk()
-            held = (tail.content or "") + "".join(d.arguments for d in tail.tool_calls)
             output = "".join(self._produced) + "".join(c[1] + c[2] for c in self._calls.values())
-            output += held
             usage = Usage(
                 input_tokens=estimate_tokens(prompt),
-                output_tokens=estimate_tokens(output),
+                output_tokens=estimate_tokens(output + held),
                 estimated=True,
             )
         # An error before any output is not charged; a cancelled stream bills its prompt.
-        charged = status != "error" or bool(self._produced or self._calls)
+        charged = status != "error" or bool(self._produced or self._calls or held)
         cost = call.r.entry.cost(usage) if charged else 0
         self._outcome.append(StreamOutcome(usage, self._finish, cost))
         stored = None
