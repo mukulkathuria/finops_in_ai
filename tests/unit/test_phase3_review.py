@@ -53,7 +53,7 @@ def test_l4_a_cache_hit_saves_its_full_price() -> None:
 
 def test_l5_a_request_that_was_not_served_saves_nothing() -> None:
     (report,) = unserved([StageReport("router", "1.0", "pre_llm", 0, 0, -500, applied=True)])
-    assert (report.cost_delta_micro_usd, report.applied) == (0, True)
+    assert (report.cost_delta_micro_usd, report.applied) == (0, False)  # re-review: not counted
 
 
 def test_cache_keys_change_with_the_detection_rules() -> None:
@@ -149,6 +149,21 @@ async def test_security_l5_a_failed_download_never_names_the_url() -> None:
         # Nothing chained (and so no URL) would be printed with the traceback.
         assert err.value.__cause__ is None
         assert err.value.__context__ is None or err.value.__suppress_context__
+
+
+async def test_rereview_a_malformed_source_url_is_not_logged_either() -> None:
+    url = "https://prices.example.test/list.json?token=" + "t0ken"
+
+    class _Http:
+        def stream(self, *_: Any, **__: Any) -> Any:
+            raise httpx2.InvalidURL(f"Invalid URL {url!r}")  # not an HTTPError
+
+    sync = PriceSync(None, url, http=_Http())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="fetching the price list failed: InvalidURL") as err:
+        await sync._load()
+    assert "t0ken" not in str(err.value)
+    assert err.value.__cause__ is None
+    assert err.value.__suppress_context__
 
 
 def test_security_l7_litellm_is_loaded_for_a_server() -> None:

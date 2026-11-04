@@ -30,10 +30,10 @@ class CacheJanitor:
         self._repo = CacheJanitorRepository()
 
     async def run_once(self) -> CacheReport:
-        budget = self._max_batches
+        """One pass; purging and eviction each have their own batch budget, so a backlog of
+        expired entries never starves the cap. The cap is soft: it holds after each pass."""
         purged = 0
-        while budget > 0:
-            budget -= 1
+        for _ in range(self._max_batches):
             async with self._db.transaction() as conn:
                 deleted = await self._repo.purge_expired(conn, batch=self._batch)
             purged += deleted
@@ -41,6 +41,7 @@ class CacheJanitor:
                 break
         async with self._db.transaction() as conn:
             over = await self._repo.over_cap(conn, cap=self._cap)
+        budget = self._max_batches
         evicted = 0
         for org_id, excess in over:
             left = excess

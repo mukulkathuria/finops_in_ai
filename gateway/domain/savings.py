@@ -137,5 +137,5 @@ def cache_hit_report(
 
 def unserved(reports: Sequence[StageReport]) -> list[StageReport]:
     """The reports of a request that was not served (an error, a cancellation, a block): what
-    the stages did is kept, and nothing counts as saved."""
-    return [replace(r, cost_delta_micro_usd=0) for r in reports]
+    the stages decided is kept, but none counts as applied or as saving anything."""
+    return [replace(r, cost_delta_micro_usd=0, applied=False) for r in reports]

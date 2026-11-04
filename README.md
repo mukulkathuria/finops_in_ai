@@ -224,9 +224,10 @@ spaces loses its alignment.
 
 So an answer never crosses an org or a permission scope, and never outlives a policy change.
 Answers are stored sealed (AES-256-GCM, a data key per entry, bound to the org and the entry's
-key); one that cannot be opened is a miss. The worker deletes expired entries every
-`CACHE_JANITOR_INTERVAL_SECONDS`, and an org over `CACHE_MAX_ENTRIES_PER_ORG` loses its oldest
-entries first. The worker sees when entries expire, never what they hold.
+key); one that cannot be opened is a miss. The worker (required, as for budget holds) deletes
+expired entries every `CACHE_JANITOR_INTERVAL_SECONDS`, and after each pass an org is back under
+`CACHE_MAX_ENTRIES_PER_ORG`, its oldest entries going first. The worker sees when entries expire,
+never what they hold.
 `semantic` also matches a single-turn question by meaning (embeddings, cosine similarity at or
 above the threshold) inside that same partition. A hit, streamed or not, is served without calling
 the model and charges nothing. It carries `x-finops-cache: exact|semantic`, and the savings report

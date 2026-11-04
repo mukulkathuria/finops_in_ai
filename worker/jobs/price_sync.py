@@ -148,7 +148,7 @@ class PriceSync:
                     body += chunk
                     if len(body) > MAX_BYTES:
                         raise ValueError("the price list is larger than 5 MiB")
-        except httpx2.HTTPError as exc:  # its message names the URL, which may hold a token
+        except (httpx2.HTTPError, httpx2.InvalidURL) as exc:  # their messages name the URL
             raise ValueError(f"fetching the price list failed: {type(exc).__name__}") from None
         return bytes(body)
 

@@ -45,4 +45,22 @@ S marks the security review, C the correctness review.
   no user erasure flow yet. Retention is the org's TTL (at most 30 days) and answers are sealed.
 - An org baseline model different from the requested model produces savings that no technique
   explains, by design: the baseline is the org's reference.
-- A failed request's stage reports still count as applied (their saving is zero).
+- Question embeddings stay unsealed next to the sealed answers: the semantic lookup searches them.
+  Only the app role (row-level security applies) can read them; the worker cannot.
+- The per-org cache cap is soft: it holds after each janitor pass. Cleanup needs the worker, which
+  the deployment already requires for budget holds and alerts.
+
+## Re-review (`27d99bd`)
+
+Both reviewers re-reviewed the fixes. Every finding above is closed. Each reviewer also traced the
+new code for regressions: no double settlement, no lock cycle between the eval gate and its
+demotion, and the janitor queries stay within the worker's column grants. They found these Lows,
+fixed in the next commit:
+
+| Id | Finding | Resolution |
+| --- | --- | --- |
+| C-R1 | C-L5 was partial: a request that was not served still counted as applied, with its tokens saved | Its reports count as not applied (`test_l5_a_request_that_was_not_served_saves_nothing`) |
+| S-R2 | Purging and eviction shared one batch budget, so a backlog of expired entries starved the cap | Each has its own budget |
+| S-R3 | `httpx2.InvalidURL` is not an `HTTPError`, so a malformed source URL escaped the sanitising | Caught too (`test_rereview_a_malformed_source_url_is_not_logged_either`) |
+| C-R2 | Without a worker nothing purges expired entries | Accepted above: the worker is required |
+| S-R1 | Question embeddings are not sealed | Accepted above: the semantic lookup needs them |
