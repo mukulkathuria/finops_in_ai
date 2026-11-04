@@ -1,0 +1,65 @@
+{
+  "notes": "Prices in micro-USD per 1M tokens (price_image: micro-USD per image). Anthropic list prices as of 2026-10-06. A model left out keeps its catalog rows; an entry with effective_from takes effect at that time.",
+  "models": [
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "kind": "chat",
+      "price_input": 4000000,
+      "price_output": 20000000,
+      "price_cached_input": 200000,
+      "price_cache_write": 5000000,
+      "price_image": null,
+      "tier_threshold_tokens": null,
+      "tier_price_input": null,
+      "tier_price_output": null,
+      "context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "kind": "chat",
+      "price_input": 2000000,
+      "price_output": 10000000,
+      "price_cached_input": 200000,
+      "price_cache_write": 2500000,
+      "price_image": null,
+      "tier_threshold_tokens": null,
+      "tier_price_input": null,
+      "tier_price_output": null,
+      "context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-5-5",
+      "kind": "chat",
+      "price_input": 100000,
+      "price_output": 500000,
+      "price_cached_input": null,
+      "price_cache_write": 125000,
+      "price_image": null,
+      "tier_threshold_tokens": 100000,
+      "tier_price_input": 500000,
+      "tier_price_output": 2500000,
+      "context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "kind": "chat",
+      "price_input": 10000000,
+      "price_output": 50000000,
+      "price_cached_input": 250000,
+      "price_cache_write": 12500000,
+      "price_image": null,
+      "tier_threshold_tokens": null,
+      "tier_price_input": null,
+      "tier_price_output": null,
+      "context_window": 1000000,
+      "max_output_tokens": 128000
+    }
+  ]
+}

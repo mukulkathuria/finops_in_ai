@@ -1,6 +1,7 @@
 """`python -m worker`: background jobs. Outbox delivery (alert webhooks) runs every
 OUTBOX_INTERVAL_SECONDS; the budget janitor every JANITOR_INTERVAL_SECONDS (with a ledger
-reconcile every RECONCILE_INTERVAL_SECONDS).
+reconcile every RECONCILE_INTERVAL_SECONDS); the price sync every
+PRICE_SYNC_INTERVAL_SECONDS when PRICE_SYNC_SOURCE is set.
 
 Runs as the `worker` database role (WORKER_DATABASE_URL). Stops cleanly on SIGTERM or SIGINT.
 Each pass touches a heartbeat file that the container health check reads.
@@ -23,6 +24,7 @@ from gateway.app.logging import configure_logging
 from gateway.app.settings import Settings
 from worker.jobs.budget_janitor import BudgetJanitor
 from worker.jobs.outbox_dispatcher import OutboxDispatcher
+from worker.jobs.price_sync import PriceSync
 
 log = logging.getLogger("worker")
 HEARTBEAT = Path(tempfile.gettempdir()) / "finops-worker.alive"
@@ -41,6 +43,24 @@ def _envelope(settings: Settings) -> Envelope | None:
     return Envelope(LocalKeyManager(keys, settings.master_key_id))
 
 
+async def _sync_prices(prices: PriceSync) -> None:
+    """A broken price list is logged and leaves the catalog as it was; the other jobs go on."""
+    try:
+        report = await prices.run_once()
+    except Exception:
+        log.exception("price sync failed; the catalog is unchanged")
+        return
+    if report.inserted or report.refused:
+        log.info(
+            "price sync",
+            extra={
+                "inserted": report.inserted,
+                "refused": report.refused,
+                "unchanged": report.unchanged,
+            },
+        )
+
+
 async def run(settings: Settings, stop: asyncio.Event) -> None:
     if settings.worker_database_url is None:
         raise SystemExit("WORKER_DATABASE_URL is required to run the worker")
@@ -53,12 +73,22 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
     )
     janitor = BudgetJanitor(db)
     envelope = _envelope(settings)
-    next_janitor = next_reconcile = 0.0
+    next_janitor = next_reconcile = next_price_sync = 0.0
     try:
         async with httpx2.AsyncClient(follow_redirects=False) as http:
             dispatcher = (
                 OutboxDispatcher(db, envelope, http, allow_insecure=not settings.is_production_like)
                 if envelope is not None
+                else None
+            )
+            prices = (
+                PriceSync(
+                    db,
+                    settings.price_sync_source,
+                    http=http,
+                    allow_insecure=not settings.is_production_like,
+                )
+                if settings.price_sync_source
                 else None
             )
             while not stop.is_set():
@@ -90,6 +120,9 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
                                     "purged": report.purged,
                                 },
                             )
+                    if prices is not None and now >= next_price_sync:
+                        next_price_sync = now + settings.price_sync_interval_seconds
+                        await _sync_prices(prices)
                     HEARTBEAT.touch()
                 except Exception:
                     log.exception("worker pass failed; retrying next interval")

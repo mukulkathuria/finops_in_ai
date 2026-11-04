@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     janitor_interval_seconds: float = Field(default=30, ge=1, le=3600)
     reconcile_interval_seconds: float = Field(default=300, ge=10, le=86_400)
     outbox_interval_seconds: float = Field(default=5, ge=0.5, le=300)  # alert delivery
+    # Price sync (Phase 3): the catalog follows this price list, a JSON file or an https
+    # URL; unset, prices change only through migrations.
+    price_sync_source: str | None = None
+    price_sync_interval_seconds: float = Field(default=3600, ge=60, le=86_400)
 
     # Observability (US-29). Traces export over OTLP/HTTP when the endpoint is set (empty: no
     # export). /metrics needs METRICS_TOKEN as a bearer token when it is set; without one it

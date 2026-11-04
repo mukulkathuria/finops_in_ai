@@ -262,6 +262,21 @@ returns totals read from the ledger, so they always match it, and the savings by
 the stage reports. The dashboard's Savings page shows both. Finance and org admins see the whole
 org; a team lead with `reports:read_team` passes `team_id`.
 
+## Prices (the model catalog)
+
+Prices are data. `model_catalog` holds one row per model and price change, and every ledger row
+records the catalog version it was priced at. The worker keeps the catalog in step with a price
+list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
+`PRICE_SYNC_INTERVAL_SECONDS`. Prices are micro-USD per million tokens (images: per image).
+
+- For each model, the list's entry in effect now is compared with the catalog. A change becomes a
+  new row in effect at once; the gateway sees it within a minute.
+- An entry with a later `effective_from` takes effect at that time.
+- A model the list leaves out keeps its rows.
+- The whole list is rejected if any entry is invalid.
+- A change that would make a paid model free, move a price more than tenfold or change a model's
+  kind is refused and logged, so a broken list cannot switch budgets off.
+
 ## Limits
 
 | Limit | Default (setting) | Refusal |
