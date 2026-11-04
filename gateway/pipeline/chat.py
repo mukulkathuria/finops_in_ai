@@ -79,6 +79,7 @@ from gateway.domain.savings import (
     overhead_cost,
     overhead_inputs,
     provider_cache_report,
+    relevance_report,
     unserved,
 )
 from gateway.domain.stages import RequestContext, StageReport
@@ -564,6 +565,8 @@ class ChatService:
         call = _Call(who, r, kind, holds[-1], time.perf_counter(), idem, notes=dict(notes or {}))
         if conversion := file_conversion_report(call.notes.get("files"), r.entry):
             call.reports.append(conversion)
+        if relevance := relevance_report(call.notes.get("retrieval"), r.entry):
+            call.reports.append(relevance)
         return call
 
     async def precheck(self, who: Attribution, r: Resolved, req: CanonicalRequest) -> None:

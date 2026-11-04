@@ -7,10 +7,9 @@ from uuid import UUID
 from gateway.domain.stages import Mode, Phase, RequestContext, StageReport, StageSetting
 
 
-class Stage(Protocol):
-    """One optimization technique. `process` may replace `ctx.request` with a cheaper equivalent
-    and reports what it changed. It always works on a copy, so a failure or a shadow run leaves
-    the request that is sent untouched."""
+class StageInfo(Protocol):
+    """What makes a stage administrable: listed, switched off, to shadow or on, and gated by its
+    eval runs. Some run elsewhere in the pipeline (the relevance filter runs in retrieval)."""
 
     @property
     def name(self) -> str: ...
@@ -20,6 +19,12 @@ class Stage(Protocol):
     def phase(self) -> Phase: ...
     @property
     def default_mode(self) -> Mode: ...
+
+
+class Stage(StageInfo, Protocol):
+    """One optimization technique the stage runner runs. `process` may replace `ctx.request` with
+    a cheaper equivalent and reports what it changed. It always works on a copy, so a failure or a
+    shadow run leaves the request that is sent untouched."""
 
     async def process(self, ctx: RequestContext) -> StageReport: ...
 

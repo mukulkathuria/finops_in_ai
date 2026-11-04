@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     embedder_model: str = "bge-m3"
     embedder_api_key: SecretStr | None = None
     embedder_timeout_s: float = Field(default=30.0, gt=0, le=300)
+    # Reranker (US-21): bge-reranker behind a `/rerank` API; unset, the relevance filter is off.
+    reranker_base_url: str | None = None
+    reranker_model: str = "bge-reranker-v2-m3"
+    reranker_api_key: SecretStr | None = None
+    reranker_timeout_s: float = Field(default=10.0, gt=0, le=120)
     max_indexed_chunks_per_org: int = Field(default=1_000_000, ge=1, le=1_000_000_000)
 
     # Savings (US-17): what the gateway's own work costs (micro-USD), subtracted from

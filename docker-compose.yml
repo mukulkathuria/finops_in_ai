@@ -61,6 +61,10 @@ x-app-env: &app-env
   EMBEDDER_MODEL: ${EMBEDDER_MODEL:-bge-m3}
   EMBEDDER_API_KEY: ${EMBEDDER_API_KEY:-dev-only}
   EMBEDDER_TIMEOUT_S: ${EMBEDDER_TIMEOUT_S:-30}
+  RERANKER_BASE_URL: ${RERANKER_BASE_URL-http://mock-llm:8000/v1}
+  RERANKER_MODEL: ${RERANKER_MODEL:-bge-reranker-v2-m3}
+  RERANKER_API_KEY: ${RERANKER_API_KEY:-dev-only}
+  RERANKER_TIMEOUT_S: ${RERANKER_TIMEOUT_S:-10}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 

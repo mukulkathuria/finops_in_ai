@@ -195,6 +195,21 @@ chunks runs. Pages read with low confidence are not indexed (the response names 
 `warnings`). Embeddings come from an OpenAI-compatible server (`EMBEDDER_BASE_URL`, bge-m3, 1024
 dimensions).
 
+Relevance filtering (US-21) is the optimization stage `rag_relevance`: off by default, since it
+adds a reranker call (`RERANKER_BASE_URL`, bge-reranker behind a `/rerank` API) to every
+retrieval. Once switched on (after its eval run passed), a chat with `retrieval` works like this:
+
+1. The gateway retrieves `candidates` passages by vector.
+2. The reranker scores them, and passages under the org's `threshold` are dropped.
+3. The best of the rest are packed within `max_tokens`, at most k.
+
+Set the threshold, budget and candidates with `PUT /v1/admin/retrieval-settings` (`{"threshold":
+0.3, "max_tokens": 4000, "candidates": 20}`). The response says how many passages went out
+(`x-finops-retrieved-chunks`) and how many tokens the filter pruned against the k nearest
+(`x-finops-pruned-tokens`). The ledger and the savings report show the saving as `rag_relevance`.
+In shadow the k nearest go out and the report says what the filter would have pruned. If the
+reranker fails, the k nearest go out and the ledger records `rerank: failed`.
+
 ## Optimization stages (shadow mode and the eval gate)
 
 Every optimization is a stage with one contract (spec section 4): it may make the request cheaper

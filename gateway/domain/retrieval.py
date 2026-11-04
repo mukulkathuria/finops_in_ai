@@ -10,9 +10,9 @@ data, inside a frame they cannot close.
 
 import html
 import re
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Final
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Final
 from uuid import UUID
 
 from gateway.domain.errors import Forbidden, InvalidInput
@@ -172,3 +172,72 @@ def neutralize_frames(text: str) -> str:
     """Text the gateway frames for a model cannot close or forge a `document`, `passage` or
     `retrieved` frame: the opening bracket of any such tag, in any case or spacing, is escaped."""
     return _FRAME_TAG.sub("&lt;", text)
+
+
+RAG_RELEVANCE: Final = "rag_relevance"
+RAG_RELEVANCE_VERSION: Final = "1.0"
+
+
+@dataclass(frozen=True, slots=True)
+class RelevanceSettings:
+    """US-21: how an org's retrieved passages are filtered."""
+
+    threshold: float = 0.3  # a passage the reranker scores below this is dropped
+    max_tokens: int = 4_000  # the passages sent come to at most this many tokens
+    candidates: int = 20  # passages retrieved by vector and reranked
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("threshold is between 0 and 1")
+        if not 100 <= self.max_tokens <= 200_000:
+            raise ValueError("max_tokens is between 100 and 200000")
+        if not 1 <= self.candidates <= 100:
+            raise ValueError("candidates is between 1 and 100")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "threshold": self.threshold,
+            "max_tokens": self.max_tokens,
+            "candidates": self.candidates,
+        }
+
+    @classmethod
+    def parse(cls, raw: Mapping[str, Any] | None) -> RelevanceSettings:
+        """Stored settings, read leniently: anything unusable means the defaults."""
+        if not raw:
+            return cls()
+        try:
+            return cls(
+                threshold=float(raw.get("threshold", 0.3)),
+                max_tokens=int(raw.get("max_tokens", 4_000)),
+                candidates=int(raw.get("candidates", 20)),
+            )
+        except TypeError, ValueError:
+            return cls()
+
+
+@dataclass(frozen=True, slots=True)
+class Packed:
+    kept: tuple[Hit, ...]  # best first, each with its reranker score
+    dropped: int  # candidates not kept
+    tokens_before: int  # the k nearest by vector: what would be sent without the filter
+    tokens_after: int
+
+
+def pack(
+    hits: Sequence[Hit], scores: Sequence[float], *, threshold: float, max_tokens: int, k: int
+) -> Packed:
+    """Spec F4: drop the passages scoring under the threshold, then keep the best by score while
+    they fit the token budget (a smaller one may still fit after a bigger one did not), at most
+    k."""
+    ranked = sorted(zip(hits, scores, strict=True), key=lambda pair: pair[1], reverse=True)
+    kept: list[Hit] = []
+    used = 0
+    for hit, score in ranked:
+        if score < threshold or len(kept) == k:
+            break
+        if used + hit.token_count <= max_tokens:
+            kept.append(replace(hit, score=score))
+            used += hit.token_count
+    before = sum(h.token_count for h in hits[:k])
+    return Packed(tuple(kept), len(hits) - len(kept), before, used)

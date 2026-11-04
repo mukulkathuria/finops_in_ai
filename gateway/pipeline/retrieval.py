@@ -7,6 +7,7 @@ request, the hits become a lower-trust user-role message just before the questio
 guardrails read them like anything a user sends.
 """
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -20,15 +21,42 @@ from gateway.adapters.postgres.documents import (
     NewChunk,
     NewDocument,
 )
+from gateway.adapters.postgres.relevance import RelevanceSettingsCache
 from gateway.domain.errors import Forbidden, InvalidInput, NotFound
 from gateway.domain.llm import CanonicalRequest, Message, TextPart
 from gateway.domain.parsing import indexable_text, text_tokens
-from gateway.domain.retrieval import Hit, chunk_text, retrieved_context
+from gateway.domain.retrieval import (
+    RAG_RELEVANCE,
+    Hit,
+    RelevanceSettings,
+    chunk_text,
+    pack,
+    retrieved_context,
+)
+from gateway.domain.stages import Mode
 from gateway.pipeline.files import Owner
 from gateway.pipeline.parsing import ParseService
+from gateway.pipeline.stages import StageRunner
 from gateway.ports.embeddings import Embedder
+from gateway.ports.rerank import Reranker
 
 _MAX_QUERY_CHARS: Final = 4_000
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Plan:
+    """How a retrieval runs for an org (US-21)."""
+
+    mode: Mode  # of the `rag_relevance` stage; off without a reranker
+    settings: RelevanceSettings
+    candidates: int  # retrieved by vector
+
+
+@dataclass(frozen=True, slots=True)
+class Selection:
+    passages: list[Hit]  # what is sent to the model
+    report: dict[str, Any] | None  # for the ledger notes; None while the filter is off
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +100,9 @@ class RetrievalService:
         embedder: Embedder,
         parsing: ParseService,
         metrics: GatewayMetrics,
+        stages: StageRunner | None = None,
+        reranker: Reranker | None = None,
+        relevance: RelevanceSettingsCache | None = None,
         max_k: int = 50,
         max_chunks_per_org: int = 1_000_000,
     ) -> None:
@@ -82,6 +113,9 @@ class RetrievalService:
         self._metrics = metrics
         self._max_k = max_k
         self._max_chunks = max_chunks_per_org
+        self._stages = stages
+        self._reranker = reranker
+        self._relevance = relevance
 
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
@@ -148,6 +182,54 @@ class RetrievalService:
             )
         self._metrics.retrievals.labels(source).inc()
         return hits
+
+    async def plan(self, org_id: UUID, k: int) -> Plan:
+        """How this org's retrieval runs: the `rag_relevance` mode (off without a reranker), its
+        settings and how many candidates to retrieve."""
+        if self._reranker is None or self._stages is None or self._relevance is None:
+            return Plan("off", RelevanceSettings(), min(k, self._max_k))
+        mode = await self._stages.mode(org_id, RAG_RELEVANCE)
+        if mode == "off":
+            return Plan("off", RelevanceSettings(), min(k, self._max_k))
+        settings = await self._relevance.get(org_id)
+        return Plan(mode, settings, min(max(k, settings.candidates), self._max_k))
+
+    async def select(self, question: str, hits: Sequence[Hit], *, k: int, plan: Plan) -> Selection:
+        """US-21: the passages to send. On: the reranked passages over the org's threshold,
+        packed within its token budget. In shadow: the k nearest, and the report says what would
+        have been sent. A reranker failure keeps the k nearest (fail-open) and is reported."""
+        nearest = list(hits[:k])
+        if plan.mode == "off" or not hits or self._reranker is None:
+            return Selection(nearest, None)
+        base: dict[str, Any] = {
+            "mode": plan.mode,
+            "model": self._reranker.model,
+            "candidates": len(hits),
+        }
+        try:
+            scores = await self._reranker.rerank(
+                question[:_MAX_QUERY_CHARS], [h.content for h in hits]
+            )
+        except Exception:  # fail-open: any reranker failure keeps the vector order
+            log.warning("reranking failed; the vector order is kept", exc_info=True)
+            return Selection(nearest, {**base, "rerank": "failed"})
+        packed = pack(
+            hits,
+            scores,
+            threshold=plan.settings.threshold,
+            max_tokens=plan.settings.max_tokens,
+            k=k,
+        )
+        report = {
+            **base,
+            "rerank": "ok",
+            "threshold": plan.settings.threshold,
+            "kept": len(packed.kept),
+            "dropped": packed.dropped,
+            "tokens_before": packed.tokens_before,
+            "tokens_after": packed.tokens_after,
+        }
+        return Selection(list(packed.kept) if plan.mode == "on" else nearest, report)
 
     async def documents(
         self, owner: Owner, groups: frozenset[str], *, limit: int

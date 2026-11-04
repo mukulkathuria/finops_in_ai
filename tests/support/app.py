@@ -38,6 +38,8 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "parser_base_url": "http://docparse:8000/v1",
         "embedder_base_url": "http://mock-llm:8000/v1",
         "embedder_api_key": SecretStr("test-key"),
+        "reranker_base_url": "http://mock-llm:8000/v1",
+        "reranker_api_key": SecretStr("test-key"),
         "log_level": "WARNING",
     }
     values.update(overrides)

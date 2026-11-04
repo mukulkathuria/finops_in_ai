@@ -315,21 +315,25 @@ async def chat_completions(
         notes = {"files": list(attached.reports)}
     if body.retrieval is not None:  # the permission filter runs inside the vector search
         question = _last_user_text(body.messages)
+        k = body.retrieval.k
+        plan = await retrieval.plan(caller.org_id, k)  # US-21: rerank more than k
         hits = await retrieval.search(
-            file_owner(caller),
-            caller.groups,
-            question,
-            body.retrieval.k,
-            source="chat",
+            file_owner(caller), caller.groups, question, plan.candidates, source="chat"
         )
         hits, dropped = await chat.passages(caller.org_id, hits)
-        req = with_retrieved(req, hits)
-        headers["x-finops-retrieved-chunks"] = str(len(hits))
-        retrieved = {
-            **retrieval_report(hits),
+        selection = await retrieval.select(question, hits, k=k, plan=plan)
+        req = with_retrieved(req, selection.passages)
+        headers["x-finops-retrieved-chunks"] = str(len(selection.passages))
+        retrieved: dict[str, Any] = {
+            **retrieval_report(selection.passages),
             "dropped": dropped,
             "query_tokens": text_tokens(question),
         }
+        if (relevance := selection.report) is not None:
+            retrieved["relevance"] = relevance
+            if plan.mode == "on" and relevance["rerank"] == "ok":
+                pruned = relevance["tokens_before"] - relevance["tokens_after"]
+                headers["x-finops-pruned-tokens"] = str(pruned)
         notes = {**(notes or {}), "retrieval": retrieved}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:

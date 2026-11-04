@@ -293,6 +293,31 @@ async def embeddings(request: Request) -> Response:
     )
 
 
+@app.post("/v1/rerank", response_model=None)
+async def rerank(request: Request) -> Response:
+    """A deterministic stand-in for a cross-encoder: the share of the question's words a passage
+    contains."""
+    if not _authorized(request):
+        return _error(401, "invalid_api_key", "Missing bearer token", "invalid_request_error")
+    body = orjson.loads(await request.body())
+    query = _words(str(body.get("query", "")))
+    documents = [str(d) for d in body.get("documents") or []]
+    await _latency()
+    results = [
+        {
+            "index": i,
+            "relevance_score": round(len(query & _words(d)) / len(query), 4) if query else 0.0,
+        }
+        for i, d in enumerate(documents)
+    ]
+    results.sort(key=lambda r: r["relevance_score"], reverse=True)
+    return _json({"model": body.get("model", "mock-rerank"), "results": results})
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
 @app.post("/v1/images/generations", response_model=None)
 async def images(request: Request) -> Response:
     if not _authorized(request):

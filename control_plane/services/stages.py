@@ -16,7 +16,7 @@ from gateway.domain.errors import Conflict, NotFound
 from gateway.domain.policy import Permission, Principal
 from gateway.domain.stages import Mode, StageSetting, effective_mode
 from gateway.pipeline.stages import StageRunner
-from gateway.ports.stages import Stage
+from gateway.ports.stages import StageInfo
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class EvalIn:
 
 
 def _view(
-    stage: Stage,
+    stage: StageInfo,
     settings: Mapping[str, StageSetting],
     evals: Mapping[tuple[str, str], EvalRun],
 ) -> StageView:
@@ -77,7 +77,7 @@ class StageAdminService:
     def _ctx(self, principal: Principal) -> TenantContext:
         return TenantContext(principal.org_id, principal.user_id)
 
-    def _stage(self, name: str) -> Stage:
+    def _stage(self, name: str) -> StageInfo:
         stage = self._runner.get(name)
         if stage is None:
             raise NotFound(f"there is no optimization stage named {name!r}", code="stage_not_found")
@@ -167,7 +167,7 @@ class StageAdminService:
         return stored
 
     async def _demote(
-        self, conn: AsyncConnection, principal: Principal, stage: Stage, meta: RequestMeta
+        self, conn: AsyncConnection, principal: Principal, stage: StageInfo, meta: RequestMeta
     ) -> bool:
         """A failing run takes a stage that is on for this version back to shadow (audited)."""
         setting = (await self._repo.settings(conn, lock=True)).get(stage.name)

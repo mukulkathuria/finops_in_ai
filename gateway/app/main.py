@@ -20,6 +20,7 @@ from control_plane.api import (
     guardrails,
     invitations,
     providers,
+    relevance,
     routing,
     savings,
     stages,
@@ -107,6 +108,7 @@ def create_app(
     app.include_router(savings.router)
     app.include_router(cache.router)
     app.include_router(routing.router)
+    app.include_router(relevance.router)
     app.include_router(files.router)
     app.include_router(documents.router)
     app.include_router(whoami.router)

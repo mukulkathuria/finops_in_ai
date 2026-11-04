@@ -18,6 +18,7 @@ from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
+from control_plane.services.relevance import RelevanceService
 from control_plane.services.routing import RoutingService
 from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
@@ -46,6 +47,7 @@ from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
+from gateway.adapters.postgres.relevance import RelevanceRepository, RelevanceSettingsCache
 from gateway.adapters.postgres.routing import RoutingRepository, RoutingSettingsCache
 from gateway.adapters.postgres.savings import BaselineModels, SavingsRepository
 from gateway.adapters.postgres.sessions import SessionRepository
@@ -53,6 +55,7 @@ from gateway.adapters.postgres.stages import StageModeCache, StageRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
 from gateway.adapters.postgres.webhooks import WebhookRepository
+from gateway.adapters.rerank.http import HttpReranker
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
@@ -69,7 +72,7 @@ from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.parsing import ParseService
 from gateway.pipeline.retrieval import RetrievalService
 from gateway.pipeline.routing import RouterStage, Verifier
-from gateway.pipeline.stages import CompressionStage, StageRunner
+from gateway.pipeline.stages import CompressionStage, RagRelevance, StageRunner
 from gateway.pipeline.usage import UsageReporter
 from gateway.ports.storage import ObjectStore
 
@@ -103,6 +106,7 @@ class Container:
     savings_service: SavingsService
     cache_settings_service: CacheSettingsService
     routing_service: RoutingService
+    relevance_service: RelevanceService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -230,14 +234,6 @@ def build_container(
         http=http,
         timeout_s=settings.embedder_timeout_s,
     )
-    retrieval_service = RetrievalService(
-        db=db,
-        repo=DocumentRepository(),
-        embedder=embedder,
-        parsing=parse_service,
-        metrics=observability.metrics,
-        max_chunks_per_org=settings.max_indexed_chunks_per_org,
-    )
     catalog = CatalogCache(db, CatalogRepository())
     savings_repo = SavingsRepository()
     baselines = BaselineModels(db, savings_repo)
@@ -248,7 +244,33 @@ def build_container(
     routing_repo = RoutingRepository()
     routing_settings = RoutingSettingsCache(db, routing_repo)
     stage_runner = StageRunner(
-        [CompressionStage(), RouterStage(routing_settings, catalog)], stage_modes
+        [CompressionStage(), RouterStage(routing_settings, catalog)],
+        stage_modes,
+        descriptors=[RagRelevance()],
+    )
+    relevance_repo = RelevanceRepository()
+    relevance_settings = RelevanceSettingsCache(db, relevance_repo)
+    reranker = (
+        HttpReranker(
+            settings.reranker_base_url,
+            settings.reranker_model,
+            http=http,
+            api_key=_secret(settings.reranker_api_key),
+            timeout_s=settings.reranker_timeout_s,
+        )
+        if settings.reranker_base_url
+        else None
+    )
+    retrieval_service = RetrievalService(
+        db=db,
+        repo=DocumentRepository(),
+        embedder=embedder,
+        parsing=parse_service,
+        metrics=observability.metrics,
+        stages=stage_runner,
+        reranker=reranker,
+        relevance=relevance_settings,
+        max_chunks_per_org=settings.max_indexed_chunks_per_org,
     )
     credentials = CredentialRepository()
     teams = TeamRepository()
@@ -398,6 +420,9 @@ def build_container(
             catalog=catalog,
             audit=audit,
             authz=authz,
+        ),
+        relevance_service=RelevanceService(
+            db=db, repo=relevance_repo, cache=relevance_settings, audit=audit, authz=authz
         ),
         webhook_service=WebhookService(
             db=db,

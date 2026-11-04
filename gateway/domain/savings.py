@@ -15,6 +15,7 @@ from typing import Any, Final
 
 from gateway.domain.llm import Usage
 from gateway.domain.pricing import ModelPrice
+from gateway.domain.retrieval import RAG_RELEVANCE, RAG_RELEVANCE_VERSION
 from gateway.domain.stages import StageReport
 
 _CLASSIFIER_CALLED: Final = frozenset({"passed", "flagged", "blocked"})
@@ -57,6 +58,10 @@ def overhead_inputs(
         and d.get("backend") != "rules"
         and d.get("action") in _CLASSIFIER_CALLED
     )
+    retrieval = notes.get("retrieval")
+    relevance = retrieval.get("relevance") if isinstance(retrieval, Mapping) else None
+    if isinstance(relevance, Mapping) and relevance.get("rerank") == "ok":
+        calls += 1  # a rerank costs about what a classifier call does
     embedded = 0
     for step in ("retrieval", "cache", "judge"):  # embedded to retrieve, match or compare
         record = notes.get(step)
@@ -139,3 +144,41 @@ def unserved(reports: Sequence[StageReport]) -> list[StageReport]:
     """The reports of a request that was not served (an error, a cancellation, a block): what
     the stages decided is kept, but none counts as applied or as saving anything."""
     return [replace(r, cost_delta_micro_usd=0, applied=False) for r in reports]
+
+
+def relevance_report(retrieval: object, price: ModelPrice) -> StageReport | None:
+    """US-21: the relevance filter as a stage report, from the request's retrieval notes: the k
+    nearest passages against those kept (in shadow, those that would have been)."""
+    relevance = retrieval.get("relevance") if isinstance(retrieval, Mapping) else None
+    if not isinstance(relevance, Mapping):
+        return None
+    shadow = relevance.get("mode") == "shadow"
+    if relevance.get("rerank") != "ok":
+        return StageReport(
+            RAG_RELEVANCE,
+            RAG_RELEVANCE_VERSION,
+            "pre_llm",
+            0,
+            0,
+            0,
+            shadow=shadow,
+            decisions={"rerank": "failed"},
+        )
+    before = int(relevance.get("tokens_before") or 0)
+    after = int(relevance.get("tokens_after") or 0)
+    delta = price.cost(Usage(input_tokens=after)) - price.cost(Usage(input_tokens=before))
+    return StageReport(
+        RAG_RELEVANCE,
+        RAG_RELEVANCE_VERSION,
+        "pre_llm",
+        before,
+        after,
+        delta,
+        quality_risk=0.1,
+        applied=before != after,
+        shadow=shadow,
+        decisions={
+            "kept": int(relevance.get("kept") or 0),
+            "dropped": int(relevance.get("dropped") or 0),
+        },
+    )
