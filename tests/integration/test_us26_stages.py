@@ -63,6 +63,7 @@ async def test_a_new_stage_runs_in_shadow_and_goes_on_only_after_its_eval_passes
         assert [(s["name"], s["mode"], s["latest_eval"]) for s in listed] == [
             ("compression", "shadow", None),
             ("router", "off", None),  # US-19: ships off
+            ("rag_relevance", "off", None),  # US-21: listed and gated, run in retrieval
         ]
 
         log.clear()
