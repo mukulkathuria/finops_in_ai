@@ -252,6 +252,26 @@ A chat request asks for the context with `"code_context": {"project_id": "...", 
 reports the hit rate (expected module and symbol in the context) and the context's tokens against
 the whole modules'; a unit test holds the hit rate at 0.9 or more.
 
+## MCP context tools
+
+`POST /v1/mcp` serves the Model Context Protocol over Streamable HTTP, with an API key as the
+bearer token. Each request gets one JSON response; the endpoint keeps no sessions and opens no
+event streams. Two tools run under the credential's ACL:
+
+- `get_code_context`: the context packs of the project modules a question names.
+- `search_documents`: the passages of the documents the credential may read.
+
+Protocol versions:
+
+- 2026-07-28: `server/discover` describes the server. Each request carries its version in
+  `_meta`, and the `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers must repeat the
+  body (400 otherwise).
+- 2025-11-25 and 2025-06-18: the `initialize` handshake, answered without a session.
+
+A request with an `Origin` header is refused (403), so no web page can drive the tools. To add the
+server to Claude Code: `claude mcp add --transport http finops https://<gateway>/v1/mcp --header
+"Authorization: Bearer <key>"`.
+
 ## Optimization stages (shadow mode and the eval gate)
 
 Every optimization is a stage with one contract (spec section 4): it may make the request cheaper
