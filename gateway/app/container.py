@@ -44,6 +44,7 @@ from gateway.adapters.postgres.credentials import CredentialRepository, org_key_
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.documents import DocumentRepository
 from gateway.adapters.postgres.files import FileRepository
+from gateway.adapters.postgres.graph import PostgresGraphStore
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
@@ -113,6 +114,7 @@ class Container:
     file_service: FileService
     parse_service: ParseService
     retrieval_service: RetrievalService
+    graph_store: PostgresGraphStore
     metrics: GatewayMetrics
     telemetry: Telemetry
 
@@ -388,6 +390,7 @@ def build_container(
         file_service=file_service,
         parse_service=parse_service,
         retrieval_service=retrieval_service,
+        graph_store=PostgresGraphStore(db),
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,

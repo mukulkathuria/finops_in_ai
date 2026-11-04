@@ -25,4 +25,9 @@ async def readyz(request: Request, response: Response) -> dict[str, object]:
     }
     ready = all(v == "ok" for v in checks.values())
     response.status_code = 200 if ready else 503
-    return {"status": "ok" if ready else "unavailable", "checks": checks}
+    body: dict[str, object] = {"status": "ok" if ready else "unavailable", "checks": checks}
+    if checks["database"] == "ok":  # informational (ADR 0004): it never decides readiness
+        present = await container.graph_store.sql_pgq()
+        if present is not None:
+            body["info"] = {"sql_pgq": "present" if present else "absent"}
+    return body
