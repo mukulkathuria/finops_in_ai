@@ -31,6 +31,14 @@ Ports and adapters (ADR 0001): `gateway/domain` is pure logic, `gateway/ports` h
 interfaces, `gateway/adapters` holds every vendor integration, `gateway/app` wires them from
 config. `import-linter` enforces the direction of dependencies in CI.
 
+Provider adapters are native by default (OpenAI-compatible, Anthropic, Gemini). LiteLLM is an
+optional, pinned extra (`uv sync --extra litellm`, or `--build-arg EXTRAS=litellm` for the image)
+for OpenAI-compatible providers. Switching is one line of config: `adapter: litellm` on a
+provider in `config/gateway.yaml`, or `PROVIDER_ADAPTER_DEFAULT=litellm`. Both adapters pass the
+same contract suite, and the switch test shows they give the same answers, usage and cost. The
+ledger records which adapter served (`litellm:<provider>`). Selecting LiteLLM where it cannot
+serve the provider fails at startup (ADR 0008).
+
 ## Quick start (dev stack)
 
 Prerequisites: Docker with Compose v2, [uv](https://docs.astral.sh/uv/) (Python 3.14 is fetched

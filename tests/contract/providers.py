@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 import httpx2
 import orjson
+import pytest
 
 from gateway.adapters.llm.anthropic import AnthropicAdapter
 from gateway.adapters.llm.gemini import GeminiAdapter
@@ -471,6 +472,14 @@ def build(name: str) -> Harness:
         adapter: LLMAdapter = OpenAICompatAdapter(
             base_url="https://api.example.test/v1", api_key="k", http=http
         )
+        usage = Usage(input_tokens=100, output_tokens=50, cached_tokens=60, reasoning_tokens=20)
+        return Harness(name, adapter, requests, usage, content_filter_raises=True, embeddings=True)
+    if name == "litellm":  # the optional extra (ADR 0008), on the OpenAI fixtures
+        pytest.importorskip("litellm")
+        from gateway.adapters.llm.litellm_adapter import LiteLLMAdapter
+
+        http = httpx2.AsyncClient(transport=_transport(OPENAI, requests, _body_model))
+        adapter = LiteLLMAdapter(base_url="https://api.example.test/v1", api_key="k", http=http)
         usage = Usage(input_tokens=100, output_tokens=50, cached_tokens=60, reasoning_tokens=20)
         return Harness(name, adapter, requests, usage, content_filter_raises=True, embeddings=True)
     if name == "anthropic":

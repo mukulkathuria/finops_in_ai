@@ -41,7 +41,9 @@ class GatewayConfig(BaseModel):
                 api_key_env=p.api_key_env,
                 max_tokens_field=p.max_tokens_field,
                 timeout_s=p.timeout_s,
-                adapter=p.adapter or default_adapter,
+                # The default reaches only the providers LiteLLM can serve; an explicit
+                # choice is kept and fails at startup if it cannot be served (ADR 0008).
+                adapter=p.adapter or (default_adapter if p.kind == "openai_compat" else "native"),
             )
             for name, p in self.providers.items()
         }

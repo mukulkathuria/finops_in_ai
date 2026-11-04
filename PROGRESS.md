@@ -33,6 +33,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-19 complexity router as a stage (off, shadow, on after a passed eval): easy prompts for the large tier go to the small tier of the same provider when it can take them; sampled requests are answered by the other tier too and the agreement is recorded; the routing report compares it with the tolerance; a team can opt out | `feat(US-19)` | `tests/unit/test_routing.py`, `tests/integration/test_us19_routing.py` |
 | Provider prompt caching (Phase 3): Anthropic requests carry cache breakpoints (system prompt or tools; the newest turn of a conversation), on by default per org; reads and writes are priced and reported as the `provider_cache` technique | `feat(phase-3)` | `tests/contract/test_llm_contract.py`, `tests/unit/test_provider_cache.py`, `tests/integration/test_provider_cache.py` |
 | Price sync job (Phase 3): the worker keeps `model_catalog` in step with `config/prices.json` or an https URL; changes are appended (at once or at a later `effective_from`), suspicious ones refused; one sync at a time across workers | `feat(phase-3)` | `tests/unit/test_price_sync.py`, `tests/integration/test_price_sync.py` |
+| US-06 (switch part) and Phase 3: the optional LiteLLM adapter (pinned extra, OpenAI-compatible providers) reuses the native mapping on the shared HTTP client and passes the whole contract suite; the switch test answers the same requests through both adapters with the same answers, usage and cost; unservable selections fail at startup; filelock raised past its CVEs | `feat(US-06)` | `tests/contract/test_llm_contract.py` (`litellm` harness), `tests/integration/test_litellm_switch.py`, `tests/unit/test_envelope.py` |
 | US-26 a stage registers by config (registry order, per-org mode), runs in shadow on a copy, reports to `stage_reports` with the ledger row, and goes `on` only after a passed eval run for its current version; a failing stage is skipped and reported | `feat(US-26)` | `tests/unit/test_stages.py`, `tests/integration/test_us26_stages.py` |
 | Phase 2 review loop: per-credential and heavy-work limits, budget precheck before conversion and retrieval, blocked passages dropped, exact search behind HNSW, linear detectors, input size cap | `c8740df`, `4ce7d06`, `201a9a2` | `docs/audits/2026-11-04-phase2-review.md`, `tests/integration/test_phase2_review.py`, `tests/unit/test_relay.py` |
 
@@ -81,8 +82,8 @@ Plan: `docs/superpowers/plans/2026-11-04-phase3-savings.md`.
 
 ## Remaining stories
 
-Phase 3: the optional LiteLLM adapter (US-17 to US-19, US-26, provider prompt caching and the
-price sync are done); Phase 4 US-21, US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30.
+Phase 3: done (US-17 to US-19, US-26, provider prompt caching, the price sync and the optional
+LiteLLM adapter); the Phase 3 review loop is next; Phase 4 US-21, US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30.
 
 ## Findings and deviations from the spec
 

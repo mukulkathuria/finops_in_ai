@@ -1,8 +1,8 @@
 """US-06: org admins add provider keys and choose the adapter.
 
 Acceptance: keys are stored encrypted and never returned by the API; switching a provider between
-adapters is configuration only (the LiteLLM side fails closed until it can pass the contract
-suite, ADR 0008).
+adapters is configuration only (the LiteLLM side is the optional `litellm` extra and passes the
+same contract suite; the switch test is tests/integration/test_litellm_switch.py, ADR 0008).
 """
 
 from collections.abc import AsyncIterator

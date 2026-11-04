@@ -7,12 +7,14 @@ FROM base AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/app/.venv
 WORKDIR /src
+# Optional extras, e.g. --build-arg EXTRAS=litellm (ADR 0008).
+ARG EXTRAS=""
 COPY pyproject.toml uv.lock README.md ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project ${EXTRAS:+--extra $EXTRAS}
 COPY gateway ./gateway
 COPY control_plane ./control_plane
 COPY worker ./worker
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable ${EXTRAS:+--extra $EXTRAS}
 
 FROM base AS runtime
 # The runtime needs no installer: drop pip (and its vendored deps) to shrink the attack surface.

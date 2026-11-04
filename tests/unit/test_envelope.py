@@ -6,6 +6,7 @@ import os
 import httpx2
 import pytest
 
+from gateway.adapters.llm import registry
 from gateway.adapters.llm.registry import build_adapters
 from gateway.adapters.security.envelope import (
     DecryptionError,
@@ -14,6 +15,7 @@ from gateway.adapters.security.envelope import (
     parse_master_keys,
 )
 from gateway.adapters.security.tokens import b64url_encode
+from gateway.app.gateway_config import GatewayConfig
 from gateway.domain.providers import ProviderConfig
 
 AAD = b"finops:provider-key:org-a:openai:row-1"
@@ -69,9 +71,57 @@ def test_master_key_parsing_validates_lengths() -> None:
         parse_master_keys(good, "m1", "nocolon")
 
 
-def test_selecting_litellm_fails_closed() -> None:
-    config = ProviderConfig(
-        "openai", "openai_compat", "https://api.openai.com/v1", "OPENAI_API_KEY", adapter="litellm"
+LITELLM_OPENAI = ProviderConfig(
+    "openai", "openai_compat", "https://api.openai.com/v1", "OPENAI_API_KEY", adapter="litellm"
+)
+
+
+def test_selecting_litellm_fails_closed_where_it_cannot_serve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude = ProviderConfig(
+        "anthropic",
+        "anthropic",
+        "https://api.anthropic.com",
+        "ANTHROPIC_API_KEY",
+        adapter="litellm",
     )
-    with pytest.raises(RuntimeError, match="litellm"):
-        build_adapters({"openai": config}, {"OPENAI_API_KEY": "k"}, httpx2.AsyncClient())
+    with pytest.raises(RuntimeError, match="openai_compat"):
+        build_adapters({"anthropic": claude}, {}, httpx2.AsyncClient())  # even without a key
+    monkeypatch.setattr(registry, "_litellm_installed", lambda: False)  # a build without the extra
+    with pytest.raises(RuntimeError, match=r"finops-gateway\[litellm\]"):
+        build_adapters({"openai": LITELLM_OPENAI}, {}, httpx2.AsyncClient())
+
+
+def test_selecting_litellm_builds_it_for_an_openai_compatible_provider() -> None:
+    pytest.importorskip("litellm")
+    keys = {"OPENAI_API_KEY": "k"}
+    built = build_adapters({"openai": LITELLM_OPENAI}, keys, httpx2.AsyncClient())
+    assert built["openai"].name == "litellm:openai"
+
+
+def test_the_litellm_default_reaches_only_the_providers_it_can_serve() -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "providers": {
+                "openai": {
+                    "kind": "openai_compat",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_env": "OPENAI_API_KEY",
+                },
+                "anthropic": {
+                    "kind": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+                "pinned": {
+                    "kind": "openai_compat",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key_env": "PINNED_KEY",
+                    "adapter": "native",
+                },
+            }
+        }
+    )
+    chosen = {name: c.adapter for name, c in config.provider_configs("litellm").items()}
+    assert chosen == {"openai": "litellm", "anthropic": "native", "pinned": "native"}

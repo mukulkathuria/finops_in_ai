@@ -145,7 +145,10 @@ class OpenAICompatAdapter:
             raise transport_error(exc, self._name) from exc
         if resp.status_code >= 400:
             raise self._status_error(resp)
-        data = json_body(resp)
+        return self._completion(json_body(resp), req)
+
+    def _completion(self, data: Mapping[str, Any], req: CanonicalRequest) -> CanonicalResponse:
+        """A reply (OpenAI shape) as the canonical response."""
         try:
             choice = data["choices"][0]
             msg = choice["message"]
@@ -192,6 +195,10 @@ class OpenAICompatAdapter:
             raise malformed(self._name) from exc
         if not isinstance(event, dict):
             raise malformed(self._name)
+        return self._events(event)
+
+    def _events(self, event: Mapping[str, Any]) -> list[CanonicalChunk]:
+        """The chunks one streamed event (OpenAI shape) carries."""
         if isinstance(event.get("error"), dict):
             raise self._error_from_body(event["error"], status=None, retry=None)
         out: list[CanonicalChunk] = []
@@ -238,7 +245,10 @@ class OpenAICompatAdapter:
             raise transport_error(exc, self._name) from exc
         if resp.status_code >= 400:
             raise self._status_error(resp)
-        data = json_body(resp)
+        return self._embedding(json_body(resp), req)
+
+    def _embedding(self, data: Mapping[str, Any], req: EmbedRequest) -> EmbedResponse:
+        """An embeddings reply (OpenAI shape) as the canonical response."""
         try:
             items = sorted(data["data"], key=lambda d: int(d["index"]))
             vectors = tuple(tuple(float(x) for x in item["embedding"]) for item in items)

@@ -1,5 +1,6 @@
 """Adapter registry: one line per backend (spec section 3, pattern step 3)."""
 
+import importlib.util
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from uuid import UUID
@@ -32,20 +33,51 @@ FACTORIES: dict[str, Factory] = {
 }
 
 
+def _litellm_installed() -> bool:
+    return importlib.util.find_spec("litellm") is not None
+
+
+def _check(name: str, config: ProviderConfig) -> None:
+    """ADR 0008: the litellm adapter is an optional extra and never a silent fallback. A
+    provider that selects it fails at startup unless it can be served, key or no key."""
+    if config.adapter != "litellm":
+        return
+    if config.kind != "openai_compat":
+        raise RuntimeError(
+            f"provider {name!r} selects the litellm adapter, which serves openai_compat providers"
+        )
+    if not _litellm_installed():
+        raise RuntimeError(
+            f"provider {name!r} selects the litellm adapter; install finops-gateway[litellm]"
+        )
+
+
+def build_adapter(config: ProviderConfig, key: str, http: httpx2.AsyncClient) -> LLMAdapter:
+    """The adapter a provider is configured with: native, or LiteLLM when selected."""
+    if config.adapter == "litellm":
+        from gateway.adapters.llm.litellm_adapter import LiteLLMAdapter  # the optional extra
+
+        return LiteLLMAdapter(
+            base_url=config.base_url,
+            api_key=key,
+            http=http,
+            name=f"litellm:{config.name}",
+            timeout_s=config.timeout_s,
+            max_tokens_field=config.max_tokens_field,
+        )
+    return FACTORIES[config.kind](config, key, http)
+
+
 def build_adapters(
     configs: Mapping[str, ProviderConfig], environ: Mapping[str, str], http: httpx2.AsyncClient
 ) -> dict[str, LLMAdapter]:
     """Instantiate every configured provider whose API key is present in the environment."""
     adapters: dict[str, LLMAdapter] = {}
     for name, config in configs.items():
-        if config.adapter == "litellm":
-            # ADR 0008: no LiteLLM release supports OpenAI SDK 3.x yet; never fall back silently.
-            raise RuntimeError(
-                f"provider {name!r} selects the litellm adapter, not available in this build"
-            )
+        _check(name, config)
         key = environ.get(config.api_key_env, "").strip()
         if key:
-            adapters[name] = FACTORIES[config.kind](config, key, http)
+            adapters[name] = build_adapter(config, key, http)
     return adapters
 
 
@@ -72,11 +104,9 @@ class OrgAdapters:
             return hit[1]
         keys = await self._lookup(org_id)
         adapters = {
-            provider: FACTORIES[self._configs[provider].kind](
-                self._configs[provider], key, self._http
-            )
+            provider: build_adapter(self._configs[provider], key, self._http)
             for provider, (_, key) in keys.items()
-            if provider in self._configs and self._configs[provider].adapter == "native"
+            if provider in self._configs
         }
         if len(self._cache) > 10_000:  # bounded memory under many tenants
             self._cache.clear()

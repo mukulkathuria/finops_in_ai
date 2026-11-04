@@ -28,7 +28,7 @@ WEATHER = ToolSpec(
 )
 
 
-@pytest.fixture(params=["openai_compat", "anthropic", "gemini"])
+@pytest.fixture(params=["openai_compat", "anthropic", "gemini", "litellm"])
 def harness(request: pytest.FixtureRequest) -> Harness:
     return build(request.param)
 
@@ -151,7 +151,7 @@ async def test_system_prompt_tools_and_images_are_mapped(harness: Harness) -> No
     assert "You are terse." in flat
     assert "iVBORw0KGgo=" in flat
     assert "get_weather" in flat
-    if harness.name == "openai_compat":
+    if harness.name in ("openai_compat", "litellm"):
         assert body["messages"][0] == {"role": "system", "content": "You are terse."}
     elif harness.name == "anthropic":
         assert body["system"] == "You are terse."
