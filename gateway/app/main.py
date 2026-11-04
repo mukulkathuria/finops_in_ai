@@ -24,7 +24,7 @@ from control_plane.api import (
 )
 from control_plane.api.deps import ControlPlaneServices
 from gateway import __version__
-from gateway.api import health, metrics, openai, usage, whoami
+from gateway.api import files, health, metrics, openai, usage, whoami
 from gateway.api.caller import CallerServices
 from gateway.api.errors import install_error_handlers
 from gateway.api.metrics import MetricsServices
@@ -74,7 +74,11 @@ def create_app(
         openapi_url="/openapi.json" if docs else None,
     )
     install_error_handlers(app)
-    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=settings.max_request_bytes,
+        upload_bytes=settings.max_upload_bytes + 1024 * 1024,  # room for multipart framing
+    )
     app.add_middleware(
         TelemetryMiddleware,
         metrics=observability.metrics,
@@ -95,6 +99,7 @@ def create_app(
     app.include_router(budgets.requests_router)
     app.include_router(webhooks.router)
     app.include_router(guardrails.router)
+    app.include_router(files.router)
     app.include_router(whoami.router)
     app.include_router(usage.router)
     app.include_router(openai.router)

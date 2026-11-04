@@ -61,7 +61,7 @@ async def test_liveness_and_readiness(api: Api) -> None:
     assert (await client.get("/healthz")).json() == {"status": "ok"}
     ready = await client.get("/readyz")
     assert ready.status_code == 200
-    assert ready.json()["checks"] == {"database": "ok"}
+    assert ready.json()["checks"] == {"database": "ok", "objects": "ok"}
 
 
 async def test_metrics_count_requests_tokens_cost_stages_and_refusals(api: Api) -> None:

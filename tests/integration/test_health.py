@@ -5,12 +5,16 @@ from pydantic import SecretStr
 
 from gateway.app.main import create_app
 from gateway.app.settings import Settings
+from tests.support.app import OBJECTS
 from tests.support.database import DisposableDatabase
 
 
 async def _get(database_url: str, path: str) -> httpx2.Response:
     settings = Settings(  # type: ignore[call-arg]
-        _env_file=None, environment="test", database_url=SecretStr(database_url)
+        _env_file=None,
+        environment="test",
+        database_url=SecretStr(database_url),
+        object_store_path=OBJECTS,
     )
     app = create_app(settings)
     async with app.router.lifespan_context(app):
@@ -34,4 +38,7 @@ async def test_readiness_ok_when_database_answers(test_db: DisposableDatabase) -
 async def test_readiness_fails_cleanly_when_database_is_down() -> None:
     resp = await _get("postgresql://app:x@127.0.0.1:1/none", "/readyz")
     assert resp.status_code == 503
-    assert resp.json() == {"status": "unavailable", "checks": {"database": "unavailable"}}
+    assert resp.json() == {
+        "status": "unavailable",
+        "checks": {"database": "unavailable", "objects": "ok"},
+    }

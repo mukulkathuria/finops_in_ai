@@ -40,7 +40,7 @@ automatically), Node 24+ for the dashboard.
 uv sync                                # Python dependencies (locked in uv.lock)
 uv run python scripts/init_env.py      # writes .env with fresh random secrets (never overwrites)
 docker compose up -d --build           # PostgreSQL 19 RC1, mock LLM, migrations, gateway
-curl http://127.0.0.1:8080/readyz      # {"status":"ok","checks":{"database":"ok"}}
+curl http://127.0.0.1:8080/readyz      # {"status":"ok","checks":{"database":"ok","objects":"ok"}}
 open http://127.0.0.1:5173            # dashboard (sign in with the bootstrap admin)
 ```
 
@@ -122,6 +122,27 @@ Classifier backend (`.env`): `CLASSIFIER_BACKEND=rules|laya|jev`. Laya runs loca
 (`pip install "laya[serve]"`, then `laya-serve` on port 8000; set `LAYA_BASE_URL`); the dev stack
 points at the mock provider's stand-in. Jev is hosted and needs `JEV_API_KEY` (the gateway refuses
 to start with `jev` and no key). Deterministic rules always run first and always win.
+
+## Files (uploads)
+
+`POST /v1/files` (multipart `file` and `purpose`, as with the OpenAI SDK's `files.create`) stores
+a file for the uploader's team after checking it from its bytes; `GET /v1/files`,
+`GET /v1/files/{id}`, `GET /v1/files/{id}/content` and `DELETE /v1/files/{id}` list, read,
+download and delete. Only the uploader's team (and the uploading user) can see a file.
+
+| Check | Refusal (`error.code`) |
+| --- | --- |
+| Type sniffed from the content must match the extension (PDF, PNG, JPEG, GIF, WebP, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON, HTML) | 422 `unsupported_file_type`, `file_type_mismatch` |
+| Size (`MAX_UPLOAD_BYTES`, 25 MiB) | 413 `file_too_large`, 422 `empty_file` |
+| PDF pages and slides (`MAX_FILE_PAGES`), checked in an isolated, time-limited process | 422 `too_many_pages`, `encrypted_file`, `corrupt_file`, `unprocessable_file` |
+| Office archives: entries, unpacked size and compression ratio, every member decompressed under caps | 422 `archive_bomb` |
+| Image size from the header (`MAX_IMAGE_PIXELS`) | 422 `image_too_large` |
+| Malware test signature, inside archives too; optional ClamAV (`CLAMAV_ADDRESS`, fails closed) | 422 `malware_detected`, 503 `scanner_unavailable` |
+| Names with a path or control and invisible characters | 422 `invalid_filename` |
+
+Originals live in the object store (`OBJECT_STORE_PATH`, a volume in the dev stack) under a key
+made from the file id, never from its name. Downloads are attachments with `nosniff` and a
+sandboxing CSP.
 
 ## Repository layout
 

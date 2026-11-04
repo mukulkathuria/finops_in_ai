@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     jev_model: str = "jev-latest"
     classifier_timeout_ms: int = Field(default=2000, ge=50, le=30_000)
 
+    # Files (US-14): validated from their bytes; originals live in the object store.
+    max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1024, le=512 * 1024 * 1024)
+    max_file_pages: int = Field(default=500, ge=1, le=100_000)
+    max_image_pixels: int = Field(default=50_000_000, ge=1_000_000, le=1_000_000_000)
+    file_check_timeout_s: float = Field(default=15.0, gt=0, le=300)
+    object_store: Literal["local"] = "local"
+    object_store_path: str = "/var/lib/finops/objects"
+    clamav_address: str | None = None  # host:port of clamd; unset or empty disables it
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"

@@ -19,7 +19,10 @@ async def healthz() -> dict[str, str]:
 async def readyz(request: Request, response: Response) -> dict[str, object]:
     """Readiness: every hard dependency answers within its deadline (503 otherwise)."""
     container = request.app.state.container
-    checks = {"database": "ok" if await container.db.is_ready() else "unavailable"}
+    checks = {
+        "database": "ok" if await container.db.is_ready() else "unavailable",
+        "objects": "ok" if await container.object_store.is_ready() else "unavailable",
+    }
     ready = all(v == "ok" for v in checks.values())
     response.status_code = 200 if ready else 503
     return {"status": "ok" if ready else "unavailable", "checks": checks}

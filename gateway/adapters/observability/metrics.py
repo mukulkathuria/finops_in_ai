@@ -82,6 +82,12 @@ class GatewayMetrics:
             ("stage", "check", "action", "backend"),
             registry=r,
         )
+        self.file_uploads = Counter(
+            "finops_file_uploads",
+            "File uploads by result (accepted or rejected) and reason (file kind or refusal).",
+            ("result", "reason"),
+            registry=r,
+        )
         self.idempotent_replays = Counter(
             "finops_idempotent_replays",
             "Responses replayed for a repeated Idempotency-Key.",

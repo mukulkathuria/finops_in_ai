@@ -1,5 +1,6 @@
 """In-process app clients for API tests (no network, real database)."""
 
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,6 +17,7 @@ from gateway.app.settings import Settings
 from tests.support.database import DisposableDatabase
 
 STRONG_PASSWORD = "Correct-Horse-Battery-9!"
+OBJECTS = tempfile.mkdtemp(prefix="finops-objects-")  # one per test process
 
 
 def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
@@ -27,6 +29,7 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "auth_rate_limit_per_minute": 100_000,  # tests share one client address
         "db_pool_size": 10,
         "laya_base_url": "http://mock-llm:8000",  # the mock provider speaks SystemOne too
+        "object_store_path": OBJECTS,
         "log_level": "WARNING",
     }
     values.update(overrides)

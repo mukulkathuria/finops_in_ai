@@ -120,18 +120,21 @@ class TelemetryMiddleware:
 
 
 class BodyLimitMiddleware:
-    """Reject request bodies above `max_bytes` (spec section 4, ingress) without buffering them."""
+    """Reject request bodies above `max_bytes` (spec section 4, ingress) without buffering them;
+    file uploads (`/v1/files`) may use `upload_bytes` instead."""
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int, upload_bytes: int | None = None) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.upload_bytes = upload_bytes or max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        limit = self.upload_bytes if scope["path"] == "/v1/files" else self.max_bytes
         declared = next((v for k, v in scope["headers"] if k == b"content-length"), b"")
-        if declared.isdigit() and int(declared) > self.max_bytes:
+        if declared.isdigit() and int(declared) > limit:
             body = b'{"error":{"message":"request body too large","type":"invalid_request_error",'
             body += b'"code":"request_too_large","param":null}}'
             await send(
@@ -150,7 +153,7 @@ class BodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 seen += len(message.get("body", b""))
-                if seen > self.max_bytes:
+                if seen > limit:
                     raise PayloadTooLarge("request body too large")
             return message
 

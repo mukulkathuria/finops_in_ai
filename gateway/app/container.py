@@ -21,6 +21,8 @@ from control_plane.services.sessions import SessionService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
 from gateway.adapters.classifiers.registry import build_classifier
+from gateway.adapters.files.clamav import ClamAV
+from gateway.adapters.files.pdf import PdfProbe
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.observability.telemetry import Telemetry
@@ -31,6 +33,7 @@ from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
 from gateway.adapters.postgres.counters import PostgresCounterStore
 from gateway.adapters.postgres.credentials import CredentialRepository, org_key_lookup
 from gateway.adapters.postgres.database import Database
+from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
@@ -41,12 +44,16 @@ from gateway.adapters.postgres.webhooks import WebhookRepository
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
+from gateway.adapters.storage.local import LocalObjectStore
 from gateway.app.gateway_config import load_gateway_config
 from gateway.app.observability import Observability, build_observability
 from gateway.app.settings import Settings
+from gateway.domain.files import FileLimits
 from gateway.pipeline.chat import HOLD_TTL, ChatService
+from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.usage import UsageReporter
+from gateway.ports.storage import ObjectStore
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +83,8 @@ class Container:
     guardrail_service: GuardrailService
     budget_service: BudgetService
     usage_reporter: UsageReporter
+    object_store: ObjectStore
+    file_service: FileService
     metrics: GatewayMetrics
     telemetry: Telemetry
 
@@ -151,6 +160,7 @@ def build_container(
     provider_configs = gateway_config.provider_configs(settings.provider_adapter_default)
     adapters = build_adapters(provider_configs, os.environ if environ is None else environ, http)
     envelope = build_envelope(settings)
+    object_store = LocalObjectStore(settings.object_store_path)
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
@@ -244,6 +254,24 @@ def build_container(
         ),
         budget_service=BudgetService(db=db, budgets=budgets, teams=teams, audit=audit, authz=authz),
         usage_reporter=UsageReporter(db=db, usage=usage, budgets=budgets),
+        object_store=object_store,
+        file_service=FileService(
+            db=db,
+            repo=FileRepository(),
+            store=object_store,
+            limits=FileLimits(
+                max_bytes=settings.max_upload_bytes,
+                max_pages=settings.max_file_pages,
+                max_image_pixels=settings.max_image_pixels,
+            ),
+            pdf=PdfProbe(timeout_s=settings.file_check_timeout_s),
+            scanner=(
+                ClamAV(settings.clamav_address, timeout_s=settings.file_check_timeout_s)
+                if settings.clamav_address
+                else None
+            ),
+            metrics=observability.metrics,
+        ),
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,

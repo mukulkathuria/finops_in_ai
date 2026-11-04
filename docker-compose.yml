@@ -39,6 +39,12 @@ x-app-env: &app-env
   JEV_BASE_URL: ${JEV_BASE_URL:-https://routellm.abacus.ai}
   JEV_MODEL: ${JEV_MODEL:-jev-latest}
   CLASSIFIER_TIMEOUT_MS: ${CLASSIFIER_TIMEOUT_MS:-2000}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+  MAX_FILE_PAGES: ${MAX_FILE_PAGES:-500}
+  MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-50000000}
+  FILE_CHECK_TIMEOUT_S: ${FILE_CHECK_TIMEOUT_S:-15}
+  OBJECT_STORE_PATH: /var/lib/finops/objects
+  CLAMAV_ADDRESS: ${CLAMAV_ADDRESS:-}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 
@@ -101,6 +107,8 @@ services:
   gateway:
     image: finops-gateway:dev
     environment: *app-env
+    volumes:
+      - objects:/var/lib/finops/objects
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -139,3 +147,4 @@ services:
 
 volumes:
   pgdata:
+  objects:

@@ -16,7 +16,8 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-edi
 
 FROM base AS runtime
 # The runtime needs no installer: drop pip (and its vendored deps) to shrink the attack surface.
-RUN python -m pip uninstall --yes --quiet pip  && groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app
+RUN python -m pip uninstall --yes --quiet pip  && groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app \
+    && install -d -o 10001 -g 10001 -m 0750 /var/lib/finops/objects
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY alembic.ini ./
