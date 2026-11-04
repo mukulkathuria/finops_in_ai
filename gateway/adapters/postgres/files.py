@@ -69,7 +69,7 @@ LIMIT :limit
 _DELETE: Final = """
 DELETE FROM files
 WHERE id = :id AND (team_id = :team_id OR user_id = :user_id)
-RETURNING storage_key
+RETURNING storage_key, sha256
 """
 
 
@@ -104,8 +104,9 @@ class FileRepository:
 
     async def delete(
         self, conn: AsyncConnection, file_id: UUID, *, team_id: UUID | None, user_id: UUID | None
-    ) -> str | None:
+    ) -> tuple[str, bytes] | None:
+        """The deleted file's object key and content hash, or None when it was not there."""
         row = await fetch_one(
             conn, _DELETE, {"id": file_id, "team_id": team_id, "user_id": user_id}
         )
-        return str(row["storage_key"]) if row is not None else None
+        return (str(row["storage_key"]), bytes(row["sha256"])) if row is not None else None

@@ -1,6 +1,8 @@
 """Document parsing (US-15, US-16): token estimates, the cache key, the circuit breaker, the
 registry and the sidecar contract, against the stand-in sidecar and against failing ones."""
 
+import base64
+
 import httpx2
 import orjson
 import pytest
@@ -121,6 +123,37 @@ async def test_failures_map_to_clear_errors_and_open_the_breaker() -> None:
             with pytest.raises(Unavailable):
                 await parser.parse(document, OPTIONS)
         assert calls[0] == 2  # open after two failures: the sidecar is not called again
+
+
+async def test_a_document_too_large_to_convert_is_its_own_fault_not_the_sidecars() -> None:
+    document = StoredDocument("s.pdf", "pdf", "application/pdf", pdf())
+    huge = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(8 << 20)).decode()
+    page = {"page": 1, "method": "ocr", "confidence": 0.1, "markdown": "", "kept_original": True}
+    answers = [
+        httpx2.Response(413, content=b'{"detail": "too large"}'),
+        httpx2.Response(
+            200,
+            content=orjson.dumps(
+                {
+                    "backend": "glm_ocr",
+                    "version": "1",
+                    "markdown": "",
+                    "pages": [{**page, "image": "data:image/png;base64," + huge}],
+                }
+            ),
+        ),
+    ]
+    breaker = CircuitBreaker(threshold=1, cooldown_s=60)  # one sidecar failure would open it
+    for answer in answers:
+
+        def handle(_request: httpx2.Request, answer: httpx2.Response = answer) -> httpx2.Response:
+            return answer
+
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as http:
+            with pytest.raises(InvalidInput) as exc:
+                await _parser(http, breaker).parse(document, OPTIONS)
+        assert exc.value.code == "parse_failed"
+    assert breaker.allow()
 
 
 async def test_the_registry_routes_by_type_and_follows_ocr_backend() -> None:

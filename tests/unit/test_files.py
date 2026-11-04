@@ -6,10 +6,13 @@ import asyncio
 import hashlib
 import io
 import struct
+import subprocess  # nosec B404 - only CompletedProcess, to stand in for the probe
+import threading
 import zipfile
 import zlib
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pypdf import PdfWriter
@@ -256,6 +259,57 @@ async def test_a_probe_past_its_deadline_is_killed_and_the_file_refused() -> Non
     with pytest.raises(FileRejected) as exc:
         await PdfProbe(timeout_s=0.001).pages(io.BytesIO(pdf()), LIMITS)
     assert _code(exc) == "unprocessable_file"
+
+
+def _one_page(argv: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess(argv, 0, stdout=b'{"pages": 1}')
+
+
+async def test_the_probe_gets_none_of_the_gateway_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://app:pw@db/finops")
+    seen: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.append(kwargs["env"])
+        return _one_page(argv)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert await PdfProbe(timeout_s=5).pages(io.BytesIO(pdf()), LIMITS) == 1
+    assert len(seen) == 1
+    assert set(seen[0]) <= {"SYSTEMROOT"}  # Windows needs it to start Python; nothing else
+
+
+async def test_a_cancelled_upload_keeps_its_probe_slot_until_the_probe_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    runs: list[int] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        runs.append(1)
+        release.wait(10)
+        return _one_page(argv)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    probe = PdfProbe(timeout_s=10, concurrency=1)
+    try:
+        first = asyncio.create_task(probe.pages(io.BytesIO(pdf()), LIMITS))
+        for _ in range(500):
+            if runs:
+                break
+            await asyncio.sleep(0.01)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(probe.pages(io.BytesIO(pdf()), LIMITS))
+        await asyncio.sleep(0.2)
+        assert len(runs) == 1  # the abandoned probe still holds the only slot
+    finally:
+        release.set()
+    assert await second == 1
+    assert len(runs) == 2
 
 
 # ---------------------------------------------------------------------------------- ClamAV

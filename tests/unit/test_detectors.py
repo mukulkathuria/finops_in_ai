@@ -2,6 +2,8 @@
 Key-shaped strings are assembled at runtime so secret scanners never see them in the source."""
 
 import base64
+import time
+from collections.abc import Callable
 
 import pytest
 
@@ -20,6 +22,7 @@ GITHUB = "gh" + "p_" + "a" * 36
 OPENAI = "sk" + "-proj-" + "Ab3" * 10
 CARD = "4111 1111 1111 1111"
 AADHAAR = "2341 2341 2346"  # passes Verhoeff
+PROSE = "The quarterly report shows revenue grew by four percent across all regions. "
 
 
 def _rules(text: str) -> list[str]:
@@ -115,14 +118,53 @@ def test_benign_text_is_not_flagged(benign: str) -> None:
     assert injection_rule(benign) is None
 
 
-def test_hostile_input_stays_linear() -> None:
-    import time
+def _fastest(scan: Callable[[str], object], text: str) -> float:
+    times = []
+    for _ in range(3):
+        started = time.perf_counter()
+        scan(text)
+        times.append(time.perf_counter() - started)
+    return min(times)
 
-    hostile = "a" * 50_000 + "@" + "b." * 20_000 + "!" + "1 " * 20_000
-    started = time.perf_counter()
-    detect(hostile)
-    injection_rule(hostile)
-    assert time.perf_counter() - started < 2.0
+
+@pytest.mark.parametrize(
+    ("scan", "unit"),
+    [
+        *((detect, u) for u in ("eyJ-", "sk-", "xoxb-", "fo_aaaaaaaa_-", "a@", "a.", "1 ", "QUFB")),
+        *((injection_rule, u) for u in ("ignore ", "ignore the ", "you are now ", "pretend ")),
+    ],
+)
+def test_hostile_runs_cost_what_prose_costs(scan: Callable[[str], object], unit: str) -> None:
+    """Text built so a pattern could begin at every position (each "eyJ" of "eyJ-eyJ-..." looks
+    like the start of a token) costs about what ordinary text of the same size does. Before keys
+    were anchored to a token start, "eyJ-" runs cost four times as much."""
+    size = 100_000
+    hostile, prose = ((u * (size // len(u) + 1))[:size] for u in (unit, PROSE))
+    assert _fastest(scan, hostile) < 2.5 * _fastest(scan, prose)
+
+
+HUGGINGFACE = "hf" + "_" + "Ab1" * 12
+SENDGRID = "SG" + "." + "a" * 22 + "." + "B" * 43
+NPM = "np" + "m_" + "a1" * 18
+TWILIO = "S" + "K" + "0123456789abcdef" * 2
+AZURE = "Account" + "Key=" + "A" * 86 + "=="
+
+
+@pytest.mark.parametrize(
+    ("key", "rule"),
+    [
+        (HUGGINGFACE, "huggingface_token"),
+        (SENDGRID, "sendgrid_key"),
+        (NPM, "npm_token"),
+        (TWILIO, "twilio_key"),
+        (AZURE, "azure_storage_key"),
+        (OPENAI, "openai_key"),
+        (GITHUB, "github_token"),
+    ],
+)
+def test_keys_are_found_wherever_a_token_starts(key: str, rule: str) -> None:
+    for text in (key, f"token={key}", f'"{key}"', f"Bearer {key}", f"url/{key}/x", f"k:{key};"):
+        assert _rules(text) == [rule], text
 
 
 def _private_key(label: str = "RSA ") -> tuple[str, list[str]]:
@@ -149,8 +191,6 @@ def test_a_private_key_block_is_one_finding_and_redacted_whole() -> None:
 
 
 def test_many_findings_stay_linear() -> None:
-    import time
-
     text = " ".join(f"user{i}@example.com" for i in range(20_000))
     started = time.perf_counter()
     assert len(detect(text)) == 20_000

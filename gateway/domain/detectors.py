@@ -133,6 +133,16 @@ class Finding:
 
 _Rule = tuple[str, Category, re.Pattern[str], Callable[[str], bool] | None]
 
+# A key starts a token, never in its middle. Anchoring on that (rather than on \b, which a "-"
+# satisfies) keeps every pattern linear: without it, a run such as "eyJ-eyJ-eyJ-..." would be
+# rescanned up to the quantifier's limit from each start, quadratic on hostile input.
+_KEY_START: Final = r"(?<![A-Za-z0-9_-])"
+
+
+def _key(pattern: str) -> re.Pattern[str]:
+    return re.compile(_KEY_START + pattern)
+
+
 # Priority order: secrets first, so an overlapping PII match never hides a secret.
 _RULES: Final[tuple[_Rule, ...]] = (
     (
@@ -155,32 +165,34 @@ _RULES: Final[tuple[_Rule, ...]] = (
     (
         "github_token",
         "secret",
-        re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})"),
+        _key(r"(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})"),
         None,
     ),
-    ("anthropic_key", "secret", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,255}"), None),
-    (
-        "openai_key",
-        "secret",
-        re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,255}"),
-        None,
-    ),
-    ("google_api_key", "secret", re.compile(r"\bAIza[0-9A-Za-z_-]{35}"), None),
-    ("slack_token", "secret", re.compile(r"\bxox[abeprs]-[A-Za-z0-9-]{10,255}"), None),
-    ("stripe_key", "secret", re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,255}"), None),
-    ("finops_api_key", "secret", re.compile(r"\bfo_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{20,255}"), None),
-    ("finops_refresh_token", "secret", re.compile(r"\bfrt_[A-Za-z0-9_-]{20,255}"), None),
+    ("anthropic_key", "secret", _key(r"sk-ant-[A-Za-z0-9_-]{20,255}"), None),
+    ("openai_key", "secret", _key(r"sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,255}"), None),
+    ("google_api_key", "secret", _key(r"AIza[0-9A-Za-z_-]{35}"), None),
+    ("slack_token", "secret", _key(r"xox[abeprs]-[A-Za-z0-9-]{10,255}"), None),
+    ("stripe_key", "secret", _key(r"(?:sk|rk)_live_[0-9A-Za-z]{16,255}"), None),
+    ("huggingface_token", "secret", _key(r"hf_[A-Za-z0-9]{34,40}(?![A-Za-z0-9])"), None),
+    ("sendgrid_key", "secret", _key(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"), None),
+    ("npm_token", "secret", _key(r"npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])"), None),
+    ("twilio_key", "secret", _key(r"SK[0-9a-fA-F]{32}(?![A-Za-z0-9])"), None),
+    ("azure_storage_key", "secret", re.compile(r"AccountKey=[A-Za-z0-9+/]{86}=="), None),
+    ("finops_api_key", "secret", _key(r"fo_[A-Za-z0-9]{8}_[A-Za-z0-9_-]{20,255}"), None),
+    ("finops_refresh_token", "secret", _key(r"frt_[A-Za-z0-9_-]{20,255}"), None),
     (
         "jwt",
         "secret",
-        re.compile(r"\beyJ[A-Za-z0-9_-]{8,2048}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,2048}"),
+        _key(r"eyJ[A-Za-z0-9_-]{8,2048}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,2048}"),
         None,
     ),
     (
         "email",
         "pii",
+        # The local part starts where a run of its characters starts (linear, as above).
         re.compile(
-            r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}"
+            r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}"
+            r"@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}"
         ),
         None,
     ),

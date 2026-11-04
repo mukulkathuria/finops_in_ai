@@ -10,7 +10,7 @@ import orjson
 from sqlalchemy import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from gateway.adapters.postgres.database import fetch_one
+from gateway.adapters.postgres.database import fetch_all, fetch_one
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +74,13 @@ RETURNING id, backend, backend_version, markdown, pages, warnings, tokens_before
 """
 
 
+_DELETE_UNREFERENCED: Final = """
+DELETE FROM file_artifacts
+WHERE sha256 = :sha256 AND NOT EXISTS (SELECT 1 FROM files WHERE files.sha256 = :sha256)
+RETURNING pages
+"""
+
+
 def _artifact(row: RowMapping) -> Artifact:
     return Artifact(**dict(row))
 
@@ -120,3 +127,9 @@ class ArtifactRepository:
         if existing is None:
             raise RuntimeError("the artifact conflicted but cannot be read back")
         return existing, False
+
+    async def delete_unreferenced(self, conn: AsyncConnection, sha256: bytes) -> list[str]:
+        """Remove the artifacts of a content no file in the org has any more; returns the object
+        keys of their kept page images, to remove from the store."""
+        rows = await fetch_all(conn, _DELETE_UNREFERENCED, {"sha256": sha256})
+        return [str(p["image_key"]) for row in rows for p in row["pages"] if p.get("image_key")]

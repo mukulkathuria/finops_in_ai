@@ -23,6 +23,7 @@ MAX_GROUPS: Final = 200
 _ROLE: Final = re.compile(r"[a-z][a-z_]{0,31}")
 _PARAGRAPH: Final = re.compile(r"\n\s*\n")
 _SENTENCE_END: Final = re.compile(r"(?<=[.!?])\s+")
+_FRAME_TAG: Final = re.compile(r"<(?=\s*/?\s*(?:document|passage|retrieved)\b)", re.IGNORECASE)
 
 
 def user_group(user_id: UUID) -> str:
@@ -119,19 +120,20 @@ def chunk_text(text: str, *, target_chars: int = 1_400, max_chunks: int = 2_000)
 def _split(paragraph: str, target: int) -> list[str]:
     out: list[str] = []
     current = ""
-    for whole in _SENTENCE_END.split(paragraph):
-        sentence = whole
-        while len(sentence) > target:
+    for sentence in _SENTENCE_END.split(paragraph):
+        start = 0
+        while len(sentence) - start > target:  # an overlong sentence is cut hard, by offset
             if current:
                 out.append(current)
                 current = ""
-            out.append(sentence[:target])
-            sentence = sentence[target:]
-        if current and len(current) + 1 + len(sentence) > target:
+            out.append(sentence[start : start + target])
+            start += target
+        rest = sentence[start:]
+        if current and len(current) + 1 + len(rest) > target:
             out.append(current)
-            current = sentence
+            current = rest
         else:
-            current = f"{current} {sentence}" if current else sentence
+            current = f"{current} {rest}" if current else rest
     if current:
         out.append(current)
     return out
@@ -151,7 +153,7 @@ def retrieved_context(hits: Sequence[Hit]) -> str:
     """Retrieved passages as one block of lower-trust reference data."""
     passages = "\n\n".join(
         f'<passage document="{html.escape(h.title, quote=True)}" score="{h.score:.2f}">\n'
-        f"{_contained(h.content)}\n</passage>"
+        f"{neutralize_frames(h.content)}\n</passage>"
         for h in hits
     )
     return (
@@ -160,8 +162,7 @@ def retrieved_context(hits: Sequence[Hit]) -> str:
     )
 
 
-def _contained(content: str) -> str:
-    """A passage cannot close its own frame or the block around it."""
-    return content.replace("</passage>", "&lt;/passage&gt;").replace(
-        "</retrieved>", "&lt;/retrieved&gt;"
-    )
+def neutralize_frames(text: str) -> str:
+    """Text the gateway frames for a model cannot close or forge a `document`, `passage` or
+    `retrieved` frame: the opening bracket of any such tag, in any case or spacing, is escaped."""
+    return _FRAME_TAG.sub("&lt;", text)

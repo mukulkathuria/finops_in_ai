@@ -6,6 +6,7 @@ restart with no code change, and every artifact records the backend that made it
 sidecar (tests/support/fake_docparse.py) speaks the parser contract.
 """
 
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -14,7 +15,7 @@ from fastapi import FastAPI
 
 from tests.integration.test_us14_files import _team_key, _upload
 from tests.support import fake_docparse
-from tests.support.app import app_client, app_settings, bearer, signup
+from tests.support.app import OBJECTS, app_client, app_settings, bearer, signup
 from tests.support.database import DisposableDatabase
 from tests.unit.test_files import pdf, png, text_pdf
 
@@ -94,6 +95,35 @@ async def test_pages_read_with_low_confidence_keep_the_original(
         assert int(resp.headers["x-finops-file-tokens-before"]) > 0
         reports = _flags(test_db, resp.headers["x-request-id"])["files"]
         assert [r["kept_pages"] for r in reports] == [[1], [1]]
+
+
+async def test_derived_markdown_and_page_images_go_with_the_last_copy(
+    test_db: DisposableDatabase,
+) -> None:
+    async with app_client(app_settings(test_db, ocr_min_confidence=0.95)) as (_app, client):
+        admin = await signup(client)
+        key = await _team_key(client, admin)
+        first, second = [
+            (await _upload(client, key, name, pdf(1))).json() for name in ("a.pdf", "b.pdf")
+        ]
+        await _markdown(client, key, first["id"])  # the scanned page is kept as an image
+        content = (admin["org"]["id"], bytes.fromhex(first["sha256"]))
+
+        def artifact_pages() -> list[list[dict[str, Any]]]:
+            with psycopg.connect(test_db.superuser_url) as conn:
+                rows = conn.execute(
+                    "SELECT pages FROM file_artifacts WHERE org_id = %s AND sha256 = %s", content
+                ).fetchall()
+            return [r[0] for r in rows]
+
+        ((page,),) = artifact_pages()
+        image = Path(OBJECTS) / page["image_key"]
+        assert image.is_file()
+        for uploaded, left in ((first, 1), (second, 0)):
+            resp = await client.delete(f"/v1/files/{uploaded['id']}", headers=bearer(key))
+            assert resp.status_code == 200, resp.text
+            assert len(artifact_pages()) == left  # kept while another copy has the content
+        assert not image.exists()
 
 
 async def test_switching_the_ocr_backend_needs_only_config_and_artifacts_record_it(

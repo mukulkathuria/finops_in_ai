@@ -73,6 +73,8 @@ class OpenAICompatEmbedder:
             if resp.status_code != 200:
                 raise ValueError(f"status {resp.status_code}")
             items = sorted(_Answer.model_validate_json(resp.content).data, key=lambda i: i.index)
+            if [item.index for item in items] != list(range(len(texts))):
+                raise ValueError("the vectors do not match the inputs one to one")
             vectors = [item.embedding for item in items]
             if len(vectors) != len(texts) or any(
                 len(v) != self._dimensions or not all(map(math.isfinite, v)) for v in vectors

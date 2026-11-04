@@ -6,6 +6,7 @@ cannot start subprocesses), and `run` kills the probe itself when the deadline p
 """
 
 import asyncio
+import os
 import subprocess  # nosec B404 - runs only this interpreter on the bundled probe script
 import sys
 from pathlib import Path
@@ -25,11 +26,19 @@ def _read_all(file: BinaryIO) -> bytes:
     return data
 
 
+def _probe_env() -> dict[str, str]:
+    """None of the gateway's environment (database URL, keys) reaches the probe; Windows only
+    needs SYSTEMROOT to start Python."""
+    root = os.environ.get("SYSTEMROOT")
+    return {"SYSTEMROOT": root} if root else {}
+
+
 def _probe(data: bytes, timeout_s: float) -> bytes:
     """The probe's JSON answer; the PDF goes in on stdin, so it never touches the disk."""
     done = subprocess.run(  # noqa: S603  # nosec B603 - a fixed argv, no shell
         [sys.executable, "-I", _PROBE],
         input=data,
+        env=_probe_env(),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         timeout=timeout_s,
@@ -46,8 +55,11 @@ class PdfProbe:
     async def pages(self, file: BinaryIO, limits: FileLimits) -> int:
         """The page count of an acceptable PDF; refuses encrypted, damaged and over-long ones."""
         data = await asyncio.to_thread(_read_all, file)
-        async with self._slots:
-            facts = await self._run(data)
+        # The probe keeps its slot until it finishes, even if this request goes away first, so
+        # the bound on concurrent probe processes holds.
+        task = asyncio.create_task(self._slotted(data))
+        task.add_done_callback(_retrieved)
+        facts = await asyncio.shield(task)
         if facts.get("encrypted"):
             raise FileRejected(
                 "password-protected PDFs are not accepted; remove the password and retry",
@@ -67,6 +79,10 @@ class PdfProbe:
             )
         return pages
 
+    async def _slotted(self, data: bytes) -> dict[str, object]:
+        async with self._slots:
+            return await self._run(data)
+
     async def _run(self, data: bytes) -> dict[str, object]:
         # A cancelled request cannot stop the thread, but the probe still dies at its deadline.
         try:
@@ -82,3 +98,9 @@ class PdfProbe:
         except orjson.JSONDecodeError:  # the probe died (for example at its memory limit)
             return {}
         return facts if isinstance(facts, dict) else {}
+
+
+def _retrieved(task: asyncio.Task[dict[str, object]]) -> None:
+    """A probe whose caller went away still has its outcome collected."""
+    if not task.cancelled():
+        task.exception()

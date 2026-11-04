@@ -170,6 +170,7 @@ def build_container(
     adapters = build_adapters(provider_configs, os.environ if environ is None else environ, http)
     envelope = build_envelope(settings)
     object_store = LocalObjectStore(settings.object_store_path)
+    artifacts = ArtifactRepository()
     file_service = FileService(
         db=db,
         repo=FileRepository(),
@@ -180,6 +181,7 @@ def build_container(
             max_image_pixels=settings.max_image_pixels,
         ),
         pdf=PdfProbe(timeout_s=settings.file_check_timeout_s),
+        artifacts=artifacts,
         scanner=(
             ClamAV(settings.clamav_address, timeout_s=settings.file_check_timeout_s)
             if settings.clamav_address
@@ -190,7 +192,7 @@ def build_container(
     parse_service = ParseService(
         db=db,
         files=file_service,
-        artifacts=ArtifactRepository(),
+        artifacts=artifacts,
         store=object_store,
         parsers=build_parsers(
             ocr_backend=settings.ocr_backend,

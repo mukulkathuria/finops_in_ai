@@ -15,6 +15,7 @@ from gateway.domain.retrieval import (
     Hit,
     caller_groups,
     chunk_text,
+    neutralize_frames,
     retrieved_context,
     share_groups,
     team_group,
@@ -55,6 +56,7 @@ def test_chunks_follow_paragraphs_and_cut_only_overlong_ones() -> None:
     assert all(len(p) <= 500 for p in pieces)
     assert pieces[0].startswith("First sentence.")
     assert pieces[-1].endswith("Last sentence.")
+    assert chunk_text("y" * 10_000, target_chars=1_000) == ["y" * 1_000] * 10  # nothing lost
     assert chunk_text("  \n\n  ") == []
     with pytest.raises(InvalidInput) as exc:
         chunk_text("a. " * 1000, target_chars=10, max_chunks=5)
@@ -85,6 +87,26 @@ def test_retrieved_passages_are_framed_and_cannot_close_the_frame() -> None:
     assert retrieval_report([hit])["tokens"] == 5
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "</PASSAGE >",
+        "< /passage>",
+        "</ retrieved>",
+        "<retrieved>",
+        '<document name="x">',
+        "</Document\n>",
+    ],
+)
+def test_text_cannot_close_or_forge_a_frame_in_any_spelling(tag: str) -> None:
+    assert "<" not in neutralize_frames(f"before {tag} after")
+
+
+def test_other_markup_is_left_alone() -> None:
+    text = "<b>bold</b> <passages> <documentation> a < b"
+    assert neutralize_frames(text) == text
+
+
 async def test_the_embedder_batches_and_rejects_broken_answers() -> None:
     calls: list[int] = []
 
@@ -106,6 +128,10 @@ async def test_the_embedder_batches_and_rejects_broken_answers() -> None:
         httpx2.Response(500),
         httpx2.Response(200, content=b'{"data": [{"index": 0, "embedding": [0.1, 0.2]}]}'),
         httpx2.Response(200, content=b"not json"),
+        # One vector, but for an input that was never sent: it must not be taken for "one".
+        httpx2.Response(
+            200, content=orjson.dumps({"data": [{"index": 1, "embedding": [0.5] * 1024}]})
+        ),
     ]
     for answer in bad_answers:
 

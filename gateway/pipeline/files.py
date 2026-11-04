@@ -16,6 +16,7 @@ from uuid import UUID, uuid7
 from gateway.adapters.files.clamav import ClamAV
 from gateway.adapters.files.pdf import PdfProbe
 from gateway.adapters.observability.metrics import GatewayMetrics
+from gateway.adapters.postgres.artifacts import ArtifactRepository
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.files import FileRecord, FileRepository, NewFile
 from gateway.domain.errors import DomainError, InvalidInput, NotFound
@@ -75,6 +76,7 @@ class FileService:
         pdf: PdfProbe,
         scanner: ClamAV | None,
         metrics: GatewayMetrics,
+        artifacts: ArtifactRepository,
     ) -> None:
         self._db = db
         self._repo = repo
@@ -83,6 +85,7 @@ class FileService:
         self._pdf = pdf
         self._scanner = scanner
         self._metrics = metrics
+        self._artifacts = artifacts
 
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
@@ -178,10 +181,15 @@ class FileService:
         return record, chunks
 
     async def delete(self, owner: Owner, file_id: UUID) -> None:
+        """Delete the file, and what was derived from its content (Markdown, kept page images)
+        once no other file in the org has the same content."""
         async with self._db.transaction(self._ctx(owner)) as conn:
-            key = await self._repo.delete(
+            deleted = await self._repo.delete(
                 conn, file_id, team_id=owner.team_id, user_id=owner.user_id
             )
-        if key is None:
-            raise NotFound(_NOT_FOUND, code="file_not_found")
-        await self._discard(key)
+            if deleted is None:
+                raise NotFound(_NOT_FOUND, code="file_not_found")
+            key, sha256 = deleted
+            images = await self._artifacts.delete_unreferenced(conn, sha256)
+        for stored in (key, *images):
+            await self._discard(stored)

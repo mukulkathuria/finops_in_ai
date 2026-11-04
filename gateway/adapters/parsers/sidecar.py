@@ -49,14 +49,20 @@ class _Info(BaseModel):
     version: str = Field(min_length=1, max_length=200)
 
 
+class _TooLarge(ValueError):
+    """A page image over the cap: the document's fault, not the sidecar's."""
+
+
 def _png(image: str | None) -> bytes | None:
     if image is None:
         return None
     if not image.startswith(_PNG_URL):
         raise ValueError("the page image is not a PNG data URL")
     data = base64.b64decode(image[len(_PNG_URL) :], validate=True)
-    if not data.startswith(_PNG) or len(data) > _MAX_PAGE_IMAGE:
-        raise ValueError("the page image is not a usable PNG")
+    if not data.startswith(_PNG):
+        raise ValueError("the page image is not a PNG")
+    if len(data) > _MAX_PAGE_IMAGE:
+        raise _TooLarge("a page image is over the size cap")
     return data
 
 
@@ -129,6 +135,12 @@ class SidecarParser:
                 )
                 for p in parsed.pages
             )
+        except _TooLarge as exc:  # one document's problem: the breaker stays closed
+            raise InvalidInput(
+                "a page of the document is too large to keep as an image",
+                code="parse_failed",
+                param="file",
+            ) from exc
         except ValueError as exc:
             self._breaker.failure()
             raise self._unavailable() from exc
@@ -155,6 +167,11 @@ class SidecarParser:
         except httpx2.HTTPError as exc:  # refused, reset, timed out
             self._breaker.failure()
             raise self._unavailable() from exc
+        if resp.status_code == 413:  # the document is over the sidecar's size limit
+            self._breaker.success()
+            raise InvalidInput(
+                "the document is too large to convert", code="parse_failed", param="file"
+            )
         if resp.status_code == 422:  # the document itself cannot be converted
             self._breaker.success()
             raise InvalidInput(

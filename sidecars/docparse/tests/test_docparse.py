@@ -14,6 +14,7 @@ import httpx2
 from docparse.app import create_app
 from docparse.config import Config
 from openpyxl import Workbook
+from PIL import Image
 from pptx import Presentation
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -22,8 +23,9 @@ PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentatio
 VLM = "http://vlm:8000/v1"
 
 
-def text_pdf(*texts: str) -> bytes:
-    """A PDF whose pages carry the given text layer (Helvetica); an empty text is a scan."""
+def text_pdf(*texts: str, box: str = "612 792") -> bytes:
+    """A PDF whose pages (of `box` points) carry the given text layer (Helvetica); an empty text
+    is a scan."""
     objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
     kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(len(texts)))
     objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(texts)} >>".encode())
@@ -32,8 +34,9 @@ def text_pdf(*texts: str) -> bytes:
         escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
         stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode()
         objects.append(
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
-            b" /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % (5 + 2 * i)
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %s]"
+            b" /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>"
+            % (box.encode(), 5 + 2 * i)
         )
         objects.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
     out = io.BytesIO()
@@ -266,3 +269,21 @@ async def test_many_scanned_pages_are_recognised_in_order() -> None:
         body = _ok(await parse(client, "s.pdf", text_pdf(*[""] * 6), "application/pdf"))
     assert [p["page"] for p in body["pages"]] == [1, 2, 3, 4, 5, 6]
     assert len(seen) == 6
+
+
+async def test_a_page_that_cannot_be_loaded_is_refused_not_a_crash() -> None:
+    broken = text_pdf("").replace(b"/Kids [4 0 R]", b"/Kids [9 0 R]")  # the page is missing
+    async with sidecar(vision()) as client:
+        resp = await parse(client, "broken.pdf", broken, "application/pdf")
+    assert resp.status_code == 422
+    assert "page 1" in resp.json()["detail"]
+
+
+async def test_a_huge_page_is_rendered_within_the_pixel_cap() -> None:
+    # 3000 points square at 150 dpi would be 6250 pixels a side, about 39 million pixels.
+    async with sidecar(vision(logprob=-1.0)) as client:
+        body = _ok(await parse(client, "big.pdf", text_pdf("", box="3000 3000"), "application/pdf"))
+    png = base64.b64decode(body["pages"][0]["image"].removeprefix("data:image/png;base64,"))
+    width, height = Image.open(io.BytesIO(png)).size
+    assert width * height <= 4_000_000
+    assert abs(width - height) <= 1  # scaled down whole, not cropped

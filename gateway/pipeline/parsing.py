@@ -40,6 +40,7 @@ from gateway.domain.parsing import (
     image_tokens,
     text_tokens,
 )
+from gateway.domain.retrieval import neutralize_frames
 from gateway.pipeline.files import FileService, Owner
 from gateway.ports.parsers import DocumentParser
 from gateway.ports.storage import ObjectStore
@@ -175,10 +176,10 @@ class ParseService:
         if not task.cancelled():
             task.exception()  # retrieved here, so a failure nobody awaited is not reported lost
 
-    async def drain(self) -> None:
-        """Wait for parses in flight (graceful shutdown)."""
+    async def drain(self, timeout_s: float = 30.0) -> None:
+        """Wait for parses in flight (graceful shutdown), but not past `timeout_s`."""
         if self._inflight:
-            await asyncio.gather(*self._inflight.values(), return_exceptions=True)
+            await asyncio.wait(set(self._inflight.values()), timeout=timeout_s)
 
     async def _build(
         self,
@@ -278,7 +279,7 @@ class ParseService:
     async def _parts(self, derived: Derived) -> tuple[ContentPart, ...]:
         record, artifact = derived.file, derived.artifact
         name = html.escape(record.filename, quote=True)
-        body = artifact.markdown.replace("</document>", "&lt;/document&gt;")  # frame stays shut
+        body = neutralize_frames(artifact.markdown)  # the document cannot close its frame
         parts: list[ContentPart] = [TextPart(f'<document name="{name}">\n{body}\n</document>')]
         for page in artifact.pages:
             if not page.get("kept_original"):

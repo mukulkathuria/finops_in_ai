@@ -252,7 +252,9 @@ class _Relay:
             if d.index not in self._arguments:
                 self._arguments[d.index] = output.stream()
             deltas.append(replace(d, arguments=self._arguments[d.index].feed(d.arguments)))
-        final = chunk.finish_reason is not None or chunk.usage is not None
+        # Only a finish ends the content: some servers send usage with every event, and a
+        # usage-only chunk must not release a value the guardrail is holding back.
+        final = chunk.finish_reason is not None
         # Nothing may follow the final chunk: it carries everything still held back.
         if final and (tail := self._held()) is not None:
             content += tail.content or ""
