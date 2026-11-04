@@ -6,7 +6,7 @@ streams end with an SSE comment carrying the cost because headers leave before i
 
 import base64
 import struct
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing, suppress
 from typing import Annotated, Any, Literal, Protocol
 
@@ -17,10 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.types import Receive, Scope, Send
 
 from gateway.api.caller import Caller, ModelCaller
+from gateway.api.files import Parsing, file_owner
 from gateway.domain.errors import InvalidInput, MalformedRequest
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
     CanonicalRequest,
+    ContentPart,
     EmbedRequest,
     ImagePart,
     Message,
@@ -106,14 +108,36 @@ def _validate[M: BaseModel](model: type[M], data: Any) -> M:
         ) from exc
 
 
-def _content(raw: Any) -> tuple[TextPart | ImagePart, ...]:
+def _file_ids(messages: list[dict[str, Any]]) -> list[str]:
+    """The files referenced by `{"type": "file"}` parts, in order and without repeats. Files are
+    attached by id (upload them to /v1/files first), and only to user messages."""
+    seen: dict[str, None] = {}
+    for m in messages:
+        content = m.get("content") if isinstance(m, dict) else None
+        for part in content if isinstance(content, list) else ():
+            if not (isinstance(part, dict) and part.get("type") == "file"):
+                continue
+            ref = part.get("file")
+            if not isinstance(ref, dict) or not isinstance(ref.get("file_id"), str):
+                raise InvalidInput(
+                    "a file part needs file.file_id: upload the file to /v1/files first",
+                    code="file_id_required",
+                    param="messages",
+                )
+            if m.get("role") != "user":
+                raise InvalidInput("files can be attached to user messages only", param="messages")
+            seen.setdefault(ref["file_id"], None)
+    return list(seen)
+
+
+def _content(raw: Any, files: Mapping[str, tuple[ContentPart, ...]]) -> tuple[ContentPart, ...]:
     if raw is None:
         return ()
     if isinstance(raw, str):
         return (TextPart(raw),)
     if not isinstance(raw, list):
         raise InvalidInput("message content must be a string or a list of parts", param="messages")
-    parts: list[TextPart | ImagePart] = []
+    parts: list[ContentPart] = []
     for part in raw:
         kind = part.get("type") if isinstance(part, dict) else None
         if kind == "text" and isinstance(part.get("text"), str):
@@ -124,12 +148,20 @@ def _content(raw: Any) -> tuple[TextPart | ImagePart, ...]:
             and part["image_url"].get("url")
         ):
             parts.append(ImagePart(str(part["image_url"]["url"]), part["image_url"].get("detail")))
+        elif (
+            kind == "file"
+            and isinstance(part.get("file"), dict)
+            and part["file"].get("file_id") in files
+        ):
+            parts.extend(files[part["file"]["file_id"]])  # resolved by the parse service
         else:
             raise InvalidInput(f"unsupported content part type: {kind!r}", param="messages")
     return tuple(parts)
 
 
-def _messages(raw: list[dict[str, Any]]) -> tuple[Message, ...]:
+def _messages(
+    raw: list[dict[str, Any]], files: Mapping[str, tuple[ContentPart, ...]]
+) -> tuple[Message, ...]:
     out: list[Message] = []
     for m in raw:
         role = m.get("role") if isinstance(m, dict) else None
@@ -147,7 +179,7 @@ def _messages(raw: list[dict[str, Any]]) -> tuple[Message, ...]:
         out.append(
             Message(
                 role=role,
-                content=_content(m.get("content")),
+                content=_content(m.get("content"), files),
                 tool_calls=calls,
                 tool_call_id=m.get("tool_call_id"),
                 name=m.get("name"),
@@ -156,7 +188,12 @@ def _messages(raw: list[dict[str, Any]]) -> tuple[Message, ...]:
     return tuple(out)
 
 
-def _canonical(body: ChatRequest, provider_model: str, max_tokens: int) -> CanonicalRequest:
+def _canonical(
+    body: ChatRequest,
+    provider_model: str,
+    max_tokens: int,
+    files: Mapping[str, tuple[ContentPart, ...]],
+) -> CanonicalRequest:
     forced: str | None = None
     choice: Literal["auto", "none", "required"] | None = None
     if isinstance(body.tool_choice, dict):
@@ -166,7 +203,7 @@ def _canonical(body: ChatRequest, provider_model: str, max_tokens: int) -> Canon
     stop = (body.stop,) if isinstance(body.stop, str) else tuple(body.stop or ())
     return CanonicalRequest(
         model=provider_model,
-        messages=_messages(body.messages),
+        messages=_messages(body.messages, files),
         max_tokens=max_tokens,
         temperature=body.temperature,
         top_p=body.top_p,
@@ -218,24 +255,33 @@ def _usage_json(
 
 
 @router.post("/v1/chat/completions", response_model=None)
-async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) -> Response:
+async def chat_completions(
+    request: Request, caller: ModelCaller, chat: Chat, parsing: Parsing
+) -> Response:
     body = _validate(ChatRequest, await _json(request))
     resolved = await chat.resolve(body.model, "chat", caller.org_id)
     requested = body.max_completion_tokens or body.max_tokens or chat.default_max_tokens
     limit = resolved.entry.max_output_tokens or requested
-    req = _canonical(body, resolved.entry.model, min(requested, limit))
+    # Attachments become Markdown before the budget hold and the guardrails see the request.
+    attached = await parsing.attach(file_owner(caller), _file_ids(body.messages))
+    req = _canonical(body, resolved.entry.model, min(requested, limit), attached.parts)
     who = _who(caller, request)
     headers = {
         "x-finops-provider": resolved.entry.provider,
         "x-finops-model": resolved.entry.public_name,
         "x-finops-catalog-version": str(resolved.entry.catalog_version),
     }
+    notes: dict[str, object] | None = None
+    if attached.reports:
+        headers["x-finops-file-tokens-before"] = str(attached.tokens_before)
+        headers["x-finops-file-tokens-after"] = str(attached.tokens_after)
+        notes = {"files": list(attached.reports)}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
         outcome: list[StreamOutcome] = []
         # Budget, idempotency and provider errors raise here, so the client gets JSON errors.
-        stream = await chat.stream(who, resolved, req, outcome, idem)
+        stream = await chat.stream(who, resolved, req, outcome, idem, notes=notes)
         if stream.origin.replayed:
             headers["idempotent-replayed"] = "true"
         frames = _sse(
@@ -249,7 +295,7 @@ async def chat_completions(request: Request, caller: ModelCaller, chat: Chat) ->
         return _SettlingStream(
             frames, stream.chunks, headers={**headers, "cache-control": "no-store"}
         )
-    result = await chat.complete(who, resolved, req, idem)
+    result = await chat.complete(who, resolved, req, idem, notes=notes)
     response, cost = result.response, result.cost
     completion_id, created = _completion_id(result.origin), int(result.origin.at.timestamp())
     if result.origin.replayed:

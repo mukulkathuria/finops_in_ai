@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     object_store_path: str = "/var/lib/finops/objects"
     clamav_address: str | None = None  # host:port of clamd; unset or empty disables it
 
+    # Document parsing (US-15, US-16): one OCR backend at a time, switched by OCR_BACKEND and a
+    # restart. Every URL is a sidecar speaking the parser contract (POST {url}/parse).
+    ocr_backend: Literal["glm_ocr", "paddleocr_vl"] = "glm_ocr"
+    ocr_min_confidence: float = Field(default=0.80, ge=0.0, le=1.0)
+    glm_ocr_base_url: str = "http://glm-ocr:8000/v1"
+    glm_ocr_model: str = "zai-org/GLM-OCR"
+    paddleocr_vl_base_url: str = "http://paddleocr-vl:8080/v1"
+    paddleocr_vl_model: str = "PaddleOCR-VL-1.5-0.9B"
+    parser_base_url: str = "http://docparse:8000/v1"  # MarkItDown: Office files and HTML
+    parse_timeout_s: float = Field(default=600.0, gt=0, le=3600)
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"

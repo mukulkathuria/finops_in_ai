@@ -82,6 +82,12 @@ class GatewayMetrics:
             ("stage", "check", "action", "backend"),
             registry=r,
         )
+        self.document_parses = Counter(
+            "finops_document_parses",
+            "Document conversions by backend and outcome (parsed, cached, failed).",
+            ("backend", "outcome"),
+            registry=r,
+        )
         self.file_uploads = Counter(
             "finops_file_uploads",
             "File uploads by result (accepted or rejected) and reason (file kind or refusal).",

@@ -26,7 +26,9 @@ from gateway.adapters.files.pdf import PdfProbe
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.observability.telemetry import Telemetry
+from gateway.adapters.parsers.registry import build_parsers
 from gateway.adapters.postgres.api_keys import ApiKeyRepository
+from gateway.adapters.postgres.artifacts import ArtifactRepository
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache, CatalogRepository
@@ -52,6 +54,7 @@ from gateway.domain.files import FileLimits
 from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
+from gateway.pipeline.parsing import ParseService
 from gateway.pipeline.usage import UsageReporter
 from gateway.ports.storage import ObjectStore
 
@@ -85,10 +88,12 @@ class Container:
     usage_reporter: UsageReporter
     object_store: ObjectStore
     file_service: FileService
+    parse_service: ParseService
     metrics: GatewayMetrics
     telemetry: Telemetry
 
     async def aclose(self) -> None:
+        await self.parse_service.drain()
         await self.chat_service.drain()
         if self.owns_http:
             await self.http.aclose()
@@ -161,6 +166,41 @@ def build_container(
     adapters = build_adapters(provider_configs, os.environ if environ is None else environ, http)
     envelope = build_envelope(settings)
     object_store = LocalObjectStore(settings.object_store_path)
+    file_service = FileService(
+        db=db,
+        repo=FileRepository(),
+        store=object_store,
+        limits=FileLimits(
+            max_bytes=settings.max_upload_bytes,
+            max_pages=settings.max_file_pages,
+            max_image_pixels=settings.max_image_pixels,
+        ),
+        pdf=PdfProbe(timeout_s=settings.file_check_timeout_s),
+        scanner=(
+            ClamAV(settings.clamav_address, timeout_s=settings.file_check_timeout_s)
+            if settings.clamav_address
+            else None
+        ),
+        metrics=observability.metrics,
+    )
+    parse_service = ParseService(
+        db=db,
+        files=file_service,
+        artifacts=ArtifactRepository(),
+        store=object_store,
+        parsers=build_parsers(
+            ocr_backend=settings.ocr_backend,
+            ocr_servers={
+                "glm_ocr": (settings.glm_ocr_base_url, settings.glm_ocr_model),
+                "paddleocr_vl": (settings.paddleocr_vl_base_url, settings.paddleocr_vl_model),
+            },
+            parser_base_url=settings.parser_base_url,
+            http=http,
+            timeout_s=settings.parse_timeout_s,
+        ),
+        min_confidence=settings.ocr_min_confidence,
+        metrics=observability.metrics,
+    )
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
@@ -255,23 +295,8 @@ def build_container(
         budget_service=BudgetService(db=db, budgets=budgets, teams=teams, audit=audit, authz=authz),
         usage_reporter=UsageReporter(db=db, usage=usage, budgets=budgets),
         object_store=object_store,
-        file_service=FileService(
-            db=db,
-            repo=FileRepository(),
-            store=object_store,
-            limits=FileLimits(
-                max_bytes=settings.max_upload_bytes,
-                max_pages=settings.max_file_pages,
-                max_image_pixels=settings.max_image_pixels,
-            ),
-            pdf=PdfProbe(timeout_s=settings.file_check_timeout_s),
-            scanner=(
-                ClamAV(settings.clamav_address, timeout_s=settings.file_check_timeout_s)
-                if settings.clamav_address
-                else None
-            ),
-            metrics=observability.metrics,
-        ),
+        file_service=file_service,
+        parse_service=parse_service,
         metrics=observability.metrics,
         telemetry=observability.telemetry,
         envelope=envelope,

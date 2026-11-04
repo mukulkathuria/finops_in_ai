@@ -115,6 +115,31 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run build
 
+  docparse:
+    name: docparse sidecar types, tests and audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: sidecars/docparse/requirements-test.txt
+      - name: Install the sidecar's hash-pinned dependencies
+        run: |
+          uv venv /tmp/docparse
+          uv pip install --python /tmp/docparse/bin/python --require-hashes \
+            -r sidecars/docparse/requirements-test.txt
+      - name: Types
+        run: >
+          /tmp/docparse/bin/python -m mypy --strict --ignore-missing-imports
+          --allow-untyped-calls --allow-subclassing-any --exclude sidecars/docparse/tests
+          sidecars/docparse
+      - name: Tests
+        run: /tmp/docparse/bin/python -m pytest -q sidecars/docparse/tests
+      - name: pip-audit (pinned runtime dependencies)
+        run: uvx --from 'pip-audit>=2.10.1' pip-audit --strict --disable-pip -r sidecars/docparse/requirements.txt
+
   image:
     name: build and scan the gateway image
     runs-on: ubuntu-24.04
@@ -128,3 +153,10 @@ jobs:
             -v "$PWD/trivy-secret.yaml:/trivy-secret.yaml:ro" aquasec/trivy:0.76.1 \
             image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
             --secret-config /trivy-secret.yaml finops-gateway:ci
+      - run: docker build -f sidecars/docparse/Dockerfile -t finops-docparse:ci .
+      - name: Trivy (docparse image)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/trivy-secret.yaml:/trivy-secret.yaml:ro" aquasec/trivy:0.76.1 \
+            image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            --secret-config /trivy-secret.yaml finops-docparse:ci

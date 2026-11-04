@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from gateway.app.main import create_app
 from gateway.app.settings import Settings
+from tests.support import fake_docparse
 from tests.support.database import DisposableDatabase
 
 STRONG_PASSWORD = "Correct-Horse-Battery-9!"
@@ -30,6 +31,9 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "db_pool_size": 10,
         "laya_base_url": "http://mock-llm:8000",  # the mock provider speaks SystemOne too
         "object_store_path": OBJECTS,
+        "glm_ocr_base_url": "http://docparse:8000/v1",
+        "paddleocr_vl_base_url": "http://docparse:8000/v1",
+        "parser_base_url": "http://docparse:8000/v1",
         "log_level": "WARNING",
     }
     values.update(overrides)
@@ -44,7 +48,10 @@ async def app_client(
     span_exporter: SpanExporter | None = None,
 ) -> AsyncIterator[tuple[FastAPI, httpx2.AsyncClient]]:
     providers = httpx2.AsyncClient(
-        mounts={"http://mock-llm:8000": httpx2.ASGITransport(app=mock_provider)}
+        mounts={
+            "http://mock-llm:8000": httpx2.ASGITransport(app=mock_provider),
+            "http://docparse:8000": httpx2.ASGITransport(app=fake_docparse.app),
+        }
     )
     app = create_app(
         settings,

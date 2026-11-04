@@ -75,6 +75,35 @@ def pdf(pages: int = 1, *, password: str | None = None) -> bytes:
     return out.getvalue()
 
 
+def text_pdf(*texts: str) -> bytes:
+    """A PDF whose pages carry the given text layer (Helvetica), built by hand."""
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(len(texts)))
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(texts)} >>".encode())
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    for i, text in enumerate(texts):
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode()
+        objects.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+            b" /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % (5 + 2 * i)
+        )
+        objects.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n%s\nendobj\n" % (number, body))
+    xref = out.tell()
+    out.write(b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1))
+    for offset in offsets:
+        out.write(b"%010d 00000 n \n" % offset)
+    trailer = b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+    out.write(trailer % (len(objects) + 1, xref))
+    return out.getvalue()
+
+
 def office(kind: str = "docx", *, slides: int = 0, extra: dict[str, bytes] | None = None) -> bytes:
     main = {"docx": "word/document.xml", "xlsx": "xl/workbook.xml", "pptx": "ppt/presentation.xml"}
     out = io.BytesIO()

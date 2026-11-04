@@ -45,6 +45,14 @@ x-app-env: &app-env
   FILE_CHECK_TIMEOUT_S: ${FILE_CHECK_TIMEOUT_S:-15}
   OBJECT_STORE_PATH: /var/lib/finops/objects
   CLAMAV_ADDRESS: ${CLAMAV_ADDRESS:-}
+  OCR_BACKEND: ${OCR_BACKEND:-glm_ocr}
+  OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-0.80}
+  GLM_OCR_BASE_URL: ${GLM_OCR_BASE_URL:-http://docparse:8000/v1}
+  GLM_OCR_MODEL: ${GLM_OCR_MODEL:-zai-org/GLM-OCR}
+  PADDLEOCR_VL_BASE_URL: ${PADDLEOCR_VL_BASE_URL:-http://docparse:8000/v1}
+  PADDLEOCR_VL_MODEL: ${PADDLEOCR_VL_MODEL:-PaddleOCR-VL-1.5-0.9B}
+  PARSER_BASE_URL: ${PARSER_BASE_URL:-http://docparse:8000/v1}
+  PARSE_TIMEOUT_S: ${PARSE_TIMEOUT_S:-600}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 
@@ -91,6 +99,21 @@ services:
       MOCK_LATENCY_MS_MIN: ${MOCK_LATENCY_MS_MIN:-20}
       MOCK_LATENCY_MS_MAX: ${MOCK_LATENCY_MS_MAX:-80}
       MOCK_STREAM_CHUNK_DELAY_MS: ${MOCK_STREAM_CHUNK_DELAY_MS:-2}
+
+  # Document parsing (US-15, US-16): MarkItDown, PDF text layers, and OCR through an
+  # OpenAI-compatible vision model (the mock provider here; vLLM serving GLM-OCR or
+  # PaddleOCR-VL in production, one sidecar per backend).
+  docparse:
+    build:
+      context: .
+      dockerfile: sidecars/docparse/Dockerfile
+    image: finops-docparse:dev
+    environment:
+      DOCPARSE_VLM_BASE_URL: ${DOCPARSE_VLM_BASE_URL:-http://mock-llm:8000/v1}
+      DOCPARSE_VLM_API_KEY: ${DOCPARSE_VLM_API_KEY:-dev-only}
+    depends_on:
+      mock-llm:
+        condition: service_started
 
   migrate:
     build:

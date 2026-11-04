@@ -137,6 +137,7 @@ class _Call:
     idem: Idempotency | None
     # Guardrail decisions for the ledger row; every exit path settles through `_end`.
     decisions: list[dict[str, object]] = field(default_factory=list)
+    notes: dict[str, object] = field(default_factory=dict)  # more ledger flags (attachments)
 
     @property
     def origin(self) -> Origin:
@@ -411,7 +412,13 @@ class ChatService:
         return task
 
     async def _begin(
-        self, who: Attribution, r: Resolved, kind: str, demand: Demand, idem: Idempotency | None
+        self,
+        who: Attribution,
+        r: Resolved,
+        kind: str,
+        demand: Demand,
+        idem: Idempotency | None,
+        notes: Mapping[str, object] | None = None,
     ) -> _Call | bytes:
         """Spec section 6, steps 2-3: hold the worst case against every applicable budget.
         With an Idempotency-Key whose earlier attempt finished, return that attempt's stored
@@ -448,7 +455,7 @@ class ChatService:
                 self._telemetry.metrics.idempotent_replays.labels(kind).inc()
                 span.set_attribute("finops.idempotent_replay", True)
                 return stored
-        return _Call(who, r, kind, holds[-1], time.perf_counter(), idem)
+        return _Call(who, r, kind, holds[-1], time.perf_counter(), idem, notes=dict(notes or {}))
 
     async def _end(
         self,
@@ -482,6 +489,7 @@ class ChatService:
             flags={
                 **(flags or {}),
                 **({"guardrails": list(call.decisions)} if call.decisions else {}),
+                **call.notes,
             },
             ts=who.at,
             hold=call.hold,
@@ -591,8 +599,9 @@ class ChatService:
         r: Resolved,
         req: CanonicalRequest,
         idem: Idempotency | None = None,
+        notes: Mapping[str, object] | None = None,
     ) -> ChatResult:
-        call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem)
+        call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem, notes)
         if isinstance(call, bytes):
             return ChatResult(*load_chat(call))
         inspection = await self._inspect(call, req)
@@ -627,11 +636,12 @@ class ChatService:
         req: CanonicalRequest,
         outcome: list[StreamOutcome],
         idem: Idempotency | None = None,
+        notes: Mapping[str, object] | None = None,
     ) -> StreamResult:
         """Hold the budget and open the provider stream. Budget, idempotency and provider errors
         raise here, before any byte is sent. The returned stream settles exactly once: when it
         ends or fails, or when it is closed (the API closes it however the response ends)."""
-        call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem)
+        call = await self._begin(who, r, "chat", chat_demand(r.entry, req), idem, notes)
         if isinstance(call, bytes):
             response, cost, origin = load_chat(call)
             return StreamResult(_replay_stream(response, cost, outcome), origin)

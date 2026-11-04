@@ -123,6 +123,13 @@ async def chat_completions(request: Request) -> Response:
         (_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), ""
     )
     reply = f"Mock answer from {model}: {last_user[:160]}"
+    if body.get("logprobs") and any(  # an OCR call (docparse): read the page like a model
+        isinstance(part, dict) and part.get("type") == "image_url"
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for part in m["content"]
+    ):
+        reply = "# Recognised page\n\nText read by the mock vision model."
     if "leak" in faults:  # output guardrail tests: a key-shaped canary, assembled at runtime
         reply += " canary " + "AK" + "IA" + "MOCKLEAKEDKEY123"
     finish = "stop"
@@ -175,10 +182,20 @@ async def chat_completions(request: Request) -> Response:
             "object": "chat.completion",
             "created": created,
             "model": model,
-            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+            "choices": [
+                {"index": 0, "message": message, "finish_reason": finish, **_logprobs(body, reply)}
+            ],
             "usage": usage,
         }
     )
+
+
+def _logprobs(body: dict[str, Any], reply: str) -> dict[str, Any]:
+    """Per-token log-probabilities when asked for: a steady, confident -0.05."""
+    if not body.get("logprobs"):
+        return {}
+    tokens = [{"token": t, "logprob": -0.05, "top_logprobs": []} for t in reply.split()]
+    return {"logprobs": {"content": tokens}}
 
 
 async def _stream(

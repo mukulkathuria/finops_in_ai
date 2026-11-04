@@ -8,7 +8,6 @@ never run in the dashboard's origin.
 
 from typing import Annotated, Literal, Protocol
 from urllib.parse import quote
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -16,8 +15,8 @@ from pydantic import BaseModel
 
 from gateway.adapters.postgres.files import FileRecord
 from gateway.api.caller import AnyCaller, Caller, ModelCaller
-from gateway.domain.errors import NotFound
 from gateway.pipeline.files import FileService, Owner
+from gateway.pipeline.parsing import ParseService, file_id_of
 
 router = APIRouter(tags=["data-plane"])
 
@@ -33,6 +32,19 @@ def get_files(request: Request) -> FileService:
 
 
 Files = Annotated[FileService, Depends(get_files)]
+
+
+class ParsingServices(Protocol):
+    @property
+    def parse_service(self) -> ParseService: ...
+
+
+def get_parsing(request: Request) -> ParseService:
+    services: ParsingServices = request.app.state.container
+    return services.parse_service
+
+
+Parsing = Annotated[ParseService, Depends(get_parsing)]
 
 
 class FileOut(BaseModel):
@@ -75,15 +87,8 @@ class FileDeleted(BaseModel):
     deleted: bool = True
 
 
-def _owner(caller: Caller) -> Owner:
+def file_owner(caller: Caller) -> Owner:
     return Owner(caller.org_id, caller.team_id, caller.user_id, caller.api_key_id)
-
-
-def _file_id(raw: str) -> UUID:
-    try:
-        return UUID(raw.removeprefix("file-"))
-    except ValueError:
-        raise NotFound("no such file", code="file_not_found") from None
 
 
 def _disposition(filename: str) -> str:
@@ -100,7 +105,7 @@ async def upload_file(
     file: Annotated[UploadFile, File()],
     purpose: Annotated[str, Form()] = "user_data",
 ) -> FileOut:
-    return FileOut.of(await files.upload(_owner(caller), file.filename, file.file, purpose))
+    return FileOut.of(await files.upload(file_owner(caller), file.filename, file.file, purpose))
 
 
 @router.get("/v1/files")
@@ -111,7 +116,7 @@ async def list_files(
     after: str | None = None,
 ) -> FileList:
     records = await files.list(
-        _owner(caller), limit=limit + 1, after=_file_id(after) if after else None
+        file_owner(caller), limit=limit + 1, after=file_id_of(after) if after else None
     )
     page = [FileOut.of(r) for r in records[:limit]]
     return FileList(
@@ -124,12 +129,12 @@ async def list_files(
 
 @router.get("/v1/files/{file_id}")
 async def get_file(file_id: str, caller: AnyCaller, files: Files) -> FileOut:
-    return FileOut.of(await files.get(_owner(caller), _file_id(file_id)))
+    return FileOut.of(await files.get(file_owner(caller), file_id_of(file_id)))
 
 
 @router.get("/v1/files/{file_id}/content")
 async def file_content(file_id: str, caller: AnyCaller, files: Files) -> StreamingResponse:
-    record, chunks = await files.content(_owner(caller), _file_id(file_id))
+    record, chunks = await files.content(file_owner(caller), file_id_of(file_id))
     return StreamingResponse(
         chunks,
         media_type=record.mime,
@@ -145,6 +150,55 @@ async def file_content(file_id: str, caller: AnyCaller, files: Files) -> Streami
 
 @router.delete("/v1/files/{file_id}")
 async def delete_file(file_id: str, caller: AnyCaller, files: Files) -> FileDeleted:
-    parsed = _file_id(file_id)
-    await files.delete(_owner(caller), parsed)
+    parsed = file_id_of(file_id)
+    await files.delete(file_owner(caller), parsed)
     return FileDeleted(id=f"file-{parsed.hex}")
+
+
+class PageOut(BaseModel):
+    page: int
+    method: str
+    confidence: float
+    kept_original: bool
+
+
+class MarkdownOut(BaseModel):
+    object: Literal["file.markdown"] = "file.markdown"
+    file_id: str
+    filename: str
+    backend: str
+    backend_version: str
+    markdown: str
+    pages: list[PageOut]
+    warnings: list[str]
+    tokens_before: int
+    tokens_after: int
+    cached: bool
+
+
+@router.get("/v1/files/{file_id}/markdown")
+async def file_markdown(file_id: str, caller: ModelCaller, parsing: Parsing) -> MarkdownOut:
+    """The file converted to Markdown (US-15): parsed once per content, backend, backend version
+    and options, then served from the parse cache."""
+    derived = await parsing.derive(file_owner(caller), file_id_of(file_id))
+    a = derived.artifact
+    return MarkdownOut(
+        file_id=f"file-{derived.file.id.hex}",
+        filename=derived.file.filename,
+        backend=a.backend,
+        backend_version=a.backend_version,
+        markdown=a.markdown,
+        pages=[
+            PageOut(
+                page=p["page"],
+                method=p["method"],
+                confidence=p["confidence"],
+                kept_original=p["kept_original"],
+            )
+            for p in a.pages
+        ],
+        warnings=a.warnings,
+        tokens_before=a.tokens_before,
+        tokens_after=a.tokens_after,
+        cached=derived.cached,
+    )

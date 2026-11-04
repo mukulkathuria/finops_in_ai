@@ -144,6 +144,29 @@ Originals live in the object store (`OBJECT_STORE_PATH`, a volume in the dev sta
 made from the file id, never from its name. Downloads are attachments with `nosniff` and a
 sandboxing CSP.
 
+## Attachments as Markdown (document parsing)
+
+`GET /v1/files/{id}/markdown` converts a stored file once and serves it from the parse cache
+afterwards; a chat message can attach files with `{"type": "file", "file": {"file_id": "file-..."}}`.
+The gateway resolves them before the budget hold and the guardrails, so document text is checked
+for PII, secrets and injections like anything a user types, and the provider receives Markdown in
+a `<document name="...">` frame. Responses carry `x-finops-file-tokens-before` and
+`x-finops-file-tokens-after`; the ledger row records backend, version and tokens per file.
+
+| Content | Converted by |
+| --- | --- |
+| Plain text, Markdown, CSV, JSON | used as it is (in the gateway) |
+| DOCX, XLSX, PPTX, HTML | MarkItDown (`PARSER_BASE_URL`) |
+| PDF pages with a text layer | the text layer, read by the OCR sidecar without the model |
+| Scanned pages and images | the OCR backend named by `OCR_BACKEND`: GLM-OCR or PaddleOCR-VL |
+
+A page read below `OCR_MIN_CONFIDENCE` keeps its original image (attached for a vision model) and
+is flagged. Switching `OCR_BACKEND` needs a restart and no code change; the parse cache is keyed by
+content hash, backend, backend version and options, so results of the two backends never mix and
+every artifact records the backend that made it. The sidecar (`sidecars/docparse`) speaks one
+contract (`POST /v1/parse`, `GET /v1/info`) and calls the OCR model through an OpenAI-compatible
+server (vLLM) at `DOCPARSE_VLM_BASE_URL`; run one sidecar per backend in production.
+
 ## Repository layout
 
 | Path | Purpose |
