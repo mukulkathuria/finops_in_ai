@@ -239,6 +239,19 @@ How the indexers read the code:
 Every graph read checks the project's ACL in the same statement (`GraphStore`, ADR 0004: joins
 for fixed depth, recursive CTEs for reachability).
 
+A chat request asks for the context with `"code_context": {"project_id": "...", "max_tokens":
+4000}` (OpenAI SDK: `extra_body`):
+
+- The packs go before the question as lower-trust reference data.
+- So do the signatures the named symbols call in other modules, one hop along `calls` edges.
+- A pack the org's policy would block on is dropped (`flags.code_context.dropped`).
+- The response header `x-finops-code-context-tokens` says how many tokens the context took.
+- The savings report shows the difference from the whole modules as `code_context`.
+
+`python scripts/eval_code_context.py` indexes this repository and asks fixed questions. It
+reports the hit rate (expected module and symbol in the context) and the context's tokens against
+the whole modules'; a unit test holds the hit rate at 0.9 or more.
+
 ## Optimization stages (shadow mode and the eval gate)
 
 Every optimization is a stage with one contract (spec section 4): it may make the request cheaper

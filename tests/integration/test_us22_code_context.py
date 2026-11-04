@@ -7,9 +7,13 @@ from uuid import uuid4
 
 import httpx2
 import orjson
+import psycopg
 from fastapi import FastAPI
 
-from tests.support.app import bearer, signup
+from tests.integration.test_us14_files import _team_key
+from tests.integration.test_us21_rag_relevance import _sent_to_model
+from tests.support.app import app_client, app_settings, bearer, signup
+from tests.support.database import DisposableDatabase
 
 Api = tuple[FastAPI, httpx2.AsyncClient]
 BODY = "\n".join(f"    step_{i} = {i}  # the work, line by line" for i in range(60))
@@ -34,17 +38,6 @@ QUESTIONS = {  # the eval: each question and the modules its context must hold
     "What does price_of return for an item?": {"shop/pricing.py"},
     "How are orders sent by ship?": {"shop/shipping.py"},
 }
-
-
-async def _team_key(client: httpx2.AsyncClient, admin: dict[str, Any]) -> str:
-    auth = bearer(admin["access_token"])
-    team = (
-        await client.post("/v1/admin/teams", json={"name": f"T {uuid4().hex[:6]}"}, headers=auth)
-    ).json()["id"]
-    created = await client.post(
-        f"/v1/admin/teams/{team}/api-keys", json={"name": "k"}, headers=auth
-    )
-    return str(created.json()["key"])
 
 
 async def _upload(client: httpx2.AsyncClient, auth: dict[str, str], data: Any) -> str:
@@ -145,3 +138,56 @@ async def test_us22_context_packs_hold_the_right_modules_at_a_fraction_of_the_to
         f"/v1/projects/{project_id}/context", params={"q": "Cart total"}, headers=auth
     )
     assert gone.json()["packs"] == []  # the graph was replaced whole
+
+
+async def test_us22_chat_with_code_context_sends_outlines_and_reports_the_saving(
+    test_db: DisposableDatabase,
+) -> None:
+    log: list[str] = []
+    async with app_client(app_settings(test_db), provider_log=log) as (_, client):
+        admin = await signup(client)
+        key = bearer(await _team_key(client, admin))
+        project = await client.post("/v1/projects", json={"name": "shop"}, headers=key)
+        project_id = project.json()["id"]
+        file_id = await _upload(client, key, {"files": SOURCES})
+        indexed = await client.post(
+            f"/v1/projects/{project_id}/index", json={"file_id": file_id}, headers=key
+        )
+        assert indexed.status_code == 200, indexed.text
+        ask = {
+            "model": "mock/mock-small",
+            "messages": [{"role": "user", "content": "How does Cart compute its total?"}],
+            "code_context": {"project_id": project_id},
+        }
+        resp = await client.post("/v1/chat/completions", headers=key, json=ask)
+        assert resp.status_code == 200, resp.text
+        sent = _sent_to_model(log)
+        assert "<code_context>" in sent
+        assert "def total(self) -> int" in sent
+        assert "def price_of(item: str) -> int" in sent  # one call away, in another module
+        assert "step_0" not in sent  # outlines, never the source
+        tokens = int(resp.headers["x-finops-code-context-tokens"])
+        hidden = await client.post(
+            "/v1/chat/completions",
+            headers=bearer(await _team_key(client, admin)),  # another team cannot read it
+            json=ask,
+        )
+        assert hidden.status_code == 404
+    with psycopg.connect(test_db.superuser_url) as conn:
+        report = conn.execute(
+            "SELECT applied, tokens_before, tokens_after, cost_delta_micro_usd FROM stage_reports"
+            " WHERE request_id = %s AND stage = 'code_context'",
+            (resp.headers["x-request-id"],),
+        ).fetchone()
+        notes = conn.execute(
+            "SELECT flags -> 'code_context' FROM usage_events WHERE request_id = %s",
+            (resp.headers["x-request-id"],),
+        ).fetchone()
+    assert report is not None
+    applied, before, after, delta = report
+    assert applied
+    assert after == tokens
+    assert before > 3 * after  # far fewer tokens than the whole module
+    assert delta < 0
+    assert notes is not None
+    assert notes[0]["modules"] == ["shop/cart.py"]

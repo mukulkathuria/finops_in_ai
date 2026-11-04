@@ -75,6 +75,7 @@ from gateway.domain.savings import (
     OverheadRates,
     baseline_cost,
     cache_hit_report,
+    code_context_report,
     file_conversion_report,
     overhead_cost,
     overhead_inputs,
@@ -567,6 +568,8 @@ class ChatService:
             call.reports.append(conversion)
         if relevance := relevance_report(call.notes.get("retrieval"), r.entry):
             call.reports.append(relevance)
+        if code := code_context_report(call.notes.get("code_context"), r.entry):
+            call.reports.append(code)
         return call
 
     async def precheck(self, who: Attribution, r: Resolved, req: CanonicalRequest) -> None:

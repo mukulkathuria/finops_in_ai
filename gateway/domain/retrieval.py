@@ -27,8 +27,9 @@ _SENTENCE_END: Final = re.compile(r"(?<=[.!?])\s+")
 # fullwidth forms, with invisible characters (zero-width, soft hyphen, BOM) allowed where
 # spaces are.
 _GAP: Final = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"
+_FRAMES: Final = "document|passage|retrieved|code_context"  # the tags data is framed with
 _FRAME_TAG: Final = re.compile(
-    rf"[<\ufe64\uff1c](?={_GAP}[/\uff0f]?{_GAP}(?:document|passage|retrieved)\b)", re.IGNORECASE
+    rf"[<\ufe64\uff1c](?={_GAP}[/\uff0f]?{_GAP}(?:{_FRAMES})\b)", re.IGNORECASE
 )
 
 
@@ -169,8 +170,9 @@ def retrieved_context(hits: Sequence[Hit]) -> str:
 
 
 def neutralize_frames(text: str) -> str:
-    """Text the gateway frames for a model cannot close or forge a `document`, `passage` or
-    `retrieved` frame: the opening bracket of any such tag, in any case or spacing, is escaped."""
+    """Text the gateway frames for a model cannot close or forge a `document`, `passage`,
+    `retrieved` or `code_context` frame: the opening bracket of any such tag, in any case or
+    spacing, is escaped."""
     return _FRAME_TAG.sub("&lt;", text)
 
 

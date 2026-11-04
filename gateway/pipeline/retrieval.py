@@ -72,11 +72,14 @@ class Ingested:
 
 
 def with_retrieved(req: CanonicalRequest, hits: Sequence[Hit]) -> CanonicalRequest:
-    """The request with the retrieved passages as a user-role message before the last user
-    message (lower trust than the system prompt: the guardrails inspect it)."""
-    if not hits:
-        return req
-    context = Message(role="user", content=(TextPart(retrieved_context(hits)),))
+    """The request with the retrieved passages before the last user message."""
+    return with_reference(req, retrieved_context(hits)) if hits else req
+
+
+def with_reference(req: CanonicalRequest, text: str) -> CanonicalRequest:
+    """The request with reference data as a user-role message before the last user message
+    (lower trust than the system prompt: the guardrails inspect it)."""
+    context = Message(role="user", content=(TextPart(text),))
     messages = list(req.messages)
     last_user = max((i for i, m in enumerate(messages) if m.role == "user"), default=len(messages))
     messages.insert(last_user, context)

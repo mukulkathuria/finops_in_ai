@@ -16,6 +16,9 @@ INFERRED: Final = 0.6  # a call resolved by a name unique in the project, not by
 MAX_PACK_CHARS: Final = 20_000  # a pack is a module's outline, never its source
 MAX_NAME: Final = 500  # a vertex name's limit in the database
 MAX_MODULES: Final = 20_000
+FIND_KINDS: Final = ("module", "file", "symbol")  # what a question's terms match
+FOUND_LIMIT: Final = 200  # vertices one question may match
+MAX_PACKS: Final = 40  # modules considered for one context
 _WORD: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
 _CAMEL: Final = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
 _STOP: Final = frozenset(
@@ -192,6 +195,12 @@ def build_graph(modules: Sequence[Module]) -> CodeGraph:
         text = render_pack(m, imports.get(m.name, []), importers.get(m.name, []))
         packs.append(Pack(module_ids[m.name], m.path, text, text_tokens(text), m.source_tokens))
     return CodeGraph(tuple(vertices), tuple(edges.values()), tuple(packs))
+
+
+def term_of(name: str) -> str:
+    """The term a vertex is found by: the last part of its dotted name, lower-cased (what the
+    `graph_vertex_term` index holds)."""
+    return name.rpartition(".")[2].lower()
 
 
 def question_terms(question: str) -> frozenset[str]:

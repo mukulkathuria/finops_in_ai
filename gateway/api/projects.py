@@ -107,6 +107,7 @@ class ContextOut(BaseModel):
     project_id: str
     packs: list[PackOut]
     symbols: list[str]
+    related: list[str]  # signatures one call away, elsewhere
     tokens: int
     source_tokens: int
 
@@ -120,6 +121,7 @@ class ContextOut(BaseModel):
             project_id=str(project_id),
             packs=packs,
             symbols=list(c.symbols),
+            related=list(c.related),
             tokens=c.tokens,
             source_tokens=c.source_tokens,
         )

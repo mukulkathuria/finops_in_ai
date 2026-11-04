@@ -9,6 +9,7 @@ import struct
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import aclosing, suppress
 from typing import Annotated, Any, Literal, Protocol
+from uuid import UUID
 
 import orjson
 from fastapi import APIRouter, Depends, Request, Response
@@ -19,6 +20,7 @@ from starlette.types import Receive, Scope, Send
 from gateway.api.caller import Caller, ModelCaller
 from gateway.api.documents import Retrieval
 from gateway.api.files import Parsing, file_owner
+from gateway.api.projects import Code
 from gateway.domain.errors import InvalidInput, MalformedRequest
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
@@ -34,6 +36,7 @@ from gateway.domain.llm import (
 from gateway.domain.parsing import text_tokens
 from gateway.domain.pricing import usd
 from gateway.pipeline.chat import Attribution, ChatService, ChunkStream, StreamOutcome
+from gateway.pipeline.code import code_notes, keep, pack_hits, with_code_context
 from gateway.pipeline.idempotency import Origin
 from gateway.pipeline.retrieval import retrieval_report, with_retrieved
 
@@ -74,6 +77,15 @@ class _RetrievalIn(BaseModel):
     k: int = Field(default=5, ge=1, le=50)
 
 
+class _CodeContextIn(BaseModel):
+    """`"code_context": {"project_id": "...", "max_tokens": 4000}`: add the context packs of the
+    project's modules the question names (OpenAI SDK: `extra_body`)."""
+
+    model_config = ConfigDict(extra="forbid")
+    project_id: UUID
+    max_tokens: int = Field(default=4_000, ge=100, le=100_000)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model: str = Field(min_length=1, max_length=200)
@@ -91,6 +103,7 @@ class ChatRequest(BaseModel):
     stream: bool = False
     stream_options: dict[str, Any] | None = None
     retrieval: _RetrievalIn | None = None
+    code_context: _CodeContextIn | None = None
 
 
 class EmbeddingsRequest(BaseModel):
@@ -287,7 +300,12 @@ def _usage_json(
 
 @router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
-    request: Request, caller: ModelCaller, chat: Chat, parsing: Parsing, retrieval: Retrieval
+    request: Request,
+    caller: ModelCaller,
+    chat: Chat,
+    parsing: Parsing,
+    retrieval: Retrieval,
+    code: Code,
 ) -> Response:
     body = _validate(ChatRequest, await _json(request))
     resolved = await chat.resolve(body.model, "chat", caller.org_id)
@@ -335,6 +353,20 @@ async def chat_completions(
                 pruned = relevance["tokens_before"] - relevance["tokens_after"]
                 headers["x-finops-pruned-tokens"] = str(pruned)
         notes = {**(notes or {}), "retrieval": retrieved}
+    if body.code_context is not None:  # US-22: outlines of the modules the question names
+        project_id = body.code_context.project_id
+        context = await code.context(
+            file_owner(caller),
+            caller.groups,
+            project_id,
+            _last_user_text(body.messages),
+            max_tokens=body.code_context.max_tokens,
+        )
+        kept, dropped = await chat.passages(caller.org_id, pack_hits(project_id, context))
+        context = keep(context, kept, project_id)
+        req = with_code_context(req, context)
+        headers["x-finops-code-context-tokens"] = str(context.tokens)
+        notes = {**(notes or {}), "code_context": code_notes(project_id, context, dropped)}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))
