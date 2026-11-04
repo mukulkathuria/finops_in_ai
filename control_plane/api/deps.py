@@ -10,6 +10,7 @@ from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
+from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
 from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
@@ -38,6 +39,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def guardrail_service(self) -> GuardrailService: ...
     @property
     def stage_admin_service(self) -> StageAdminService: ...
+    @property
+    def savings_service(self) -> SavingsService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

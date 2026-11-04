@@ -9,6 +9,7 @@ import { Budgets } from "./pages/Budgets";
 import { Login } from "./pages/Login";
 import { MyUsagePage } from "./pages/MyUsage";
 import { Requests } from "./pages/Requests";
+import { SavingsPage } from "./pages/Savings";
 import { Teams } from "./pages/Teams";
 import { Link, navigate, usePath } from "./router";
 
@@ -44,6 +45,12 @@ export function App() {
       page: <Budgets admin={admin} />,
     },
     { to: "/requests", label: "Budget requests", show: true, page: <Requests /> },
+    {
+      to: "/savings",
+      label: "Savings",
+      show: admin || roles.has("finance"),
+      page: <SavingsPage />,
+    },
     { to: "/teams", label: "Teams and keys", show: admin || lead, page: <Teams admin={admin} /> },
     { to: "/audit", label: "Audit log", show: admin || roles.has("auditor"), page: <Audit /> },
   ].filter((p) => p.show);

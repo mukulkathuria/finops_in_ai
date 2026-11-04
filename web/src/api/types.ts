@@ -166,3 +166,34 @@ export interface Verification {
   checked: number;
   first_bad_seq: number | null;
 }
+
+export interface SavingsRow {
+  key: string;
+  label: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_micro_usd: number;
+  baseline_micro_usd: number;
+  overhead_micro_usd: number;
+  savings_micro_usd: number;
+}
+
+export interface SavingsTechnique {
+  technique: string;
+  applied: number;
+  shadow_runs: number;
+  tokens_saved: number;
+  saved_micro_usd: number;
+  shadow_saved_micro_usd: number;
+}
+
+export interface SavingsReport {
+  object: "savings_report";
+  start: string;
+  end: string;
+  team_id: string | null;
+  totals: SavingsRow;
+  rows: SavingsRow[];
+  techniques: SavingsTechnique[];
+}

@@ -48,6 +48,7 @@ from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
+from gateway.adapters.postgres.savings import BaselineModels
 from gateway.adapters.postgres.stages import StageRepository
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
@@ -67,6 +68,13 @@ from gateway.domain.llm import (
 )
 from gateway.domain.pricing import ModelKind, ModelPrice
 from gateway.domain.retrieval import Hit
+from gateway.domain.savings import (
+    OverheadRates,
+    baseline_cost,
+    file_conversion_report,
+    overhead_cost,
+    overhead_inputs,
+)
 from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
@@ -364,6 +372,8 @@ class ChatService:
         retries: int,
         stages: StageRunner,
         stage_reports: StageRepository,
+        overhead: OverheadRates,
+        baselines: BaselineModels,
         org_adapters: OrgAdapters | None = None,
     ) -> None:
         self._org_adapters = org_adapters
@@ -379,6 +389,8 @@ class ChatService:
         self._retries = retries
         self._stages = stages
         self._stage_reports = stage_reports
+        self._overhead = overhead
+        self._baselines = baselines
         self._background: set[asyncio.Task[None]] = set()
 
     async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
@@ -484,7 +496,10 @@ class ChatService:
                 self._telemetry.metrics.idempotent_replays.labels(kind).inc()
                 span.set_attribute("finops.idempotent_replay", True)
                 return stored
-        return _Call(who, r, kind, holds[-1], time.perf_counter(), idem, notes=dict(notes or {}))
+        call = _Call(who, r, kind, holds[-1], time.perf_counter(), idem, notes=dict(notes or {}))
+        if conversion := file_conversion_report(call.notes.get("files"), r.entry):
+            call.reports.append(conversion)
+        return call
 
     async def precheck(self, who: Attribution, r: Resolved, req: CanonicalRequest) -> None:
         """Refuse a request its budgets cannot cover before any costly preparation (converting
@@ -533,6 +548,7 @@ class ChatService:
         """Spec section 6, steps 5-6: settle the hold (or release it when nothing was charged),
         append the ledger row and complete (or forget) the idempotency key, atomically."""
         who, r = call.who, call.r
+        baseline, overhead = await self._savings(call, usage, charged=charged)
         event = UsageEvent(
             org_id=who.org_id,
             team_id=who.team_id,
@@ -546,6 +562,8 @@ class ChatService:
             catalog_version=r.entry.catalog_version,
             usage=usage,
             cost_micro_usd=cost,
+            baseline_micro_usd=baseline,
+            overhead_micro_usd=overhead,
             status=status,
             latency_ms=int((time.perf_counter() - call.started) * 1000),
             flags={
@@ -644,6 +662,26 @@ class ChatService:
         if inspection.blocked is not None:
             await self._block(call, inspection.blocked)
         return inspection
+
+    async def _savings(self, call: _Call, usage: Usage, *, charged: bool) -> tuple[int, int]:
+        """US-17: the counterfactual cost of the request, and the overhead of the gateway's own
+        work (OCR, classifier calls, embeddings)."""
+        gpu, calls, embedded = overhead_inputs(call.notes, call.decisions)
+        overhead = overhead_cost(
+            self._overhead, gpu_seconds=gpu, classifier_calls=calls, embedded_tokens=embedded
+        )
+        if not charged:
+            return 0, overhead
+        price = call.r.entry
+        try:
+            name = await self._baselines.get(call.who.org_id)
+            chosen = (await self._catalog.get()).resolve(name) if name else None
+        except Exception:  # the counterfactual must never stop a settlement
+            log.exception("baseline model lookup failed; the request model is used")
+            chosen = None
+        if chosen is not None and chosen.kind == price.kind:
+            price = chosen
+        return baseline_cost(price, usage, call.reports), overhead
 
     async def _optimize(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
         """Spec section 4, step 7: the optimization stages, after the input guardrails."""

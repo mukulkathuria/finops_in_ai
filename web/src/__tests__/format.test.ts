@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { amount, parseAmount, shortId, usd } from "../format";
+import { amount, localDay, parseAmount, share, shortId, usd } from "../format";
 
 describe("money formatting", () => {
   it("renders micro-USD exactly", () => {
@@ -27,5 +27,17 @@ describe("money formatting", () => {
 
   it("labels non-money units", () => {
     expect(amount(2500, "tokens")).toBe("2,500 tokens");
+  });
+});
+
+describe("savings formatting", () => {
+  it("shows a share of the baseline, negative when nothing was saved", () => {
+    expect(share(250_000, 1_000_000)).toBe("25.0%");
+    expect(share(-100, 1_000)).toBe("-10.0%");
+    expect(share(5, 0)).toBe("-");
+  });
+
+  it("names local calendar days", () => {
+    expect(localDay(new Date(2026, 0, 5))).toBe("2026-01-05");
   });
 });

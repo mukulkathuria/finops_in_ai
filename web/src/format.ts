@@ -42,3 +42,14 @@ export function when(iso: string | null): string {
 export function shortId(id: string | null): string {
   return id ? id.slice(-8) : "-";
 }
+
+/** A part of a whole as a percentage ("12.5%"), or "-" when there is no whole. */
+export function share(part: number, whole: number): string {
+  return whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "-";
+}
+
+/** A local calendar day as YYYY-MM-DD (UTC can fall on another day). */
+export function localDay(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}

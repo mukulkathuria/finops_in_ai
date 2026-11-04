@@ -31,6 +31,7 @@ from gateway.domain.llm import (
     ToolCall,
     ToolSpec,
 )
+from gateway.domain.parsing import text_tokens
 from gateway.domain.pricing import usd
 from gateway.pipeline.chat import Attribution, ChatService, ChunkStream, StreamOutcome
 from gateway.pipeline.idempotency import Origin
@@ -313,17 +314,23 @@ async def chat_completions(
         headers["x-finops-file-tokens-after"] = str(attached.tokens_after)
         notes = {"files": list(attached.reports)}
     if body.retrieval is not None:  # the permission filter runs inside the vector search
+        question = _last_user_text(body.messages)
         hits = await retrieval.search(
             file_owner(caller),
             caller.groups,
-            _last_user_text(body.messages),
+            question,
             body.retrieval.k,
             source="chat",
         )
         hits, dropped = await chat.passages(caller.org_id, hits)
         req = with_retrieved(req, hits)
         headers["x-finops-retrieved-chunks"] = str(len(hits))
-        notes = {**(notes or {}), "retrieval": {**retrieval_report(hits), "dropped": dropped}}
+        retrieved = {
+            **retrieval_report(hits),
+            "dropped": dropped,
+            "query_tokens": text_tokens(question),
+        }
+        notes = {**(notes or {}), "retrieval": retrieved}
     idem = _idempotency(request, caller, await request.body())
     if body.stream:
         include_usage = bool((body.stream_options or {}).get("include_usage"))

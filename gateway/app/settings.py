@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     embedder_timeout_s: float = Field(default=30.0, gt=0, le=300)
     max_indexed_chunks_per_org: int = Field(default=1_000_000, ge=1, le=1_000_000_000)
 
+    # Savings (US-17): what the gateway's own work costs (micro-USD), subtracted from
+    # what the optimizations save.
+    ocr_gpu_second_micro_usd: int = Field(default=300, ge=0, le=100_000_000)
+    classifier_call_micro_usd: int = Field(default=20, ge=0, le=100_000_000)
+    embedding_micro_usd_per_mtok: int = Field(default=10_000, ge=0, le=1_000_000_000)
+
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"

@@ -73,6 +73,7 @@ class Derived:
             "tokens_before": a.tokens_before,
             "tokens_after": a.tokens_after,
             "cached": self.cached,
+            "gpu_seconds": 0.0 if self.cached else a.gpu_seconds,  # spent now
             "kept_pages": [p["page"] for p in a.pages if p.get("kept_original")],
         }
 

@@ -17,6 +17,7 @@ from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
+from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
 from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
@@ -42,6 +43,7 @@ from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
+from gateway.adapters.postgres.savings import BaselineModels, SavingsRepository
 from gateway.adapters.postgres.sessions import SessionRepository
 from gateway.adapters.postgres.stages import StageModeCache, StageRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
@@ -55,6 +57,7 @@ from gateway.app.gateway_config import load_gateway_config
 from gateway.app.observability import Observability, build_observability
 from gateway.app.settings import Settings
 from gateway.domain.files import FileLimits
+from gateway.domain.savings import OverheadRates
 from gateway.pipeline.chat import HOLD_TTL, ChatService
 from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
@@ -91,6 +94,7 @@ class Container:
     webhook_service: WebhookService
     guardrail_service: GuardrailService
     stage_admin_service: StageAdminService
+    savings_service: SavingsService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -225,6 +229,9 @@ def build_container(
         metrics=observability.metrics,
         max_chunks_per_org=settings.max_indexed_chunks_per_org,
     )
+    catalog = CatalogCache(db, CatalogRepository())
+    savings_repo = SavingsRepository()
+    baselines = BaselineModels(db, savings_repo)
     stage_repo = StageRepository()
     stage_modes = StageModeCache(db, stage_repo)
     stage_runner = StageRunner([CompressionStage()], stage_modes)
@@ -302,7 +309,7 @@ def build_container(
                 telemetry=observability.telemetry,
                 max_input_chars=settings.guardrail_max_input_chars,
             ),
-            catalog=CatalogCache(db, CatalogRepository()),
+            catalog=catalog,
             adapters=adapters,
             usage=usage,
             budgets=budgets,
@@ -312,6 +319,12 @@ def build_container(
             retries=gateway_config.defaults.provider_retries,
             stages=stage_runner,
             stage_reports=stage_repo,
+            overhead=OverheadRates(
+                ocr_gpu_second=settings.ocr_gpu_second_micro_usd,
+                classifier_call=settings.classifier_call_micro_usd,
+                embedding_per_mtok=settings.embedding_micro_usd_per_mtok,
+            ),
+            baselines=baselines,
             org_adapters=OrgAdapters(
                 org_key_lookup(db, credentials, envelope), provider_configs, http
             ),
@@ -341,6 +354,14 @@ def build_container(
             repo=stage_repo,
             modes=stage_modes,
             runner=stage_runner,
+            audit=audit,
+            authz=authz,
+        ),
+        savings_service=SavingsService(
+            db=db,
+            repo=savings_repo,
+            baselines=baselines,
+            catalog=catalog,
             audit=audit,
             authz=authz,
         ),

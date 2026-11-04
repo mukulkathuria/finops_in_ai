@@ -201,6 +201,19 @@ the request. Reports are written to `stage_reports` with the ledger row. The fir
 `compression`, removes redundant whitespace from user and tool text and leaves fenced code and
 indentation as they were.
 
+## Savings (baseline versus actual)
+
+Every ledger row records a baseline: the request as the client sent it (its input before any
+optimization, attachments at their original size) and the output it got, priced at the org's
+baseline model without discounts. Set the baseline model with `PUT /v1/admin/savings-settings`
+(`{"baseline_model": "provider/model"}`); without one, each request's own model is its baseline.
+The actual cost is what the provider charged plus the gateway's own work: OCR GPU seconds,
+classifier calls and query embeddings, at `OCR_GPU_SECOND_MICRO_USD`, `CLASSIFIER_CALL_MICRO_USD`
+and `EMBEDDING_MICRO_USD_PER_MTOK`. `GET /v1/reports/savings?start=&end=&group_by=team|model|day`
+returns totals read from the ledger, so they always match it, and the savings by technique from
+the stage reports. The dashboard's Savings page shows both. Finance and org admins see the whole
+org; a team lead with `reports:read_team` passes `team_id`.
+
 ## Limits
 
 | Limit | Default (setting) | Refusal |
