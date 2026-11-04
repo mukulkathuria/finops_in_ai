@@ -59,7 +59,11 @@ policy (closed by default). Answers are filtered too; streams are released only 
 can be cut in two, tool-call arguments included. Detection is linear in the text and the number
 of findings, and inputs over 64 KiB are scanned off the event loop.
 
-## Next: Phase 2 exit (OCR evaluation harness and report, Phase 2 review loop)
+OCR evaluation: `scripts/ocr_eval.py` scores both backends (CER, WER, confidence, time) by language
+and document type and names the backend to set ([docs/ocr-evaluation.md](docs/ocr-evaluation.md)).
+The report itself needs the GPU-served models and your document set (none are available here).
+
+## Next: Phase 2 review loop, then Phase 3 (US-17..US-20, US-26: savings engine)
 
 ## Remaining stories
 

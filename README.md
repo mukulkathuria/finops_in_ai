@@ -165,7 +165,8 @@ is flagged. Switching `OCR_BACKEND` needs a restart and no code change; the pars
 content hash, backend, backend version and options, so results of the two backends never mix and
 every artifact records the backend that made it. The sidecar (`sidecars/docparse`) speaks one
 contract (`POST /v1/parse`, `GET /v1/info`) and calls the OCR model through an OpenAI-compatible
-server (vLLM) at `DOCPARSE_VLM_BASE_URL`; run one sidecar per backend in production.
+server (vLLM) at `DOCPARSE_VLM_BASE_URL`; run one sidecar per backend in production. Choose the
+backend on your own documents with `scripts/ocr_eval.py` ([docs/ocr-evaluation.md](docs/ocr-evaluation.md)).
 
 ## Retrieval under your permissions
 
