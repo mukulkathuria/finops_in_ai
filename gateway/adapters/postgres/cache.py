@@ -1,18 +1,19 @@
 """Cached answers (US-18): exact lookups by key and semantic lookups by meaning inside a partition,
-all under row-level security. Expired entries are purged now and then as answers are stored."""
+all under row-level security. Answers are stored sealed (the pipeline encrypts them, bound to the
+org and the entry's key). The worker's janitor deletes expired entries and keeps each org under
+its cap; it sees ids, orgs and times, never what an entry holds."""
 
-import random
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Final
 from uuid import UUID
 
 import orjson
-from sqlalchemy import text
+from sqlalchemy import RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from gateway.adapters.postgres.database import Database, TenantContext, fetch_one
+from gateway.adapters.postgres.database import Database, TenantContext, fetch_all, fetch_one
 from gateway.domain.cache import CacheSettings
 
 _SETTINGS: Final = "SELECT settings -> 'cache' AS cache FROM orgs WHERE id = app_current_org()"
@@ -22,41 +23,73 @@ _SET_SETTINGS: Final = (
     " WHERE id = app_current_org() RETURNING id"
 )
 _EXACT: Final = (
-    "SELECT response, cost_micro_usd FROM cache_entries"
+    "SELECT key_hash, ciphertext, wrapped_key, key_id, cost_micro_usd FROM cache_entries"
     " WHERE key_hash = :key AND expires_at > now()"
 )
 _TUNE: Final = ("SET LOCAL hnsw.iterative_scan = relaxed_order", "SET LOCAL hnsw.ef_search = 40")
+# relaxed_order may return neighbours slightly out of order: re-rank a few before taking one.
 _NEAREST: Final = """
-SELECT response, cost_micro_usd, 1 - (embedding <=> CAST(:query AS vector)) AS similarity
-FROM cache_entries
-WHERE partition_hash = :partition AND embedding_model = :model AND expires_at > now()
-ORDER BY embedding <=> CAST(:query AS vector)
-LIMIT 1
+WITH near AS MATERIALIZED (
+  SELECT key_hash, ciphertext, wrapped_key, key_id, cost_micro_usd,
+         embedding <=> CAST(:query AS vector) AS distance
+  FROM cache_entries
+  WHERE partition_hash = :partition AND embedding_model = :model AND expires_at > now()
+  ORDER BY embedding <=> CAST(:query AS vector)
+  LIMIT 5
+)
+SELECT key_hash, ciphertext, wrapped_key, key_id, cost_micro_usd, 1 - distance AS similarity
+FROM near ORDER BY distance LIMIT 1
 """
 _STORE: Final = """
-INSERT INTO cache_entries (org_id, key_hash, partition_hash, response, cost_micro_usd, embedding,
-  embedding_model, expires_at)
-VALUES (app_current_org(), :key, :partition, CAST(:response AS jsonb), :cost,
+INSERT INTO cache_entries (org_id, key_hash, partition_hash, ciphertext, wrapped_key, key_id,
+  cost_micro_usd, embedding, embedding_model, expires_at)
+VALUES (app_current_org(), :key, :partition, :ciphertext, :wrapped_key, :key_id, :cost,
   CAST(:embedding AS vector), :embedding_model,
   now() + make_interval(secs => CAST(:ttl AS double precision)))
 ON CONFLICT (org_id, key_hash) DO UPDATE
-  SET response = EXCLUDED.response, cost_micro_usd = EXCLUDED.cost_micro_usd,
+  SET ciphertext = EXCLUDED.ciphertext, wrapped_key = EXCLUDED.wrapped_key,
+      key_id = EXCLUDED.key_id, cost_micro_usd = EXCLUDED.cost_micro_usd,
       embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
-      expires_at = EXCLUDED.expires_at
+      expires_at = EXCLUDED.expires_at, created_at = now()
 """
-_PURGE: Final = "DELETE FROM cache_entries WHERE expires_at < now()"
-_PURGE_PROBABILITY: Final = 0.01
+_PURGE: Final = """
+DELETE FROM cache_entries WHERE id IN (
+  SELECT id FROM cache_entries WHERE expires_at < now() ORDER BY expires_at LIMIT :batch)
+"""
+_OVER_CAP: Final = """
+SELECT org_id, count(*) - :cap AS excess FROM cache_entries
+GROUP BY org_id HAVING count(*) > :cap
+"""
+_EVICT: Final = """
+DELETE FROM cache_entries WHERE id IN (
+  SELECT id FROM cache_entries WHERE org_id = :org ORDER BY created_at LIMIT :n)
+"""
 
 
 @dataclass(frozen=True, slots=True)
 class CachedAnswer:
-    response: dict[str, Any]
+    key_hash: bytes  # the entry's key: its answer is sealed to it
+    ciphertext: bytes
+    wrapped_key: bytes
+    key_id: str
     cost: int
     similarity: float | None = None
 
 
 def _vector(values: Sequence[float]) -> str:
     return "[" + ",".join(format(v, ".7g") for v in values) + "]"
+
+
+def _answer(row: RowMapping) -> CachedAnswer:
+    similarity = row.get("similarity")
+    return CachedAnswer(
+        bytes(row["key_hash"]),
+        bytes(row["ciphertext"]),
+        bytes(row["wrapped_key"]),
+        str(row["key_id"]),
+        int(row["cost_micro_usd"]),
+        float(similarity) if similarity is not None else None,
+    )
 
 
 class CacheRepository:
@@ -70,21 +103,16 @@ class CacheRepository:
 
     async def exact(self, conn: AsyncConnection, key: bytes) -> CachedAnswer | None:
         row = await fetch_one(conn, _EXACT, {"key": key})
-        return CachedAnswer(dict(row["response"]), int(row["cost_micro_usd"])) if row else None
+        return _answer(row) if row is not None else None
 
     async def nearest(
         self, conn: AsyncConnection, partition: bytes, query: Sequence[float], model: str
     ) -> CachedAnswer | None:
         for statement in _TUNE:
             await conn.execute(text(statement))
-        row = await fetch_one(
-            conn, _NEAREST, {"partition": partition, "query": _vector(query), "model": model}
-        )
-        if row is None:
-            return None
-        return CachedAnswer(
-            dict(row["response"]), int(row["cost_micro_usd"]), float(row["similarity"])
-        )
+        params = {"partition": partition, "query": _vector(query), "model": model}
+        row = await fetch_one(conn, _NEAREST, params)
+        return _answer(row) if row is not None else None
 
     async def store(
         self,
@@ -92,7 +120,9 @@ class CacheRepository:
         *,
         key: bytes,
         partition: bytes,
-        response: dict[str, Any],
+        ciphertext: bytes,
+        wrapped_key: bytes,
+        key_id: str,
         cost: int,
         embedding: Sequence[float] | None,
         embedding_model: str | None,
@@ -103,16 +133,31 @@ class CacheRepository:
             {
                 "key": key,
                 "partition": partition,
-                "response": orjson.dumps(response).decode(),
+                "ciphertext": ciphertext,
+                "wrapped_key": wrapped_key,
+                "key_id": key_id,
                 "cost": cost,
                 "embedding": _vector(embedding) if embedding is not None else None,
                 "embedding_model": embedding_model if embedding is not None else None,
                 "ttl": ttl_s,
             },
         )
-        # Sampling for housekeeping, not security.
-        if random.random() < _PURGE_PROBABILITY:  # noqa: S311  # nosec B311
-            await conn.execute(text(_PURGE))
+
+
+class CacheJanitorRepository:
+    """The worker's housekeeping: it reads ids, orgs and times, never an answer."""
+
+    async def purge_expired(self, conn: AsyncConnection, *, batch: int) -> int:
+        result = await conn.execute(text(_PURGE), {"batch": batch})
+        return int(result.rowcount)
+
+    async def over_cap(self, conn: AsyncConnection, *, cap: int) -> list[tuple[UUID, int]]:
+        rows = await fetch_all(conn, _OVER_CAP, {"cap": cap})
+        return [(row["org_id"], int(row["excess"])) for row in rows]
+
+    async def evict_oldest(self, conn: AsyncConnection, *, org_id: UUID, count: int) -> int:
+        result = await conn.execute(text(_EVICT), {"org": org_id, "n": count})
+        return int(result.rowcount)
 
 
 class CacheSettingsCache:

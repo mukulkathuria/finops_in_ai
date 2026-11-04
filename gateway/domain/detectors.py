@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final, Literal
 
+# Bump when detection changes: answers cached under older rules then stop matching.
 RULES_VERSION: Final = "rules-1.0"
 Category = Literal["pii", "secret"]
 

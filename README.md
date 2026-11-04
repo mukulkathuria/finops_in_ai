@@ -202,12 +202,15 @@ and reports the tokens before and after, the cost difference, its latency and it
 quality. `GET /v1/admin/stages` lists the stages with the org's mode and latest eval run;
 `PUT /v1/admin/stages/{name}` sets `off`, `shadow` or `on`; `POST /v1/admin/stages/{name}/evals`
 records an eval run (dataset, metric, score, threshold). A stage ships in `shadow`: it runs on a
-copy and reports what it would have saved. `on` is accepted only after an eval run for the stage's
-current version has passed (409 `eval_gate_not_passed`), and a new version of a stage runs in
-shadow again until its own eval passes. A stage that fails is skipped and reported, never failing
-the request. Reports are written to `stage_reports` with the ledger row. The first stage,
-`compression`, removes redundant whitespace from user and tool text and leaves fenced code and
-indentation as they were.
+copy and reports what it would have saved. `on` is accepted only while the latest eval run for the
+stage's current version has passed (409 `eval_gate_not_passed`); recording a failing run takes a
+stage that is on back to shadow (audited), and a new version of a stage runs in shadow again until
+its own eval passes. Eval runs are attested by an org admin: the gate records that decision. A
+stage that fails is skipped and reported, never failing the request. Reports are written to
+`stage_reports` with the ledger row; a request that was not served saves nothing. The first stage,
+`compression` (version 1.1), removes redundant spaces and blank lines from what users wrote and
+leaves tool output, tabs, fenced code and indentation as they were. Text aligned in columns with
+spaces loses its alignment.
 
 ## Response cache (exact and semantic)
 
@@ -217,9 +220,13 @@ indentation as they were.
 - the org and the caller's scope (team and user);
 - the model and every parameter;
 - the system prompt and the whole conversation;
-- the org's guardrail policy.
+- the guardrail policy that inspected the request, and the detection rules' version.
 
 So an answer never crosses an org or a permission scope, and never outlives a policy change.
+Answers are stored sealed (AES-256-GCM, a data key per entry, bound to the org and the entry's
+key); one that cannot be opened is a miss. The worker deletes expired entries every
+`CACHE_JANITOR_INTERVAL_SECONDS`, and an org over `CACHE_MAX_ENTRIES_PER_ORG` loses its oldest
+entries first. The worker sees when entries expire, never what they hold.
 `semantic` also matches a single-turn question by meaning (embeddings, cosine similarity at or
 above the threshold) inside that same partition. A hit, streamed or not, is served without calling
 the model and charges nothing. It carries `x-finops-cache: exact|semantic`, and the savings report
@@ -254,7 +261,9 @@ limit). The score comes from rules: length, code or tools, reasoning words and c
   embeddings) is stored, and `GET /v1/reports/routing?start=&end=` shows the samples, the mean
   agreement and whether it is within the tolerance.
 - Each check is charged as its own ledger row (`<request id>.judge`) with no baseline, so it counts
-  against the router's savings. At most eight run at once; past that a sample is skipped.
+  against the router's savings. It is charged to the org, never to the caller's team, user or key
+  budgets. At most eight run at once; past that a sample is skipped, and none starts while the
+  gateway shuts down.
 - A team in `opt_out_teams` is never routed.
 
 ## Savings (baseline versus actual)
@@ -281,9 +290,13 @@ list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
   new row in effect at once; the gateway sees it within a minute.
 - An entry with a later `effective_from` takes effect at that time.
 - A model the list leaves out keeps its rows.
-- The whole list is rejected if any entry is invalid.
+- The whole list is rejected if any entry is invalid; a chat model must state its context window
+  and output limit.
 - A change that would make a paid model free, move a price more than tenfold or change a model's
-  kind is refused and logged, so a broken list cannot switch budgets off.
+  kind is refused and logged, so a broken list cannot switch budgets off. So is a new model
+  without any price (price self-hosted models at their internal rate).
+- A failed download is logged with its status only, never the URL. The list itself is operator
+  configuration: protect its source.
 
 ## Limits
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 from uuid import UUID
 
+from gateway.domain.detectors import RULES_VERSION
 from gateway.domain.llm import CanonicalRequest, CanonicalResponse, Message, TextPart, Usage
 
 CacheMode = Literal["off", "exact", "semantic"]
@@ -102,6 +103,7 @@ def cache_keys(
     user_id: UUID | None,
     req: CanonicalRequest,
     policy: Mapping[str, Any],
+    rules: str = RULES_VERSION,
 ) -> CacheKeys:
     params = {
         "model": req.model,
@@ -118,6 +120,7 @@ def cache_keys(
     system = [_message(m) for m in req.messages if m.role == "system"]
     partition = _digest(
         "finops-cache-v1",
+        rules,  # answers filtered under other detection rules never match
         str(org_id),
         str(team_id),
         str(user_id),

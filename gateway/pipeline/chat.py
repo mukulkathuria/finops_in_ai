@@ -54,6 +54,7 @@ from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
 from gateway.domain.cache import CACHE_STAGES, cacheable
 from gateway.domain.errors import DomainError, NotFound, Unavailable
+from gateway.domain.guardrails import GuardrailPolicy
 from gateway.domain.idempotency import Idempotency
 from gateway.domain.llm import (
     CanonicalChunk,
@@ -73,10 +74,12 @@ from gateway.domain.routing import ROUTER
 from gateway.domain.savings import (
     OverheadRates,
     baseline_cost,
+    cache_hit_report,
     file_conversion_report,
     overhead_cost,
     overhead_inputs,
     provider_cache_report,
+    unserved,
 )
 from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.cache import CacheHit, Lookup, ResponseCache
@@ -452,6 +455,7 @@ class ChatService:
         self._cache = cache
         self._verifier = verifier
         self._judging = 0  # quality checks in flight
+        self._draining = False  # set by drain(): no new quality check starts
         self._background: set[asyncio.Task[None]] = set()
 
     async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
@@ -642,11 +646,15 @@ class ChatService:
             hold=call.hold,
         )
 
+        # A request that was not served saved nothing, whatever its stages did.
+        served = charged or counterfactual is not None
+        reports = call.reports if served else unserved(call.reports)
+
         async def work(conn: AsyncConnection) -> int:
             # Skipped when this hold already has its row: its stage reports went in then.
-            if await self._usage.record(conn, event) and call.reports:
+            if await self._usage.record(conn, event) and reports:
                 await self._stage_reports.record_reports(
-                    conn, request_id=who.request_id, ts=who.at, reports=call.reports
+                    conn, request_id=who.request_id, ts=who.at, reports=reports
                 )
             fired = await self._budgets.settle(
                 conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
@@ -733,53 +741,49 @@ class ChatService:
     async def _with_prompt_cache(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
         """Ask the provider to cache the request's stable prefix, unless the org turned that
         off. Unreadable settings leave the request unmarked."""
-        try:
-            wanted = await self._cache.provider_cache(call.who.org_id)
-        except Exception:
-            log.exception(
-                "cache settings unavailable; the prompt is not marked",
-                extra={"request_id": call.who.request_id},
-            )
-            return req
+        async with self._settles_on_failure(call):  # a disconnect still releases the hold
+            try:
+                wanted = await self._cache.provider_cache(call.who.org_id)
+            except Exception:
+                log.exception(
+                    "cache settings unavailable; the prompt is not marked",
+                    extra={"request_id": call.who.request_id},
+                )
+                return req
         return replace(req, prompt_cache=True) if wanted else req
 
-    async def _cached(self, call: _Call, req: CanonicalRequest) -> CacheHit | None:
+    async def _cached(
+        self, call: _Call, req: CanonicalRequest, policy: GuardrailPolicy
+    ) -> CacheHit | None:
         """Spec section 4, step 6: an answer from the cache, exact first, then semantic, inside
-        the request's org and permission scope. A cache failure is a miss, never an error."""
+        the request's org and permission scope, keyed by the policy that inspected it. A cache
+        failure is a miss, never an error; a disconnect still releases the hold."""
         who = call.who
-        try:
-            lookup = await self._cache.prepare(
-                org_id=who.org_id, team_id=who.team_id, user_id=who.user_id, req=req
-            )
-            hit = (
-                await self._cache.find(who.org_id, lookup, request_id=who.request_id)
-                if lookup is not None
-                else None
-            )
-        except Exception:
-            log.exception("cache lookup failed; a miss", extra={"request_id": who.request_id})
-            return None
+        async with self._settles_on_failure(call):
+            try:
+                lookup = await self._cache.prepare(
+                    org_id=who.org_id,
+                    team_id=who.team_id,
+                    user_id=who.user_id,
+                    req=req,
+                    policy=policy,
+                )
+                hit = (
+                    await self._cache.find(who.org_id, lookup, request_id=who.request_id)
+                    if lookup is not None
+                    else None
+                )
+            except Exception:
+                log.exception("cache lookup failed; a miss", extra={"request_id": who.request_id})
+                return None
         if lookup is not None:
             call.cache.append(lookup)
             if lookup.embedded_tokens:
                 call.notes["cache"] = {"query_tokens": lookup.embedded_tokens}
         if hit is not None:
             used = hit.response.usage
-            similarity = (
-                {"similarity": round(hit.similarity, 4)} if hit.similarity is not None else {}
-            )
-            call.reports.append(
-                StageReport(
-                    f"{hit.kind}_cache",
-                    "1",
-                    "pre_llm",
-                    used.input_tokens + used.output_tokens,
-                    0,
-                    -hit.cost,
-                    applied=True,
-                    decisions=similarity,
-                )
-            )
+            report = cache_hit_report(hit.kind, used, hit.similarity, call.r.entry)
+            call.reports.append(report)
         return hit
 
     async def _served(self, call: _Call, hit: CacheHit, result: bytes | None) -> None:
@@ -813,7 +817,8 @@ class ChatService:
         report = next(
             (r for r in call.reports if r.stage == ROUTER and r.decisions.get("judge")), None
         )
-        if report is None or self._verifier is None or self._judging >= _MAX_JUDGES:
+        busy = self._draining or self._judging >= _MAX_JUDGES
+        if report is None or self._verifier is None or busy:
             return
         self._judging += 1
         self._spawn(self._judge(self._verifier, call, req, answer, report))
@@ -853,7 +858,11 @@ class ChatService:
         if other is None:
             return
         of = call.who.request_id
-        who = replace(call.who, request_id=f"{of}.judge")
+        # Charged to the org: the caller did not ask for the check, so no budget of their team,
+        # their own or their key pays for it.
+        who = replace(
+            call.who, request_id=f"{of}.judge", team_id=None, user_id=None, api_key_id=None
+        )
         r = Resolved(other, call.r.adapter)  # a model of the same provider
         replay = replace(req, model=other.model)
         demand = chat_demand(other, replay)
@@ -951,7 +960,7 @@ class ChatService:
         inspection = await self._inspect(call, req)
         call, req = await self._optimize(call, inspection.request)
         r = call.r
-        hit = await self._cached(call, req)
+        hit = await self._cached(call, req, inspection.policy)
         if hit is not None:
             stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
             await self._settle(self._served(call, hit, stored))
@@ -994,7 +1003,7 @@ class ChatService:
         inspection = await self._inspect(call, req)
         call, req = await self._optimize(call, inspection.request)
         r = call.r
-        hit = await self._cached(call, req)
+        hit = await self._cached(call, req, inspection.policy)
         if hit is not None:
             stored = dump_chat(call.origin, 0, hit.response) if idem is not None else None
             await self._settle(self._served(call, hit, stored))
@@ -1081,6 +1090,11 @@ class ChatService:
         return EmbedResult(response, cost, call.origin)
 
     async def drain(self) -> None:
-        """Wait for in-flight ledger writes (graceful shutdown)."""
-        if self._background:
-            await asyncio.gather(*self._background, return_exceptions=True)
+        """Graceful shutdown: no new quality check starts, and every write in flight is awaited,
+        those started while draining included."""
+        self._draining = True
+        try:
+            while self._background:
+                await asyncio.gather(*list(self._background), return_exceptions=True)
+        finally:
+            self._draining = False

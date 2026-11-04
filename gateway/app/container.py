@@ -344,7 +344,7 @@ def build_container(
                 db=db,
                 repo=cache_repo,
                 settings=cache_settings,
-                policies=policy_cache,
+                envelope=envelope,
                 embedder=embedder,
             ),
             verifier=Verifier(db=db, repo=routing_repo, embedder=embedder),

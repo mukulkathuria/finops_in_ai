@@ -10,7 +10,7 @@ can be negative.
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final
 
 from gateway.domain.llm import Usage
@@ -114,3 +114,28 @@ def provider_cache_report(price: ModelPrice, usage: Usage) -> StageReport | None
         applied=True,
         decisions={"read": usage.cached_tokens, "written": usage.cache_write_tokens},
     )
+
+
+def cache_hit_report(
+    kind: str, usage: Usage, similarity: float | None, price: ModelPrice
+) -> StageReport:
+    """An answer served from the response cache saves all it would cost at full price, at the
+    model that would answer, so the techniques add up to the baseline whatever the answer cost
+    when it was made (a provider's cache discount included)."""
+    full = Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+    return StageReport(
+        f"{kind}_cache",
+        "1",
+        "pre_llm",
+        usage.input_tokens + usage.output_tokens,
+        0,
+        -price.cost(full),
+        applied=True,
+        decisions={"similarity": round(similarity, 4)} if similarity is not None else {},
+    )
+
+
+def unserved(reports: Sequence[StageReport]) -> list[StageReport]:
+    """The reports of a request that was not served (an error, a cancellation, a block): what
+    the stages did is kept, and nothing counts as saved."""
+    return [replace(r, cost_delta_micro_usd=0) for r in reports]

@@ -13,11 +13,18 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, Self
 from urllib.parse import urlsplit
 
 import httpx2
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from gateway.adapters.postgres.catalog import CatalogRepository
 from gateway.adapters.postgres.database import Database
@@ -48,6 +55,13 @@ class _Entry(BaseModel):
     context_window: Count
     max_output_tokens: Count
     effective_from: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _chat_limits(self) -> Self:
+        # The router reads 0 as unknown: a chat model must say what it can take.
+        if self.kind == "chat" and not (self.context_window and self.max_output_tokens):
+            raise ValueError("a chat model needs context_window and max_output_tokens")
+        return self
 
 
 class _PriceList(BaseModel):
@@ -126,12 +140,16 @@ class PriceSync:
         if scheme == "http" and not self._allow_insecure:
             raise ValueError("PRICE_SYNC_SOURCE must be an https URL")
         body = bytearray()
-        async with self._http.stream("GET", self._source, timeout=_FETCH_TIMEOUT_S) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.aiter_bytes():
-                body += chunk
-                if len(body) > MAX_BYTES:
-                    raise ValueError("the price list is larger than 5 MiB")
+        try:
+            async with self._http.stream("GET", self._source, timeout=_FETCH_TIMEOUT_S) as resp:
+                if resp.status_code != 200:  # redirects are not followed either
+                    raise ValueError(f"fetching the price list failed: HTTP {resp.status_code}")
+                async for chunk in resp.aiter_bytes():
+                    body += chunk
+                    if len(body) > MAX_BYTES:
+                        raise ValueError("the price list is larger than 5 MiB")
+        except httpx2.HTTPError as exc:  # its message names the URL, which may hold a token
+            raise ValueError(f"fetching the price list failed: {type(exc).__name__}") from None
         return bytes(body)
 
     async def run_once(self) -> SyncReport:

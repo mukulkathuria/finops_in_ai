@@ -1,5 +1,5 @@
 """Running the optimization stages (spec section 4, step 7; US-26), and the first technique:
-lossless whitespace compaction of what users and tools wrote."""
+whitespace compaction of what users wrote."""
 
 import asyncio
 import logging
@@ -75,11 +75,11 @@ class StageRunner:
         return reports
 
 
-_COMPACTED: Final = frozenset({"user", "tool"})  # system prompts stay as the developer wrote them
+_COMPACTED: Final = frozenset({"user"})  # system prompts and tool output (data) stay as they are
 
 
 def _compacted(messages: Sequence[Message]) -> tuple[tuple[Message, ...], int, int]:
-    """The messages with user and tool text compacted, and the text tokens before and after."""
+    """The messages with user text compacted, and the text tokens before and after."""
     before = after = 0
     out: list[Message] = []
     for m in messages:
@@ -99,10 +99,10 @@ def _compacted(messages: Sequence[Message]) -> tuple[tuple[Message, ...], int, i
 
 
 class CompressionStage:
-    """Lossless whitespace compaction of user and tool text; ships in shadow mode."""
+    """Whitespace compaction of what users wrote; ships in shadow mode."""
 
     name = "compression"
-    version = "1.0"
+    version = "1.1"  # 1.1: tool output and tabs are left alone (Phase 3 review)
     phase: Phase = "pre_llm"
     default_mode: Mode = "shadow"
 

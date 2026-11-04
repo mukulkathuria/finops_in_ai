@@ -1,13 +1,18 @@
 """The response cache step (spec section 4, step 6; US-18): an exact match first, then a semantic
-one, both inside the request's org and permission scope."""
+one, both inside the request's org and permission scope and keyed by the guardrail policy that
+inspected the request. Answers are stored sealed (envelope encryption bound to the org and the
+entry's key; spec section 5, "Retention and privacy"); one that cannot be opened is a miss."""
 
+import logging
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from gateway.adapters.postgres.cache import CacheRepository, CacheSettingsCache
+import orjson
+
+from gateway.adapters.postgres.cache import CachedAnswer, CacheRepository, CacheSettingsCache
 from gateway.adapters.postgres.database import Database, TenantContext
-from gateway.adapters.postgres.policies import PolicyCache
+from gateway.adapters.security.envelope import DecryptionError, Envelope, Sealed
 from gateway.domain.cache import (
     CacheKeys,
     CacheSettings,
@@ -16,9 +21,17 @@ from gateway.domain.cache import (
     response_record,
     single_turn_question,
 )
+from gateway.domain.guardrails import GuardrailPolicy
 from gateway.domain.llm import CanonicalRequest, CanonicalResponse
 from gateway.domain.parsing import text_tokens
 from gateway.ports.embeddings import Embedder
+
+log = logging.getLogger(__name__)
+
+
+def _aad(org_id: UUID, key: bytes) -> bytes:
+    """What a sealed answer is bound to: its org and its exact key."""
+    return b"finops:cache:" + str(org_id).encode() + b":" + key.hex().encode()
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,13 +59,13 @@ class ResponseCache:
         db: Database,
         repo: CacheRepository,
         settings: CacheSettingsCache,
-        policies: PolicyCache,
+        envelope: Envelope,
         embedder: Embedder | None,
     ) -> None:
         self._db = db
         self._repo = repo
         self._settings = settings
-        self._policies = policies
+        self._envelope = envelope
         self._embedder = embedder
 
     async def provider_cache(self, org_id: UUID) -> bool:
@@ -60,46 +73,73 @@ class ResponseCache:
         return (await self._settings.get(org_id)).provider_cache
 
     async def prepare(
-        self, *, org_id: UUID, team_id: UUID | None, user_id: UUID | None, req: CanonicalRequest
+        self,
+        *,
+        org_id: UUID,
+        team_id: UUID | None,
+        user_id: UUID | None,
+        req: CanonicalRequest,
+        policy: GuardrailPolicy,
     ) -> Lookup | None:
         """The request's keys, and its question's embedding for the semantic cache; None when the
         org's cache is off or a request with tools is not cached."""
         settings = await self._settings.get(org_id)
         if settings.mode == "off" or req.tools:
             return None
-        policy = (await self._policies.get(org_id)).to_dict()
-        keys = cache_keys(org_id=org_id, team_id=team_id, user_id=user_id, req=req, policy=policy)
+        keys = cache_keys(
+            org_id=org_id, team_id=team_id, user_id=user_id, req=req, policy=policy.to_dict()
+        )
         question = single_turn_question(req) if settings.mode == "semantic" else None
         if question is None or self._embedder is None:
             return Lookup(settings, keys, None, 0)
         (embedding,) = await self._embedder.embed([question])
         return Lookup(settings, keys, embedding, text_tokens(question))
 
+    def _open(
+        self, org_id: UUID, answer: CachedAnswer, request_id: str
+    ) -> CanonicalResponse | None:
+        sealed = Sealed(answer.ciphertext, answer.wrapped_key, answer.key_id)
+        try:
+            record = orjson.loads(self._envelope.open(sealed, _aad(org_id, answer.key_hash)))
+            return response_from(record, response_id=request_id)
+        except DecryptionError, ValueError, KeyError, TypeError:
+            # A master key no longer configured, or a damaged entry: the answer is gone.
+            log.warning(
+                "a cached answer could not be opened; a miss", extra={"request_id": request_id}
+            )
+            return None
+
     async def find(self, org_id: UUID, lookup: Lookup, *, request_id: str) -> CacheHit | None:
         async with self._db.transaction(TenantContext(org_id)) as conn:
             exact = await self._repo.exact(conn, lookup.keys.exact)
-            if exact is not None:
-                response = response_from(exact.response, response_id=request_id)
-                return CacheHit("exact", response, exact.cost)
-            if lookup.embedding is None or self._embedder is None:
-                return None
-            near = await self._repo.nearest(
-                conn, lookup.keys.partition, lookup.embedding, self._embedder.model
-            )
+            near = None
+            if exact is None and lookup.embedding is not None and self._embedder is not None:
+                near = await self._repo.nearest(
+                    conn, lookup.keys.partition, lookup.embedding, self._embedder.model
+                )
+        if exact is not None:
+            response = self._open(org_id, exact, request_id)
+            return CacheHit("exact", response, exact.cost) if response is not None else None
         if near is None or near.similarity is None or near.similarity < lookup.settings.threshold:
             return None
-        response = response_from(near.response, response_id=request_id)
+        response = self._open(org_id, near, request_id)
+        if response is None:
+            return None
         return CacheHit("semantic", response, near.cost, near.similarity)
 
     async def store(
         self, org_id: UUID, lookup: Lookup, response: CanonicalResponse, cost: int
     ) -> None:
+        plain = orjson.dumps(response_record(response)).decode()
+        sealed = self._envelope.seal(plain, _aad(org_id, lookup.keys.exact))
         async with self._db.transaction(TenantContext(org_id)) as conn:
             await self._repo.store(
                 conn,
                 key=lookup.keys.exact,
                 partition=lookup.keys.partition,
-                response=response_record(response),
+                ciphertext=sealed.ciphertext,
+                wrapped_key=sealed.wrapped_key,
+                key_id=sealed.key_id,
                 cost=cost,
                 embedding=lookup.embedding,
                 embedding_model=self._embedder.model if self._embedder else None,

@@ -119,6 +119,13 @@ async def test_routing_runs_in_shadow_then_on_judged_within_tolerance(
         report = await client.get("/v1/reports/routing", params=_window(), headers=auth)
 
     ledger = _ledger(test_db, org)
+    with psycopg.connect(test_db.superuser_url) as conn:
+        judged = conn.execute(
+            "SELECT team_id, user_id, api_key_id FROM usage_events"
+            " WHERE org_id = %s AND request_id LIKE %s",
+            (org, "%.judge"),
+        ).fetchall()
+    assert judged == [(None, None, None)] * 2  # charged to the org, not the caller
     shadow_id, routed_id = shadow.headers["x-request-id"], routed.headers["x-request-id"]
     assert ledger[shadow_id][:2] == ("mock-large", None)  # shadow changes nothing
     assert ledger[f"{shadow_id}.judge"][:3] == ("mock-small", None, 0)  # overhead: no baseline

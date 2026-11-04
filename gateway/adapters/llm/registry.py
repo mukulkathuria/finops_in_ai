@@ -50,6 +50,9 @@ def _check(name: str, config: ProviderConfig) -> None:
         raise RuntimeError(
             f"provider {name!r} selects the litellm adapter; install finops-gateway[litellm]"
         )
+    from gateway.adapters.llm.litellm_adapter import load_litellm  # the optional extra
+
+    load_litellm()  # the slow import happens at startup, never inside a request
 
 
 def build_adapter(config: ProviderConfig, key: str, http: httpx2.AsyncClient) -> LLMAdapter:

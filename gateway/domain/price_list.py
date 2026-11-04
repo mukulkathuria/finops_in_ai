@@ -74,6 +74,13 @@ def suspicious(old: ModelPrice, new: ModelPrice) -> str | None:
     return None
 
 
+def unpriced(new: ModelPrice) -> str | None:
+    """Why a model new to the catalog looks like a broken entry; None when it does not."""
+    if not any(getattr(new, name) for name in _PRICES):
+        return "a new model would have no price at all"
+    return None
+
+
 def plan_sync(
     entries: Sequence[PriceEntry], current: Mapping[tuple[str, str], ModelPrice], now: datetime
 ) -> SyncPlan:
@@ -97,7 +104,7 @@ def plan_sync(
                 pending.append(replace(entry, effective_from=None))  # in effect at once
         pending += [e for e in group if e.effective_from is not None and e.effective_from > now]
         for entry in pending:
-            reason = suspicious(old, entry.price) if old is not None else None
+            reason = suspicious(old, entry.price) if old is not None else unpriced(entry.price)
             if reason is None:
                 inserts.append(entry)
             else:

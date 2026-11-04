@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # URL; unset, prices change only through migrations.
     price_sync_source: str | None = None
     price_sync_interval_seconds: float = Field(default=3600, ge=60, le=86_400)
+    # Response cache housekeeping (US-18): expired answers are deleted, and an org over its cap
+    # loses its oldest answers first.
+    cache_janitor_interval_seconds: float = Field(default=300, ge=10, le=86_400)
+    cache_max_entries_per_org: int = Field(default=50_000, ge=100, le=10_000_000)
 
     # Observability (US-29). Traces export over OTLP/HTTP when the endpoint is set (empty: no
     # export). /metrics needs METRICS_TOKEN as a bearer token when it is set; without one it

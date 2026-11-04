@@ -5,6 +5,8 @@ passed eval run for the stage's current version. Every change is audited."""
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from control_plane.services.authz import Authorizer
 from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database, TenantContext
@@ -159,4 +161,35 @@ class StageAdminService:
                     request_id=meta.request_id,
                 ),
             )
+            demoted = not stored.passed and await self._demote(conn, principal, stage, meta)
+        if demoted:
+            self._modes.invalidate(principal.org_id)
         return stored
+
+    async def _demote(
+        self, conn: AsyncConnection, principal: Principal, stage: Stage, meta: RequestMeta
+    ) -> bool:
+        """A failing run takes a stage that is on for this version back to shadow (audited)."""
+        setting = (await self._repo.settings(conn, lock=True)).get(stage.name)
+        if setting is None or setting.mode != "on" or setting.version != stage.version:
+            return False
+        await self._repo.set_mode(conn, stage.name, "shadow", stage.version)
+        await self._audit.append(
+            conn,
+            AuditEvent(
+                action=AuditAction.STAGE_MODE_SET,
+                actor_type="user",
+                actor_id=principal.user_id,
+                target_type="stage",
+                target_id=stage.name,
+                details={
+                    "version": stage.version,
+                    "old": "on",
+                    "new": "shadow",
+                    "reason": "eval_failed",
+                },
+                ip=meta.ip,
+                request_id=meta.request_id,
+            ),
+        )
+        return True

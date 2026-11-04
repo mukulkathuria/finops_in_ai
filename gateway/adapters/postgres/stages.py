@@ -49,8 +49,10 @@ FROM eval_runs
 ORDER BY stage, version, created_at DESC
 """
 _PASSED: Final = """
-SELECT EXISTS (SELECT 1 FROM eval_runs WHERE stage = :stage AND version = :version AND passed)
-  AS passed
+SELECT coalesce(
+  (SELECT passed FROM eval_runs WHERE stage = :stage AND version = :version
+   ORDER BY created_at DESC, id DESC LIMIT 1),
+  false) AS passed
 """
 
 

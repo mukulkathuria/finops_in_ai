@@ -1,7 +1,8 @@
 """`python -m worker`: background jobs. Outbox delivery (alert webhooks) runs every
 OUTBOX_INTERVAL_SECONDS; the budget janitor every JANITOR_INTERVAL_SECONDS (with a ledger
 reconcile every RECONCILE_INTERVAL_SECONDS); the price sync every
-PRICE_SYNC_INTERVAL_SECONDS when PRICE_SYNC_SOURCE is set.
+PRICE_SYNC_INTERVAL_SECONDS when PRICE_SYNC_SOURCE is set; the response cache janitor every
+CACHE_JANITOR_INTERVAL_SECONDS.
 
 Runs as the `worker` database role (WORKER_DATABASE_URL). Stops cleanly on SIGTERM or SIGINT.
 Each pass touches a heartbeat file that the container health check reads.
@@ -23,6 +24,7 @@ from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_
 from gateway.app.logging import configure_logging
 from gateway.app.settings import Settings
 from worker.jobs.budget_janitor import BudgetJanitor
+from worker.jobs.cache_janitor import CacheJanitor
 from worker.jobs.outbox_dispatcher import OutboxDispatcher
 from worker.jobs.price_sync import PriceSync
 
@@ -41,6 +43,17 @@ def _envelope(settings: Settings) -> Envelope | None:
         settings.master_previous_keys.get_secret_value(),
     )
     return Envelope(LocalKeyManager(keys, settings.master_key_id))
+
+
+async def _clean_cache(janitor: CacheJanitor) -> None:
+    """A failed cache cleanup is logged; the other jobs go on."""
+    try:
+        report = await janitor.run_once()
+    except Exception:
+        log.exception("cache janitor failed; retrying next interval")
+        return
+    if report.purged or report.evicted:
+        log.info("cache janitor pass", extra={"purged": report.purged, "evicted": report.evicted})
 
 
 async def _sync_prices(prices: PriceSync) -> None:
@@ -72,8 +85,9 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
         application_name="finops-worker",
     )
     janitor = BudgetJanitor(db)
+    cache_janitor = CacheJanitor(db, max_entries_per_org=settings.cache_max_entries_per_org)
     envelope = _envelope(settings)
-    next_janitor = next_reconcile = next_price_sync = 0.0
+    next_janitor = next_reconcile = next_price_sync = next_cache = 0.0
     try:
         async with httpx2.AsyncClient(follow_redirects=False) as http:
             dispatcher = (
@@ -123,6 +137,9 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
                     if prices is not None and now >= next_price_sync:
                         next_price_sync = now + settings.price_sync_interval_seconds
                         await _sync_prices(prices)
+                    if now >= next_cache:
+                        next_cache = now + settings.cache_janitor_interval_seconds
+                        await _clean_cache(cache_janitor)
                     HEARTBEAT.touch()
                 except Exception:
                     log.exception("worker pass failed; retrying next interval")

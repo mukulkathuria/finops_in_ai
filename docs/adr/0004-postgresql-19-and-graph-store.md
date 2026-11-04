@@ -32,6 +32,17 @@ candidates do not add features). The blog post cited by the spec describes beta 
   registered behind the same port and selected only where the probe is true. We do not ship that
   implementation now: it could not be executed on any supported server, so it would be untested.
 
+### Confirmation (2026-11-04)
+Primary sources confirm the probe: Peter Eisentraut committed "Revert SQL Property Graph Queries
+(SQL/PGQ)" to `REL_19_STABLE` on 2026-09-07
+(<https://www.postgresql.org/message-id/E1x3f62-00000003sxD-0vdk@gemulon.postgresql.org>), and
+Daniel Gustafsson confirmed on pgsql-general on 2026-10-07 that SQL/PGQ will not ship in
+PostgreSQL 19 (<https://www.postgresql.org/message-id/D84BE2C2-6DD9-4FDB-BCC2-F64866BCAC49%40yesql.se>);
+it is expected back in PostgreSQL 20. A January 2026 hackers report of `GRAPH_TABLE` "bypassing
+row-level security" turned out to be table inheritance (a child table's policies do not apply
+through its parent), which our graph tables do not use; the cross-tenant graph tests still run
+against every `GraphStore`.
+
 ## Alternatives considered
 - Develop on `19beta1` to keep SQL/PGQ: rejected, it is an abandoned pre-release behaviour.
 - Apache AGE: a second query language and extension to operate; the spec mandates PostgreSQL-only

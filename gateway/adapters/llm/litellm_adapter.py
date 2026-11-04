@@ -64,6 +64,18 @@ def _undecodable(exc: BaseException) -> bool:
     return False
 
 
+def load_litellm() -> Any:
+    """Import LiteLLM once, set up for a server: no `.env` file read into the process, no price
+    map download, no debug banners and no message text kept for its logging."""
+    os.environ.setdefault("LITELLM_MODE", "PRODUCTION")  # its default, DEV, loads a .env file
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")  # never fetched at import
+    import litellm  # the optional extra (ADR 0008)
+
+    litellm.suppress_debug_info = True
+    litellm.turn_off_message_logging = True
+    return litellm
+
+
 class LiteLLMAdapter(OpenAICompatAdapter):
     def __init__(
         self,
@@ -83,12 +95,7 @@ class LiteLLMAdapter(OpenAICompatAdapter):
             timeout_s=timeout_s,
             max_tokens_field=max_tokens_field,
         )
-        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")  # never fetched at import
-        import litellm  # the optional extra, loaded only when a provider selects it
-
-        litellm.suppress_debug_info = True
-        litellm.turn_off_message_logging = True
-        self._litellm: Any = litellm
+        self._litellm: Any = load_litellm()  # already imported at startup by the registry
         self._client = openai.AsyncOpenAI(
             api_key=api_key, base_url=self._base, http_client=http, max_retries=0, timeout=timeout_s
         )
@@ -116,6 +123,7 @@ class LiteLLMAdapter(OpenAICompatAdapter):
         return self._completion(resp.model_dump(), req)
 
     async def stream(self, req: CanonicalRequest) -> AsyncIterator[CanonicalChunk]:
+        chunks: Any = None
         try:
             chunks = await self._litellm.acompletion(
                 **self._arguments(self.payload(req, stream=True))
@@ -125,6 +133,9 @@ class LiteLLMAdapter(OpenAICompatAdapter):
                     yield out
         except Exception as exc:
             raise self.classify_error(exc) from exc
+        finally:
+            if chunks is not None:  # a client gone away stops the provider too
+                await chunks.aclose()
 
     async def embed(self, req: EmbedRequest) -> EmbedResponse:
         arguments: dict[str, Any] = {

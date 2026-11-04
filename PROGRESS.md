@@ -35,6 +35,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | Price sync job (Phase 3): the worker keeps `model_catalog` in step with `config/prices.json` or an https URL; changes are appended (at once or at a later `effective_from`), suspicious ones refused; one sync at a time across workers | `feat(phase-3)` | `tests/unit/test_price_sync.py`, `tests/integration/test_price_sync.py` |
 | US-06 (switch part) and Phase 3: the optional LiteLLM adapter (pinned extra, OpenAI-compatible providers) reuses the native mapping on the shared HTTP client and passes the whole contract suite; the switch test answers the same requests through both adapters with the same answers, usage and cost; unservable selections fail at startup; filelock raised past its CVEs | `feat(US-06)` | `tests/contract/test_llm_contract.py` (`litellm` harness), `tests/integration/test_litellm_switch.py`, `tests/unit/test_envelope.py` |
 | US-26 a stage registers by config (registry order, per-org mode), runs in shadow on a copy, reports to `stage_reports` with the ledger row, and goes `on` only after a passed eval run for its current version; a failing stage is skipped and reported | `feat(US-26)` | `tests/unit/test_stages.py`, `tests/integration/test_us26_stages.py` |
+| Phase 3 review loop: hold released on a disconnect during the cache lookup; eval gate on the latest run with demotion; cached answers sealed and the worker limited to cleanup (janitor with expiry and per-org cap); cache key on the inspecting policy and rules version; price-sync errors without URLs, unpriced new models refused; LiteLLM without `.env` and imported at startup, streams closed; quality checks charged to the org; compaction leaves tool output and tabs alone; savings by technique reconcile for cache hits and unserved requests | `fix(phase-3)` | `docs/audits/2026-11-04-phase3-review.md`, `tests/integration/test_phase3_review.py`, `tests/unit/test_phase3_review.py` |
 | Phase 2 review loop: per-credential and heavy-work limits, budget precheck before conversion and retrieval, blocked passages dropped, exact search behind HNSW, linear detectors, input size cap | `c8740df`, `4ce7d06`, `201a9a2` | `docs/audits/2026-11-04-phase2-review.md`, `tests/integration/test_phase2_review.py`, `tests/unit/test_relay.py` |
 
 Budgets in one paragraph: one SQL statement holds the worst case (strict prompt-token upper bound,
@@ -76,14 +77,19 @@ Phase 2 review loop (spec section 12): the same two-reviewer loop over US-11 to 
 and Medium finding fixed with a regression test, re-reviewed twice; no open Critical, High or
 Medium finding. See `docs/audits/2026-11-04-phase2-review.md` (accepted Lows: D-21).
 
-## Next: Phase 3 (US-17..US-19, US-26: savings engine)
+Phase 3 review loop (spec section 12): two independent reviewers (security; correctness and
+money); no Critical or High finding and no cross-tenant path; every Medium and most Lows fixed
+with a regression test. See `docs/audits/2026-11-04-phase3-review.md` (accepted Lows: D-24).
 
-Plan: `docs/superpowers/plans/2026-11-04-phase3-savings.md`.
+## Next: Phase 4 (US-21, US-22: context engineering)
+
+Plan: `docs/superpowers/plans/2026-11-04-phase4-context.md`. Phase 3's plan:
+`docs/superpowers/plans/2026-11-04-phase3-savings.md`.
 
 ## Remaining stories
 
-Phase 3: done (US-17 to US-19, US-26, provider prompt caching, the price sync and the optional
-LiteLLM adapter); the Phase 3 review loop is next; Phase 4 US-21, US-22; Phase 5 US-24, US-25; Phase 6 US-27, US-30.
+Phase 4 US-21, US-22 (with the `GraphStore`, the code indexer, context packs and the MCP context
+tool); Phase 5 US-24, US-25; Phase 6 US-27, US-30.
 
 ## Findings and deviations from the spec
 
@@ -111,6 +117,7 @@ LiteLLM adapter); the Phase 3 review loop is next; Phase 4 US-21, US-22; Phase 5
 | D-20 | The chunks column is `vector(1024)` (bge-m3): an embedder of another width needs a migration; one HNSW index serves all orgs (per-org partitions come with the load tests); chat retrieval queries with the last user message and has no reranker or relevance threshold until US-21 | Every row records its embedding model, and vectors of different models are never compared |
 | D-22 | The savings report reads the ledger and the stage reports directly (both partitioned by month and indexed by org and time); the `savings_daily` rollup is added with the load tests if the report needs it. Overhead rates are configured, not measured; embeddings made while indexing documents are not part of any request's overhead | Totals come from the ledger itself, so the report always reconciles with it |
 | D-21 | Phase 2 accepted Lows: detection costs about two seconds of CPU per million characters below the input cap; images, tool definitions and message names are not scanned; passages are screened by the rules only; search returns unredacted text to the readers the ACL allows; limits are per credential; the chunk quota is unlocked; documents indexed from a deleted file stay until deleted; a key glued to a letter is not detected | `docs/audits/2026-11-04-phase2-review.md` (each item with its reason and upgrade path) |
+| D-24 | Phase 3 accepted Lows: eval runs are attested by an org admin (the gate records a decision); the price guard compares each sync with the current row only; the filelock override sits outside LiteLLM's declared range; cached answers (sealed, at most 30 days) have no per-user erasure; an org baseline model creates savings no technique explains; a failed request's reports still count as applied | `docs/audits/2026-11-04-phase3-review.md` (each item with its reason) |
 | D-23 | The router scores complexity by rules (length, code or tools, reasoning words, depth); the optional cascade (small first, escalate on low confidence) is not built. The judge measures how far the small tier's answer agrees with the large tier's (embedding cosine), not whether it is correct: it catches drift, not a fluent wrong fact. An LLM grader can replace `Verifier.agreement` | The router is a stage, so shadow mode, the eval gate and per-technique savings come from US-26 without new machinery |
 
 ## Blocked
