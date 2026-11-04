@@ -11,6 +11,7 @@ from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
+from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
 from gateway.api.deps import GatewayServices
@@ -35,6 +36,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def webhook_service(self) -> WebhookService: ...
     @property
     def guardrail_service(self) -> GuardrailService: ...
+    @property
+    def stage_admin_service(self) -> StageAdminService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

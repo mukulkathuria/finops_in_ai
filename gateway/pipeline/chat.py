@@ -48,6 +48,7 @@ from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
+from gateway.adapters.postgres.stages import StageRepository
 from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
 from gateway.domain.errors import DomainError, NotFound, Unavailable
@@ -66,8 +67,10 @@ from gateway.domain.llm import (
 )
 from gateway.domain.pricing import ModelKind, ModelPrice
 from gateway.domain.retrieval import Hit
+from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
 from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
+from gateway.pipeline.stages import StageRunner
 from gateway.ports.llm import LLMAdapter
 
 T = TypeVar("T")
@@ -153,6 +156,7 @@ class _Call:
     # Guardrail decisions for the ledger row; every exit path settles through `_end`.
     decisions: list[dict[str, object]] = field(default_factory=list)
     notes: dict[str, object] = field(default_factory=dict)  # more ledger flags (attachments)
+    reports: list[StageReport] = field(default_factory=list)  # what the stages did
 
     @property
     def origin(self) -> Origin:
@@ -358,6 +362,8 @@ class ChatService:
         telemetry: Telemetry,
         default_max_tokens: int,
         retries: int,
+        stages: StageRunner,
+        stage_reports: StageRepository,
         org_adapters: OrgAdapters | None = None,
     ) -> None:
         self._org_adapters = org_adapters
@@ -371,6 +377,8 @@ class ChatService:
         self._guardrails = guardrails
         self.default_max_tokens = default_max_tokens
         self._retries = retries
+        self._stages = stages
+        self._stage_reports = stage_reports
         self._background: set[asyncio.Task[None]] = set()
 
     async def resolve(self, model: str, kind: ModelKind, org_id: UUID | None = None) -> Resolved:
@@ -550,7 +558,11 @@ class ChatService:
         )
 
         async def work(conn: AsyncConnection) -> int:
-            await self._usage.record(conn, event)  # skipped when this hold's row already exists
+            # Skipped when this hold already has its row: its stage reports went in then.
+            if await self._usage.record(conn, event) and call.reports:
+                await self._stage_reports.record_reports(
+                    conn, request_id=who.request_id, ts=who.at, reports=call.reports
+                )
             fired = await self._budgets.settle(
                 conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
             )
@@ -633,6 +645,13 @@ class ChatService:
             await self._block(call, inspection.blocked)
         return inspection
 
+    async def _optimize(self, call: _Call, req: CanonicalRequest) -> CanonicalRequest:
+        """Spec section 4, step 7: the optimization stages, after the input guardrails."""
+        ctx = RequestContext(call.who.org_id, req, call.r.entry)
+        async with self._settles_on_failure(call):
+            call.reports.extend(await self._stages.run(ctx, "pre_llm"))
+        return ctx.request
+
     async def _call_provider(self, call: _Call, attempt: Callable[[], Awaitable[T]]) -> T:
         """Run the provider call with retries; any failure releases the hold and is recorded."""
         try:
@@ -659,7 +678,7 @@ class ChatService:
         if isinstance(call, bytes):
             return ChatResult(*load_chat(call))
         inspection = await self._inspect(call, req)
-        req = inspection.request
+        req = await self._optimize(call, inspection.request)
         with self._telemetry.provider_call(
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
@@ -700,7 +719,7 @@ class ChatService:
             response, cost, origin = load_chat(call)
             return StreamResult(_replay_stream(response, cost, outcome), origin)
         inspection = await self._inspect(call, req)
-        req = inspection.request
+        req = await self._optimize(call, inspection.request)
         current: list[AsyncIterator[CanonicalChunk]] = []
 
         async def open_stream() -> CanonicalChunk | None:

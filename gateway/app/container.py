@@ -18,6 +18,7 @@ from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.sessions import SessionService
+from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
 from gateway.adapters.classifiers.registry import build_classifier
@@ -42,6 +43,7 @@ from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
 from gateway.adapters.postgres.sessions import SessionRepository
+from gateway.adapters.postgres.stages import StageModeCache, StageRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
 from gateway.adapters.postgres.webhooks import WebhookRepository
@@ -58,6 +60,7 @@ from gateway.pipeline.files import FileService
 from gateway.pipeline.guardrails import Guardrails
 from gateway.pipeline.parsing import ParseService
 from gateway.pipeline.retrieval import RetrievalService
+from gateway.pipeline.stages import CompressionStage, StageRunner
 from gateway.pipeline.usage import UsageReporter
 from gateway.ports.storage import ObjectStore
 
@@ -87,6 +90,7 @@ class Container:
     envelope: Envelope
     webhook_service: WebhookService
     guardrail_service: GuardrailService
+    stage_admin_service: StageAdminService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -221,6 +225,9 @@ def build_container(
         metrics=observability.metrics,
         max_chunks_per_org=settings.max_indexed_chunks_per_org,
     )
+    stage_repo = StageRepository()
+    stage_modes = StageModeCache(db, stage_repo)
+    stage_runner = StageRunner([CompressionStage()], stage_modes)
     credentials = CredentialRepository()
     teams = TeamRepository()
     api_keys = ApiKeyRepository()
@@ -303,6 +310,8 @@ def build_container(
             telemetry=observability.telemetry,
             default_max_tokens=gateway_config.defaults.max_output_tokens,
             retries=gateway_config.defaults.provider_retries,
+            stages=stage_runner,
+            stage_reports=stage_repo,
             org_adapters=OrgAdapters(
                 org_key_lookup(db, credentials, envelope), provider_configs, http
             ),
@@ -326,6 +335,14 @@ def build_container(
         envelope=envelope,
         guardrail_service=GuardrailService(
             db=db, repo=policies, cache=policy_cache, audit=audit, authz=authz
+        ),
+        stage_admin_service=StageAdminService(
+            db=db,
+            repo=stage_repo,
+            modes=stage_modes,
+            runner=stage_runner,
+            audit=audit,
+            authz=authz,
         ),
         webhook_service=WebhookService(
             db=db,

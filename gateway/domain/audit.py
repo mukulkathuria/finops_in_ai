@@ -42,6 +42,8 @@ class AuditAction:
     BUDGET_REQUEST_DECIDED = "budget_requests.decided"
     POLICY_CHANGED = "policies.changed"
     SETTINGS_CHANGED = "settings.changed"
+    STAGE_MODE_SET = "stages.mode_set"
+    EVAL_RECORDED = "evals.recorded"
 
 
 def _check_details(details: Mapping[str, Any]) -> None:

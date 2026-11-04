@@ -187,6 +187,20 @@ chunks runs. Pages read with low confidence are not indexed (the response names 
 `warnings`). Embeddings come from an OpenAI-compatible server (`EMBEDDER_BASE_URL`, bge-m3, 1024
 dimensions).
 
+## Optimization stages (shadow mode and the eval gate)
+
+Every optimization is a stage with one contract (spec section 4): it may make the request cheaper
+and reports the tokens before and after, the cost difference, its latency and its risk to answer
+quality. `GET /v1/admin/stages` lists the stages with the org's mode and latest eval run;
+`PUT /v1/admin/stages/{name}` sets `off`, `shadow` or `on`; `POST /v1/admin/stages/{name}/evals`
+records an eval run (dataset, metric, score, threshold). A stage ships in `shadow`: it runs on a
+copy and reports what it would have saved. `on` is accepted only after an eval run for the stage's
+current version has passed (409 `eval_gate_not_passed`), and a new version of a stage runs in
+shadow again until its own eval passes. A stage that fails is skipped and reported, never failing
+the request. Reports are written to `stage_reports` with the ledger row. The first stage,
+`compression`, removes redundant whitespace from user and tool text and leaves fenced code and
+indentation as they were.
+
 ## Limits
 
 | Limit | Default (setting) | Refusal |
