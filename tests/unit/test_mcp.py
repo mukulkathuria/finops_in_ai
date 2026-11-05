@@ -48,7 +48,7 @@ async def test_tool_failures_reach_the_model_and_unknown_tools_do_not() -> None:
     caller = SimpleNamespace(
         org_id=uuid7(), team_id=uuid7(), user_id=None, api_key_id=uuid7(), groups=frozenset()
     )
-    session = _Session(caller, _Unreadable(), _Down(), _Screen())  # type: ignore[arg-type]
+    session = _Session(caller, _Unreadable(), _Down(), _Screen(), None)  # type: ignore[arg-type]
 
     async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {"name": name, "arguments": arguments}

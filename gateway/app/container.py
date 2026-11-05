@@ -58,6 +58,7 @@ from gateway.adapters.postgres.stages import StageModeCache, StageRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
 from gateway.adapters.postgres.webhooks import WebhookRepository
+from gateway.adapters.postgres.workspace import WorkspaceRepository
 from gateway.adapters.rerank.http import HttpReranker
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
@@ -78,6 +79,7 @@ from gateway.pipeline.retrieval import RetrievalService
 from gateway.pipeline.routing import RouterStage, Verifier
 from gateway.pipeline.stages import CompressionStage, RagRelevance, StageRunner
 from gateway.pipeline.usage import UsageReporter
+from gateway.pipeline.workspace import WorkspaceService
 from gateway.ports.storage import ObjectStore
 
 log = logging.getLogger(__name__)
@@ -119,6 +121,7 @@ class Container:
     retrieval_service: RetrievalService
     graph_store: PostgresGraphStore
     code_service: CodeService
+    workspace_service: WorkspaceService
     metrics: GatewayMetrics
     telemetry: Telemetry
 
@@ -405,6 +408,7 @@ def build_container(
         parse_service=parse_service,
         retrieval_service=retrieval_service,
         graph_store=graph_store,
+        workspace_service=WorkspaceService(db=db, repo=WorkspaceRepository(), embedder=embedder),
         code_service=CodeService(
             db=db,
             graph=graph_store,

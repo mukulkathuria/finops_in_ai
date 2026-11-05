@@ -70,7 +70,7 @@ async def test_us22_mcp_tools_answer_under_the_callers_acl(api: Api) -> None:
         "/v1/mcp", json=_rpc("tools/list"), headers=_headers(key, "tools/list")
     )
     tools = {t["name"]: t for t in listed.json()["result"]["tools"]}
-    assert set(tools) == {"get_code_context", "search_documents"}
+    assert {"get_code_context", "search_documents", "put_fact", "search_workspace"} <= set(tools)
 
     question = "How does Cart compute its total?"
     context = await _tool(
@@ -149,7 +149,8 @@ async def test_us22_mcp_checks_versions_headers_and_origins(api: Api) -> None:
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         headers={**key, "MCP-Protocol-Version": "2025-06-18"},
     )
-    assert len(listed.json()["result"]["tools"]) == 2
+    legacy_tools = {t["name"] for t in listed.json()["result"]["tools"]}
+    assert {"get_code_context", "search_documents"} <= legacy_tools
 
 
 async def test_us22_mcp_tools_screen_passages_like_chat(api: Api) -> None:

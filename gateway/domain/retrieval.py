@@ -29,7 +29,8 @@ _SENTENCE_END: Final = re.compile(r"(?<=[.!?])\s+")
 # Possessive (*+): two adjacent optional runs must not re-split a long run between them,
 # which made a `<` followed by many spaces cost quadratic time (review S-M1).
 _GAP: Final = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*+"
-_FRAMES: Final = "document|passage|retrieved|code_context"  # the tags data is framed with
+# The tags data is framed with: retrieved passages, code context and the agents' workspace.
+_FRAMES: Final = "document|passage|retrieved|code_context|workspace|fact|summary|message"
 _FRAME_TAG: Final = re.compile(
     rf"[<\ufe64\uff1c](?={_GAP}[/\uff0f]?{_GAP}(?:{_FRAMES})\b)", re.IGNORECASE
 )

@@ -282,6 +282,36 @@ A request with an `Origin` header is refused (403), so no web page can drive the
 server to Claude Code: `claude mcp add --transport http finops https://<gateway>/v1/mcp --header
 "Authorization: Bearer <key>"`.
 
+## Agent workspace (shared memory for agents)
+
+Agents working on one problem share a workspace instead of each searching again. A workspace is
+shared like a document (`POST /v1/workspaces` with `access`). Tasks group the agents' work (`POST
+/v1/workspaces/{id}/tasks`, with an optional `agent_token_budget`). Agents use the workspace
+through the MCP endpoint (`/v1/mcp`):
+
+| Tool | What it does |
+| --- | --- |
+| `put_fact`, `get_fact` | Record a fact (kept once per content; a `key` names it); get it whole by id or key |
+| `search_workspace` | The facts nearest a query, as ranked snippets. The same agent repeating a search in a task gets the record (the fact ids) instead |
+| `put_file_summary`, `get_file_summary` | One summary per file path, read instead of the file |
+| `ask_agent`, `answer_question`, `read_inbox` | Questions between agents (see below) |
+
+Questions between agents:
+
+- The same question to the same agent in a task is one message; once answered, its answer
+  comes back at once.
+- An unanswered question asked a third time is refused as a loop.
+- Follow-up chains stop at 3 hops.
+
+Discovery tokens are what agents read to find things out:
+
+- workspace reads;
+- clarification;
+- `search_documents` or `get_code_context` called with `workspace_id`, `task_id` and `agent`.
+
+They accrue per task and agent, and `GET /v1/workspaces/{id}/tasks/{task_id}` reports them. A
+task's `agent_token_budget` refuses any read that would take an agent past it.
+
 ## Image generation
 
 `POST /v1/images/generations` takes the OpenAI request (`model`, `prompt`, `n` up to 4, `size`,
