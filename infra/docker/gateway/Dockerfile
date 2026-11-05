@@ -17,8 +17,10 @@ COPY worker ./worker
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable ${EXTRAS:+--extra $EXTRAS}
 
 FROM base AS runtime
-# The runtime needs no installer: drop pip (and its vendored deps) to shrink the attack surface.
-RUN python -m pip uninstall --yes --quiet pip  && groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app \
+# Debian's security fixes released since the pinned base was built (e.g. CVE-2026-109518 in apt),
+# then no installer at runtime: drop pip (and its vendored deps) to shrink the attack surface.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall --yes --quiet pip  && groupadd --system --gid 10001 app && useradd --system --uid 10001 --gid app --no-create-home app \
     && install -d -o 10001 -g 10001 -m 0750 /var/lib/finops/objects
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv

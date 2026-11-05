@@ -42,7 +42,7 @@ async def _quota(
 ) -> None:
     body = {"period": "day", "unit": "images", "limit_amount": amount, **scope}
     resp = await client.put("/v1/admin/budgets", json=body, headers=admin)
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code in (200, 201), resp.text  # 201 when the budget is new
 
 
 def _ledger(db: DisposableDatabase, request_id: str) -> tuple[Any, ...]:
