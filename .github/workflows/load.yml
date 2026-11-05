@@ -31,22 +31,45 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Start the stack (open signup; the mock provider answers in 50 ms)
+      - name: Start the stack (open signup; the mock provider answers in 50 ms, embeddings in 10)
+        id: stack
         run: |
           python3 scripts/init_env.py
-          printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 >> .env
+          printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
+            MOCK_EMBED_LATENCY_MS=10 >> .env
           docker compose up -d --build --wait --wait-timeout 900
+      # Each profile runs whenever the stack is up, so one run reports them all; any failure
+      # still fails the job.
       - name: Baseline (100 users)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: tests/load/k6/run.sh baseline -e VUS=100 -e RAMP=1m -e HOLD=3m
       - name: Spike (18 to 90 requests a second, then 60)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: tests/load/k6/run.sh spike -e RATE=60
       - name: Budget race (500 requests at once)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: tests/load/k6/run.sh race
       - name: Failure under load (PostgreSQL restarts a minute in)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: |
           (sleep 60 && docker compose restart db) &
           tests/load/k6/run.sh failover -e RATE=40
           wait
+      - name: Where the gateway spent its time (average per stage)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
+        run: |
+          curl -fsS http://127.0.0.1:8080/metrics | python3 -c '
+          import re, sys
+          sums, counts = {}, {}
+          for line in sys.stdin:
+              m = re.match(r"finops_stage_duration_seconds_(sum|count)\{([^}]*)\} (\S+)", line)
+              if m:
+                  (sums if m.group(1) == "sum" else counts)[m.group(2)] = float(m.group(3))
+          print("### Gateway stages\n\n| Stage | Calls | Average ms |\n| --- | --- | --- |")
+          for key in sorted(sums, key=lambda k: -sums[k] / max(counts.get(k, 0), 1)):
+              if counts.get(key):
+                  print(f"| {key} | {counts[key]:.0f} | {sums[key] / counts[key] * 1000:.2f} |")
+          ' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Resource use at the end
         if: always()
         run: |
@@ -57,6 +80,7 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Restore drill on the database the profiles filled (writers stopped)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         shell: bash  # with pipefail, so a failed drill fails the step through the tee
         run: |
           docker compose stop gateway worker

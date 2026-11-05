@@ -32,6 +32,8 @@ CHARS_PER_TOKEN = 4
 LATENCY_MIN_MS = int(os.environ.get("MOCK_LATENCY_MS_MIN", "0"))
 LATENCY_MAX_MS = int(os.environ.get("MOCK_LATENCY_MS_MAX", "0"))
 CHUNK_DELAY_MS = int(os.environ.get("MOCK_STREAM_CHUNK_DELAY_MS", "0"))
+# An embedding server answers a short query in milliseconds; the latency above is a model's.
+EMBED_LATENCY_MS = int(os.environ.get("MOCK_EMBED_LATENCY_MS", "0"))
 MODELS = ("mock-small", "mock-large", "mock-embed", "mock-image")
 _FAULT = re.compile(r"\[\[mock:([a-z_]+)(?::(\d+))?\]\]")
 _PNG_1X1 = base64.b64decode(
@@ -277,7 +279,8 @@ async def embeddings(request: Request) -> Response:
     raw = body.get("input", "")
     inputs = [raw] if isinstance(raw, str) else list(raw)
     dims = int(body.get("dimensions") or 1024)
-    await _latency()
+    if EMBED_LATENCY_MS > 0:
+        await asyncio.sleep(EMBED_LATENCY_MS / 1000)
     used = sum(tokens(str(t)) for t in inputs)
     data = [
         {"object": "embedding", "index": i, "embedding": embedding_for(str(t), dims)}

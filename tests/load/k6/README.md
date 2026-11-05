@@ -3,6 +3,10 @@
 k6 scripts against the running stack. The mock provider answers in a fixed delay, and the
 gateway's overhead is a request's time beyond it.
 
+That overhead includes the embedding of each question, since the semantic cache embeds it,
+in shadow mode too. The mock answers embeddings in 10 ms, as a GPU embedding server does for a
+short query. The workflow's job summary lists the average time of every gateway stage.
+
 | Profile | Script | What it proves |
 | --- | --- | --- |
 | Baseline | `baseline.js` | At the target load: overhead p95 ≤ 100 ms and p99 ≤ 250 ms; errors under 0.1% |
@@ -17,7 +21,8 @@ Start the stack with open signup and a fixed provider delay:
 
 ```bash
 python3 scripts/init_env.py
-printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 >> .env
+printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
+  MOCK_EMBED_LATENCY_MS=10 >> .env
 docker compose up -d --build --wait
 ```
 
