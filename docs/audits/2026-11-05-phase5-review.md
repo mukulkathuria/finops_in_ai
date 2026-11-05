@@ -70,6 +70,34 @@ Step 2 makes the ordered HNSW scan win. A scan that comes back short still falls
 exact search. The other gates passed throughout: a pack read p95 1.7 ms, and 2 and 3 hops 2.4
 ms and 3.4 ms.
 
-## Re-review
+## Re-review (`08351b8`, fixed in `e111306`)
 
-Pending: the reviewers verify each fix and look for new problems it introduced.
+Two fresh reviewers checked every fix in the code, both security and correctness.
+
+- **Verified:** every S-* and C-* resolution above, with two partial ones (S-D1, S-E1). The
+  reviewers checked:
+  - the RLS lifting and re-forcing in 0026 and 0027;
+  - the minimal grants;
+  - the exact fact cap under READ COMMITTED (writers queue on the workspace row);
+  - the claim race, where the first member wins;
+  - the delete authorization and its cascade;
+  - that screening covers every read;
+  - that the image retries and the price guard behave as described.
+- **New:** no Critical or High. One Medium came from both reviewers, and one only from the
+  correctness review. The rest are Low or Info.
+
+| Id | Severity | Finding | Resolution |
+| --- | --- | --- | --- |
+| R-S1, R-C5 | Medium | `ask` never bound its addressee: a member could take a name nobody had used yet and read or answer the questions meant for it, and the real agent then got `agent_claimed` | A question goes only to an agent that has joined the task (acted in it); otherwise 404 `agent_not_in_task` (`test_s_d1_*`) |
+| R-C1 | Medium | `enable_sort = off` sends every search to the HNSW scan first; a tiny org beside large ones, or a narrow ACL, could walk up to 20,000 tuples before the exact fallback. Not measured | The index attempt stops after 5,000 tuples (`hnsw.max_scan_tuples`). The bench measures a 50-chunk org beside the large ones, and a caller who reads one team's chunks, against the same 50 ms gate |
+| R-S3, R-C6 | Low | Any member could use up a task's 100 agent slots; a legacy name with no principal was never bound once a task was full | Slots are per member; a name from before 0027 is bound on its next use at any count |
+| R-S4 | Low | A fact's key and source, and a summary's path, were neither screened nor neutralized | They pass the screen with the text (`test_s_e1_*`) |
+| R-S8 | Info | A workspace deleted during a write surfaced a foreign-key violation as a 500 | Mapped to 404 where the transaction ends |
+| R-C2 | Low | An omitted image option became the cheapest in the table even when the default was offered (a prompt alone could render 256x256) | The default comes first where the table offers it |
+| R-C3, R-S6 | Low | A new image option at 1 micro-USD passed the guard and could become the price of an omitted option | Refused under a tenth of the cheapest option before. Keys were already format-checked by the price-list parser |
+| R-C4 | Low | Moving from a flat price to a table alone was refused as "price_image would drop to zero" | The flat check is skipped where a table prices the images |
+| R-C7 | Info | Test gaps | Added: the exact fact cap under 8 concurrent writers; the summary, question and remembered-search caps; withheld summaries and answers; the grants 0027's downgrade revokes |
+| R-S2 | Low | A name used before 0027 has no principal, so the first member to use it again takes it | Accepted (ADR 0009): a one-time window for tasks created before the upgrade |
+| R-S5 | Low | A flat-priced model leaves omitted options to the provider, whose default may be dearer (`quality: auto`) | Accepted: `price_image` is the price of the model's default rendering. A model whose default varies needs an `image_prices` table (README) |
+| R-S7 | Info | `search_workspace` embeds under the standard limit | As document search does; the query is at most 4,000 characters |
+| R-S9 | Info | Screening drops what a blocking rule matches; a redact-only policy leaves MCP tool output unredacted | Accepted (ADR 0009), as for the Phase 4 document and code tools: an org that needs agents kept from such values sets those rules to block |

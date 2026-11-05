@@ -91,12 +91,15 @@ with a regression test. See `docs/audits/2026-11-04-phase3-review.md` (accepted 
 Phase 5 review loop (spec section 12): two independent reviewers (security; correctness and
 performance) over US-24, US-25 and the latency tuning. Two Highs fixed (migration 0026 would
 have dropped every chunk when run as `migrator`; a flat image price covered any size), and every
-Medium fixed with a regression test. Accepted items are in ADR 0009 (D-28). See
-`docs/audits/2026-11-05-phase5-review.md`.
+Medium fixed with a regression test. A re-review by two fresh reviewers verified every fix
+and found no Critical or High; its Mediums (questions only to agents that joined the task;
+the narrow-filter vector search, now bounded and benchmarked) and Lows are fixed. Accepted
+items are in ADR 0009 (D-28). See `docs/audits/2026-11-05-phase5-review.md`.
 
 ## Next: Phase 6 (US-27 OIDC SSO, US-30 Terraform; load, race and soak tests; release audit)
 
-Plans: `docs/superpowers/plans/2026-11-05-phase5-agents-images.md` (done),
+Plan: `docs/superpowers/plans/2026-11-05-phase6-hardening.md`. Earlier plans:
+`docs/superpowers/plans/2026-11-05-phase5-agents-images.md`,
 `docs/superpowers/plans/2026-11-04-phase4-context.md`, `docs/superpowers/plans/2026-11-04-phase3-savings.md`.
 
 ## Remaining stories

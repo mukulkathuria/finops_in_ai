@@ -26,19 +26,30 @@ the agent's name is only a label the credential holds.
 1. **Agent names are bound to members per task.** The first member to use a name in a task
    holds it. A member is a user, or for a team key the team (migration 0027,
    `task_agents.principal`). Another member's call under that name is refused with
-   `agent_claimed`. One orchestrator credential may still run any number of agents. Every fact,
-   summary, question and answer records the member behind it (`written_by`, `answered_by`).
+   `agent_claimed`.
+   - An agent joins a task by acting in it. A question goes only to an agent that has joined,
+     so nobody can take an addressee's name to read what was meant for it.
+   - One orchestrator credential may run any number of agents, up to 100 names per member and
+     task.
+   - Every fact, summary, question and answer records the member behind it (`written_by`,
+     `answered_by`).
+   - Names used before migration 0027 have no principal. The first member to use one again
+     holds it: a one-time window for tasks that were open during the upgrade.
 2. **Discovery accounting is cooperative.** A read counts against a task only when it names the
    task and the agent. A read that names neither is served and not counted. The per-agent
    budget stops runaway loops inside a task; it is not a money control. Money is held by the
    gateway's budgets on every model call the agents make. Hop chains are what clients say they
    are: leaving out `reply_to` starts a new chain. A reworded question is a new question to the
    loop rule.
-3. **Workspace content is screened when it is read, as documents are.** Facts, summaries and
-   messages pass the organisation's passage screen on the way out. A blocked one is withheld
-   with `content_withheld`, or counted in a search's `withheld`. Writes are not screened. A fact
-   holding a secret is stored, as a document holding one is, and never handed to an agent while
-   the policy blocks secrets.
+3. **Workspace content is screened when it is read, as documents are.** Facts (with their keys
+   and sources), summaries (with their paths) and messages pass the organisation's passage
+   screen on the way out. A blocked one is withheld with `content_withheld`, or counted in a
+   search's `withheld`.
+   - Writes are not screened. A fact holding a secret is stored, as a document holding one is,
+     and never handed to an agent while the policy blocks secrets.
+   - The screen drops what a blocking rule matches; it does not redact. A redact-only policy
+     therefore leaves the MCP tools' output unredacted: the document and code tools as well as
+     the workspace. An org that needs agents kept from such values sets those rules to block.
 4. **Image answers in idempotency records stay plaintext, as chat answers do.** The janitor
    purges them after a day. Cached image answers are sealed per org, and an answer over 8 MiB is
    not cached.
@@ -46,6 +57,14 @@ the agent's name is only a label the credential holds.
    hash-partitioned by org into 16 partitions. One very large tenant has a partition, and an
    HNSW graph, mostly to itself. Its search no longer skips other orgs' rows, but walks a graph
    the size of its own corpus. The seeded benchmark measures 50 orgs of 20,000 chunks each.
+   The other end is covered:
+   - the index attempt stops after 5,000 tuples (`hnsw.max_scan_tuples`), so a tiny org or a
+     narrow ACL soon falls to the exact search over the few rows it may read;
+   - the benchmark measures a 50-chunk org beside the large ones, and a caller who reads one
+     team's chunks.
+6. **A flat image price is the price of the model's default rendering.** Options a request
+   leaves out go to the provider as left out. A model whose default varies, such as `quality:
+   auto`, or costs more than its flat price, needs an `image_prices` table.
 
 ## Alternatives considered
 

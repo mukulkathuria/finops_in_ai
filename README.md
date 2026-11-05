@@ -318,11 +318,16 @@ Who may act, and how much a workspace holds:
   team of a team key. Another member's call under that name (its inbox, its answers, its
   budget) is refused with `agent_claimed`. Every fact, summary, question and answer records the
   member behind it.
+- An agent joins a task by acting in it (start each agent with `read_inbox`). A question goes
+  only to an agent that has joined; otherwise `agent_not_in_task`.
 - What the workspace hands an agent passes the organisation's passage screen, as retrieved
-  documents do. A fact holding a blocked value or an injection is withheld: `get_fact` answers
-  `content_withheld`, and a search leaves it out and counts it in `withheld`.
-- A workspace holds at most 2,000 facts (its search is exact) and 10,000 file summaries; a task
-  holds at most 100 agents and 5,000 questions. A full workspace answers 403 `workspace_full`.
+  documents do. This covers a fact's key and source and a summary's path. A fact holding a
+  blocked value or an injection is withheld: `get_fact` answers `content_withheld`, and a
+  search leaves it out and counts it in `withheld`. The screen drops, it does not redact: to
+  keep a value from agents, set its rule to block.
+- A workspace holds at most 2,000 facts (its search is exact) and 10,000 file summaries. A task
+  holds at most 5,000 questions, and each member may use up to 100 agent names in it. A full
+  workspace answers 403 `workspace_full`.
   `put_fact` embeds the fact, so it counts against the credential's heavy limit, as a document
   ingest does.
 - `DELETE /v1/workspaces/{id}` removes the workspace and everything in it. Its creator decides
@@ -343,10 +348,13 @@ Who may act, and how much a workspace holds:
 3. Each image costs its catalog price for its size and quality: `capabilities.image_prices`,
    which the price list carries as `"image_prices": {"1024x1024/hd": 80000}`. What is rendered
    is what is priced:
-   - With a table, an option the request leaves out is the cheapest the table offers with the
-     ones named, and the provider is asked for exactly that.
+   - With a table, an option the request leaves out is the default (`1024x1024`, `standard`)
+     when the table offers it with the ones named, else the cheapest it offers with them. The
+     provider is asked for exactly that.
    - A model without a table charges `price_image` for its default image only (`size` and
-     `quality` left out, or `1024x1024` and `standard`).
+     `quality` left out, or `1024x1024` and `standard`). `price_image` must be the price of
+     the model's default rendering; a model whose default varies (`quality: auto`) needs a
+     table.
    - Anything else is a 422 `unsupported_image_option`.
 
    The ledger row counts the images (`kind` `image`). A render that fails after the provider
