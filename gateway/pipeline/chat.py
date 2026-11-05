@@ -224,8 +224,22 @@ class _StreamEnd:
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough count (about 4 characters per token) used only when a provider reports nothing."""
-    return (len(text) + 3) // 4
+    """A count used only when a provider reports nothing: about 4 characters a token, plus half
+    a token for each extra UTF-8 byte. Scripts such as Chinese (3 bytes, near a token a
+    character) would otherwise count four to six times too low."""
+    extra = len(text.encode("utf-8", "surrogatepass")) - len(text)
+    return (len(text) + 3) // 4 + (extra + 1) // 2
+
+
+_Spent = tuple[Usage, int, int]  # what a provider call used: usage, cost in micro-USD, images
+
+
+def _priced(entry: ModelPrice, usage: Usage) -> _Spent:
+    return usage, entry.cost(usage), 0
+
+
+def _prompt_text(req: CanonicalRequest) -> str:
+    return "".join(m.text() for m in req.messages)
 
 
 def _spent(usage: Usage, cost: int, images: int = 0) -> Demand:
@@ -236,9 +250,8 @@ def _measured(req: CanonicalRequest, response: CanonicalResponse) -> Usage:
     """The provider's usage report, or an estimate when it reported nothing."""
     if not response.usage.estimated:
         return response.usage
-    prompt = "".join(m.text() for m in req.messages)
     return Usage(
-        input_tokens=estimate_tokens(prompt),
+        input_tokens=estimate_tokens(_prompt_text(req)),
         output_tokens=estimate_tokens(response.content or ""),
         estimated=True,
     )
@@ -403,10 +416,9 @@ class _Relay:
         tail = self._held() or CanonicalChunk()
         held = (tail.content or "") + "".join(d.arguments for d in tail.tool_calls)
         if usage is None or usage.estimated:
-            prompt = "".join(m.text() for m in self._req.messages)
             output = "".join(self._produced) + "".join(c[1] + c[2] for c in self._calls.values())
             usage = Usage(
-                input_tokens=estimate_tokens(prompt),
+                input_tokens=estimate_tokens(_prompt_text(self._req)),
                 output_tokens=estimate_tokens(output + held),
                 estimated=True,
             )
@@ -737,11 +749,23 @@ class ChatService:
         *,
         charged: bool,
         result: bytes | None = None,
+        images: int = 0,
+        known_baseline: int | None = None,
     ) -> None:
         """Failure paths: a failed write must not mask the original error. The janitor returns
         the hold once it expires, and a stale idempotency key can then be taken over."""
         try:
-            await self._end(call, usage, cost, status, flags, charged=charged, result=result)
+            await self._end(
+                call,
+                usage,
+                cost,
+                status,
+                flags,
+                charged=charged,
+                result=result,
+                images=images,
+                known_baseline=known_baseline,
+            )
         except Exception:
             log.exception("could not settle a request", extra={"request_id": call.who.request_id})
 
@@ -916,7 +940,11 @@ class ChatService:
         with self._telemetry.provider_call(
             "chat", other.provider, other.model, replay.max_tokens
         ) as span:
-            response = await self._call_provider(judged, lambda: r.adapter.complete(replay))
+            response = await self._call_provider(
+                judged,
+                lambda: r.adapter.complete(replay),
+                measure=lambda answered: _priced(other, _measured(replay, answered)),
+            )
             usage = _measured(replay, response)
             cost = other.cost(usage)
             self._telemetry.annotate(span, usage, cost, response.finish_reason)
@@ -977,13 +1005,25 @@ class ChatService:
         return call, ctx.request
 
     async def _call_provider(
-        self, call: _Call, attempt: Callable[[], Awaitable[T]], *, idempotent: bool = True
+        self,
+        call: _Call,
+        attempt: Callable[[], Awaitable[T]],
+        *,
+        idempotent: bool = True,
+        measure: Callable[[T], _Spent] | None = None,
+        opening: CanonicalRequest | None = None,
     ) -> T:
-        """Run the provider call with retries; any failure releases the hold and is recorded."""
+        """Run the provider call with retries; a failure releases the hold and is recorded.
+
+        A client that goes away does not make the call free: a provider answers and bills a
+        request it has received. A whole-response call (`measure`) therefore runs on, shielded,
+        and is charged what the provider reports. A stream being `opening` is stopped instead,
+        and charged its estimated prompt, as a stream cancelled after its first chunk is."""
+        task = asyncio.ensure_future(self._with_retries(attempt, idempotent=idempotent))
         try:
-            return await self._with_retries(attempt, idempotent=idempotent)
+            return await (asyncio.shield(task) if measure is not None else task)
         except asyncio.CancelledError:
-            self._spawn(self._end_quietly(call, Usage(), 0, "cancelled", charged=False))
+            self._spawn(self._after_cancel(call, task, measure, opening))
             raise
         except Exception as exc:
             error = exc.kind.value if isinstance(exc, ProviderError) else "internal"
@@ -991,6 +1031,41 @@ class ChatService:
                 self._end_quietly(call, Usage(), 0, "error", {"error": error}, charged=False)
             )
             raise
+
+    async def _after_cancel(
+        self,
+        call: _Call,
+        task: asyncio.Future[T],
+        measure: Callable[[T], _Spent] | None,
+        opening: CanonicalRequest | None,
+    ) -> None:
+        """Settle a provider call whose client went away (see `_call_provider`)."""
+        if measure is None:
+            prompt = Usage(
+                input_tokens=estimate_tokens(_prompt_text(opening)) if opening else 0,
+                estimated=True,
+            )
+            charged = prompt.input_tokens > 0
+            cost = call.r.entry.cost(prompt) if charged else 0
+            await self._end_quietly(call, prompt, cost, "cancelled", charged=charged)
+            return
+        try:
+            usage, cost, images = measure(await task)
+        except Exception:  # the provider failed after all, and bills nothing for that
+            log.exception(
+                "a call its client left failed", extra={"request_id": call.who.request_id}
+            )
+            await self._end_quietly(call, Usage(), 0, "cancelled", charged=False)
+            return
+        await self._end_quietly(
+            call,
+            usage,
+            cost,
+            "cancelled",
+            charged=True,
+            images=images,
+            known_baseline=cost if images else None,
+        )
 
     async def complete(
         self,
@@ -1015,7 +1090,11 @@ class ChatService:
         with self._telemetry.provider_call(
             "chat", r.entry.provider, r.entry.model, req.max_tokens
         ) as span:
-            response = await self._call_provider(call, lambda: r.adapter.complete(req))
+            response = await self._call_provider(
+                call,
+                lambda: r.adapter.complete(req),
+                measure=lambda answered: _priced(r.entry, _measured(req, answered)),
+            )
             usage = _measured(req, response)
             cost = r.entry.cost(usage)
             self._telemetry.annotate(span, usage, cost, response.finish_reason)
@@ -1066,7 +1145,8 @@ class ChatService:
         span = self._telemetry.stream_span(r.entry.provider, r.entry.model, req.max_tokens)
         try:
             with self._telemetry.opening(span):
-                first = await self._call_provider(call, open_stream)  # retry before output only
+                # retried before any output only
+                first = await self._call_provider(call, open_stream, opening=req)
         except BaseException:
             span.end()
             raise
@@ -1128,7 +1208,11 @@ class ChatService:
             await self._block(call, blocked)
         req = replace(req, inputs=inputs)
         with self._telemetry.provider_call("embeddings", r.entry.provider, r.entry.model) as span:
-            response = await self._call_provider(call, lambda: r.adapter.embed(req))
+            response = await self._call_provider(
+                call,
+                lambda: r.adapter.embed(req),
+                measure=lambda answered: _priced(r.entry, answered.usage),
+            )
             cost = r.entry.cost(response.usage)
             self._telemetry.annotate(span, response.usage, cost, None)
         stored = dump_embed(call.origin, cost, response) if idem is not None else None
@@ -1170,7 +1254,14 @@ class ChatService:
             return await self._images_served(call, hit[0], option)
         with self._telemetry.provider_call("images", r.entry.provider, r.entry.model) as span:
             response = await self._call_provider(
-                call, lambda: r.adapter.generate_images(req), idempotent=False
+                call,
+                lambda: r.adapter.generate_images(req),
+                idempotent=False,
+                measure=lambda answered: (
+                    Usage(),
+                    option.price * min(len(answered.images), req.n),
+                    min(len(answered.images), req.n),
+                ),
             )
             response = replace(
                 response,
