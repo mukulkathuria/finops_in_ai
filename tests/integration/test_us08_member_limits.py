@@ -303,7 +303,13 @@ async def test_two_permanent_grants_approved_at_once_both_count(api: Api) -> Non
     assert joined.status_code == 201, joined.text
     budget = await client.put(
         "/v1/admin/budgets",
-        json={"scope_type": "team", "team_id": team, "period": "day", "limit_amount": 1000},
+        json={
+            "scope_type": "team",
+            "team_id": team,
+            "period": "day",
+            "unit": "tokens",
+            "limit_amount": 1000,
+        },
         headers=bearer(token),
     )
     assert budget.status_code in (200, 201), budget.text
