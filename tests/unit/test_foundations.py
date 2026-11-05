@@ -1,6 +1,8 @@
 """Phase 0 foundations: settings safety, URL handling, log redaction, env bootstrap."""
 
 import logging
+import re
+from pathlib import Path
 
 import orjson
 import pytest
@@ -144,6 +146,13 @@ def test_init_env_preserves_comments() -> None:
     assert "# comment line" in out
     assert "# host port" in out
     assert "5432/finops" in out
+
+
+def test_no_empty_setting_in_the_env_example_carries_a_comment() -> None:
+    # Compose drops the blanks after `=` before it looks for ` #`, so `KEY=   # note` sets KEY to
+    # the note (python-dotenv reads ""): the stack's gateway died on JWT_PREVIOUS_PUBLIC_KEYS.
+    text = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+    assert re.findall(r"^[A-Z][A-Z0-9_]*=[ \t]*#.*$", text, re.MULTILINE) == []
 
 
 def test_an_unset_environment_means_production_and_refuses_missing_secrets(
