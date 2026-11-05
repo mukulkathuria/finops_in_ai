@@ -13,6 +13,15 @@ workflow:
 Keys carry `org_id`, as a partitioned table's keys must. Partitions get no grants: everything
 goes through `chunks`, under its row-level security.
 
+Moving the rows, both ways:
+
+- The copy runs as the table's owner with FORCE ROW LEVEL SECURITY lifted. Forced, the tenant
+  policy hides every row from a migration session (it has no org), so the copy would move
+  nothing before the old table is dropped. The counts are compared before the drop.
+- `documents` (its writes) and then `chunks` (everything) are locked first, in the order an
+  ingest takes them: no chunk commits between the copy and the drop, and no ingest deadlocks
+  with the foreign keys added afterwards. Ingestion and search wait for the migration.
+
 Revision ID: 0026
 Revises: 0025
 """
@@ -26,6 +35,12 @@ depends_on = None
 
 PARTITIONS = 16
 
+_LOCK = """
+    LOCK TABLE documents IN SHARE ROW EXCLUSIVE MODE;
+    LOCK TABLE chunks IN ACCESS EXCLUSIVE MODE;
+    ALTER TABLE chunks NO FORCE ROW LEVEL SECURITY;
+"""
+
 _SECURITY = """
     ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
     ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
@@ -34,10 +49,33 @@ _SECURITY = """
     CREATE POLICY worker_all ON chunks FOR ALL TO worker USING (true) WITH CHECK (true);
     GRANT SELECT, INSERT, DELETE ON chunks TO app;
     GRANT SELECT, DELETE ON chunks TO worker;
+    ANALYZE chunks;
 """
 
 
+def _move_to(target: str) -> str:
+    """Copy every chunk into `target`, refuse to go on unless all of them arrived, and put
+    `target` in the old table's place."""
+    return f"""
+    INSERT INTO {target} SELECT * FROM chunks;
+    DO $$
+    DECLARE
+      copied bigint;
+      total bigint;
+    BEGIN
+      SELECT count(*) INTO copied FROM {target};
+      SELECT count(*) INTO total FROM chunks;
+      IF copied <> total THEN
+        RAISE EXCEPTION 'chunks were lost in the copy: % of % rows arrived', copied, total;
+      END IF;
+    END $$;
+    DROP TABLE chunks;
+    ALTER TABLE {target} RENAME TO chunks;
+    """
+
+
 def upgrade() -> None:
+    op.execute(_LOCK)
     op.execute("""
     CREATE TABLE chunks_by_org (LIKE chunks INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
       PARTITION BY HASH (org_id);
@@ -48,10 +86,8 @@ def upgrade() -> None:
             f" FOR VALUES WITH (MODULUS {PARTITIONS}, REMAINDER {i})"
         )
     op.execute(
-        """
-    INSERT INTO chunks_by_org SELECT * FROM chunks;
-    DROP TABLE chunks;
-    ALTER TABLE chunks_by_org RENAME TO chunks;
+        _move_to("chunks_by_org")
+        + """
     ALTER TABLE chunks ADD PRIMARY KEY (id, org_id);
     ALTER TABLE chunks ADD CONSTRAINT chunks_document_ordinal UNIQUE (document_id, ordinal, org_id);
     ALTER TABLE chunks ADD FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE CASCADE;
@@ -66,12 +102,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(_LOCK)
     op.execute(
-        """
-    CREATE TABLE chunks_plain (LIKE chunks INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
-    INSERT INTO chunks_plain SELECT * FROM chunks;
-    DROP TABLE chunks;
-    ALTER TABLE chunks_plain RENAME TO chunks;
+        "CREATE TABLE chunks_plain (LIKE chunks INCLUDING DEFAULTS INCLUDING CONSTRAINTS);"
+        + _move_to("chunks_plain")
+        + """
     ALTER TABLE chunks ADD PRIMARY KEY (id);
     ALTER TABLE chunks ADD CONSTRAINT chunks_document_id_ordinal_key UNIQUE (document_id, ordinal);
     ALTER TABLE chunks ADD FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE CASCADE;

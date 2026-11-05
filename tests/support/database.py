@@ -55,7 +55,25 @@ def _role_url(server_url: str, role: str, db: str) -> str:
     return _with(server_url, user=role, password=password, db=db)
 
 
-def create_test_database(server_url: str) -> DisposableDatabase:
+def _alembic(migrator_url: str) -> Config:
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", migrator_url.replace("%", "%%"))
+    cfg.attributes["skip_logging_config"] = True  # keep pytest's logging intact
+    return cfg
+
+
+def migrate_up(db: DisposableDatabase, revision: str = "head") -> None:
+    """Upgrade as `migrator`, the role deployments migrate with."""
+    command.upgrade(_alembic(db.migrator_url), revision)
+
+
+def migrate_down(db: DisposableDatabase, revision: str) -> None:
+    command.downgrade(_alembic(db.migrator_url), revision)
+
+
+def create_test_database(server_url: str, *, revision: str = "head") -> DisposableDatabase:
+    """A new database migrated to `revision` (an earlier one lets a test seed data a migration
+    must carry over)."""
     name = f"finops_test_{os.getpid()}_{secrets.token_hex(3)}"
     ident = sql.Identifier(name)
     with psycopg.connect(server_url, autocommit=True, connect_timeout=10) as conn:
@@ -70,10 +88,7 @@ def create_test_database(server_url: str) -> DisposableDatabase:
     with psycopg.connect(superuser_url, autocommit=True, connect_timeout=10) as conn:
         conn.execute(SETUP_SQL.read_text(encoding="utf-8"))  # type: ignore[call-overload]
     migrator_url = _role_url(server_url, "migrator", name)
-    cfg = Config(str(ROOT / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", migrator_url.replace("%", "%%"))
-    cfg.attributes["skip_logging_config"] = True  # keep pytest's logging intact
-    command.upgrade(cfg, "head")
+    command.upgrade(_alembic(migrator_url), revision)
     return DisposableDatabase(
         name=name,
         superuser_url=superuser_url,
