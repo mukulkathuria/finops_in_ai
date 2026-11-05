@@ -1,0 +1,60 @@
+# Spec section 11 load profiles at CI scale against the compose stack, the mock provider answering
+# in a fixed 50 ms: the baseline, a spike, the budget race and a database restart under load.
+# Weekly, on demand, and on any change to the profiles (tests/load/k6/README.md).
+name: load
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "tests/load/k6/**"
+      - ".github/workflows/load.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load
+  cancel-in-progress: true
+
+env:
+  K6_IMAGE: grafana/k6:2.3.0
+
+jobs:
+  profiles:
+    name: baseline, spike, budget race and failure under load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start the stack (open signup; the mock provider answers in 50 ms)
+        run: |
+          python3 scripts/init_env.py
+          printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 >> .env
+          docker compose up -d --build --wait --wait-timeout 900
+      - name: Baseline (100 users)
+        run: tests/load/k6/run.sh baseline -e VUS=100 -e RAMP=1m -e HOLD=3m
+      - name: Spike (18 to 90 requests a second, then 60)
+        run: tests/load/k6/run.sh spike -e RATE=60
+      - name: Budget race (500 requests at once)
+        run: tests/load/k6/run.sh race
+      - name: Failure under load (PostgreSQL restarts a minute in)
+        run: |
+          (sleep 60 && docker compose restart db) &
+          tests/load/k6/run.sh failover -e RATE=40
+          wait
+      - name: Resource use at the end
+        if: always()
+        run: |
+          {
+            echo '### Resource use at the end'
+            echo '```'
+            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Logs of a failed run
+        if: failure()
+        run: docker compose logs --tail 120 gateway worker db
