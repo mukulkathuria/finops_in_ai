@@ -1,0 +1,63 @@
+# US-30: one documented command set (scripts/env.sh) provisions dev and staging from empty on the
+# runner's Docker, proves they answer, proves a second apply changes nothing, and destroys them
+# leaving nothing behind.
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "scripts/env.sh"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "infra/**"
+      - "scripts/env.sh"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  environments:
+    name: dev and staging from empty, checked and destroyed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.3"
+          terraform_wrapper: false
+      - name: Format and validate
+        run: |
+          terraform fmt -check -recursive infra/terraform
+          for env in dev staging; do
+            terraform -chdir=infra/terraform/envs/$env init -input=false -backend=false
+            terraform -chdir=infra/terraform/envs/$env validate
+          done
+      - name: dev from empty
+        run: scripts/env.sh up dev && scripts/env.sh check dev
+      - name: dev, a second apply changes nothing
+        run: terraform -chdir=infra/terraform/envs/dev plan -input=false -detailed-exitcode
+      - name: dev destroyed cleanly
+        run: scripts/env.sh down dev && scripts/env.sh gone dev
+      - name: staging from empty, checked and destroyed cleanly
+        run: |
+          scripts/env.sh up staging
+          scripts/env.sh check staging
+          scripts/env.sh down staging
+          scripts/env.sh gone staging
+      - name: Logs of a failed environment
+        if: failure()
+        run: |
+          docker ps -a --format '{{.Names}} {{.Status}}'
+          for c in $(docker ps -a --format '{{.Names}}' | grep '^finops-'); do
+            echo "== $c"; docker logs --tail 80 "$c" 2>&1
+          done

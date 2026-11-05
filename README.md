@@ -56,6 +56,21 @@ If port 5432 is taken on your host, create the env file with
 `POSTGRES_PORT=55432 uv run python scripts/init_env.py`. Every published port binds to
 `127.0.0.1` only.
 
+## Environments with Terraform (dev and staging)
+
+Terraform (or OpenTofu, `TF=tofu`) provisions a whole environment on a Docker host from empty,
+and destroys it leaving nothing behind. It generates the passwords and keys, so no `.env` is
+needed:
+
+```bash
+scripts/env.sh up staging      # build the images, provision from empty
+scripts/env.sh check staging   # health, readiness, dashboard and its proxy
+scripts/env.sh down staging    # destroy it; `gone staging` proves nothing is left
+```
+
+`staging` runs production-like settings. The `terraform` workflow provisions, checks and
+destroys both environments on every change. See `docs/runbooks/deploy.md`.
+
 ## Development
 
 | Task | Command |
