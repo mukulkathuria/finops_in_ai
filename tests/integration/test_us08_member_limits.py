@@ -5,6 +5,7 @@ it fails for other teams or above the cap (unless overcommit allows the sum to e
 change is audited. Members ask for more budget and the lead approves it once or permanently.
 """
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -283,3 +284,49 @@ async def test_more_budget_requests_are_approved_once_or_permanently_or_denied(
     decided = _audit(test_db, rid)
     assert [r[0] for r in decided] == ["budget_requests.created", "budget_requests.decided"]
     assert decided[1][1]["grant_type"] == "one_time"
+
+
+async def test_two_permanent_grants_approved_at_once_both_count(api: Api) -> None:
+    """Release review M2: each approval read the old limit, and one overwrote the other."""
+    _, client = api
+    admin = await signup(client)
+    token = admin["access_token"]
+    made = await client.post(
+        "/v1/admin/teams", json={"name": f"T {uuid4().hex[:6]}"}, headers=bearer(token)
+    )
+    team = made.json()["id"]
+    joined = await client.post(
+        f"/v1/admin/teams/{team}/members",
+        json={"user_id": admin["user"]["id"]},
+        headers=bearer(token),
+    )
+    assert joined.status_code == 201, joined.text
+    budget = await client.put(
+        "/v1/admin/budgets",
+        json={"scope_type": "team", "team_id": team, "period": "day", "limit_amount": 1000},
+        headers=bearer(token),
+    )
+    assert budget.status_code in (200, 201), budget.text
+    budget_id = budget.json()["id"]
+    asked = []
+    for amount in (100, 10):
+        request = await client.post(
+            "/v1/budget-requests",
+            json={"budget_id": budget_id, "amount": amount, "reason": "release review"},
+            headers=bearer(token),
+        )
+        assert request.status_code == 201, request.text
+        asked.append(request.json()["id"])
+    decided = await asyncio.gather(
+        *(
+            client.post(
+                f"/v1/budget-requests/{rid}/decision",
+                json={"decision": "approve", "grant_type": "permanent"},
+                headers=bearer(token),
+            )
+            for rid in asked
+        )
+    )
+    assert [d.status_code for d in decided] == [200, 200], [d.text for d in decided]
+    listed = (await client.get("/v1/admin/budgets", headers=bearer(token))).json()["data"]
+    assert [b["limit_amount"] for b in listed if b["id"] == budget_id] == [1110]

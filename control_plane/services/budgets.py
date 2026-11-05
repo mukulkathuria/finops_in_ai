@@ -282,6 +282,13 @@ class BudgetService:
                     )
             if new != old:
                 await self._budgets.update_settings(conn, new)
+                if new.timezone != old.timezone:
+                    # Periods moved. Rebuild every current counter from the ledger before the
+                    # new timezone commits, so no reservation reads a period its counter has
+                    # not counted yet. Ascending ids: the order reservations lock counters in.
+                    now = datetime.now(UTC)
+                    for budget_id in await self._budgets.budget_ids(conn):
+                        await self._budgets.rebuild_current(conn, budget_id, now)
                 await self._audit.append(
                     conn,
                     self._event(
@@ -297,15 +304,6 @@ class BudgetService:
                         },
                     ),
                 )
-        if new.timezone != old.timezone:
-            # Periods moved: rebuild each current counter from the ledger, one short transaction
-            # per budget so no counter stays locked for the whole loop.
-            now = datetime.now(UTC)
-            async with self._db.transaction(self._ctx(principal)) as conn:
-                budget_ids = await self._budgets.budget_ids(conn)
-            for budget_id in budget_ids:
-                async with self._db.transaction(self._ctx(principal)) as conn:
-                    await self._budgets.rebuild_current(conn, budget_id, now)
         return new
 
     async def request_more(
@@ -457,6 +455,13 @@ class BudgetService:
                 conn, budget_id=budget.id, at=datetime.now(UTC), amount=request.amount
             )
             return
+        # Lock as a limit change does (the team's cap, then the budget row) and read the limit
+        # again: two approvals at once then add up instead of one overwriting the other.
+        if budget.team_id is not None:
+            await self._budgets.lock_allocation(conn, budget.team_id, budget.period, budget.unit)
+        budget = await self._budgets.get(conn, budget.id, lock=True)
+        if budget is None:
+            raise NotFound("budget not found", code="budget_not_found")
         change = BudgetChange(
             scope_type=budget.scope_type,
             team_id=budget.team_id,

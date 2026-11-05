@@ -128,6 +128,7 @@ _GET = """
 SELECT id, scope_type, team_id, user_id, period, unit, limit_amount, soft_pct
   FROM budgets WHERE id = :id
 """
+_GET_LOCKED = _GET + " FOR UPDATE"
 
 _DELETE = """
 DELETE FROM budgets WHERE id = :id
@@ -425,8 +426,11 @@ class BudgetRepository:
         )
         return new, old
 
-    async def get(self, conn: AsyncConnection, budget_id: UUID) -> Budget | None:
-        row = await fetch_one(conn, _GET, {"id": budget_id})
+    async def get(
+        self, conn: AsyncConnection, budget_id: UUID, *, lock: bool = False
+    ) -> Budget | None:
+        """With `lock`, the row stays locked to the end of the transaction (a read-then-write)."""
+        row = await fetch_one(conn, _GET_LOCKED if lock else _GET, {"id": budget_id})
         return _budget(row) if row else None
 
     async def delete(self, conn: AsyncConnection, budget_id: UUID) -> Budget | None:
