@@ -154,9 +154,11 @@ WHERE i.schemaname = 'public' AND i.tablename = 'chunks'
   AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conname = i.indexname)
 """
 _SIZES: Final = """
-SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) AS size
-FROM pg_class WHERE relname IN ('chunks', 'chunks_embedding', 'graph_edge', 'context_packs')
-ORDER BY relname
+SELECT r.name, pg_size_pretty(sum(pg_total_relation_size(t.relid))) AS size
+FROM unnest(ARRAY['chunks', 'chunks_embedding', 'graph_edge', 'context_packs']) AS r(name)
+CROSS JOIN LATERAL pg_partition_tree(r.name::regclass) t
+GROUP BY r.name
+ORDER BY r.name
 """
 
 
@@ -256,7 +258,7 @@ def seed(url: str, scale: Scale) -> dict[str, float]:
         conn.execute("SET max_parallel_maintenance_workers = 3")
         for name, definition in indexes:
             start = time.perf_counter()
-            conn.execute(definition)
+            conn.execute(definition.replace(" ON ONLY ", " ON "))  # a partitioned index
             took[f"index {name}"] = time.perf_counter() - start
         start = time.perf_counter()
         for statement in (_SEED_PROJECTS, _SEED_VERTICES, _SEED_EDGES, _SEED_PACKS):

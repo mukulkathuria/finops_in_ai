@@ -69,13 +69,17 @@ _TUNE: Final = (
     "SET LOCAL hnsw.iterative_scan = relaxed_order",
     "SET LOCAL hnsw.ef_search = 100",
 )
+# The index is on embedding::halfvec(1024) (migration 0026), so the search orders by that very
+# expression; `org_id = app_current_org()` repeats the row-level security filter so the planner
+# prunes to the org's partition.
 _SEARCH: Final = """
 WITH hits AS MATERIALIZED (
   SELECT id, document_id, content, token_count,
-         embedding <=> CAST(:query AS vector) AS distance
+         embedding::halfvec(1024) <=> CAST(:query AS halfvec(1024)) AS distance
   FROM chunks
-  WHERE embedding_model = :model AND acl_groups && CAST(:groups AS text[])
-  ORDER BY embedding <=> CAST(:query AS vector)
+  WHERE org_id = app_current_org() AND embedding_model = :model
+    AND acl_groups && CAST(:groups AS text[])
+  ORDER BY embedding::halfvec(1024) <=> CAST(:query AS halfvec(1024))
   LIMIT :k
 )
 SELECT h.id AS chunk_id, h.document_id, d.title, h.content, h.token_count,
@@ -85,8 +89,8 @@ ORDER BY h.distance
 """
 # "+ 0" hides the ordering from the HNSW index: an exact scan of the chunks the caller may read.
 _SEARCH_EXACT: Final = _SEARCH.replace(
-    "ORDER BY embedding <=> CAST(:query AS vector)",
-    "ORDER BY (embedding <=> CAST(:query AS vector)) + 0",
+    "ORDER BY embedding::halfvec(1024) <=> CAST(:query AS halfvec(1024))",
+    "ORDER BY (embedding::halfvec(1024) <=> CAST(:query AS halfvec(1024))) + 0",
 )
 _COUNT: Final = "SELECT count(*) AS n FROM chunks"
 _LIST: Final = """
