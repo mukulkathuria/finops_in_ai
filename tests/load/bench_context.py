@@ -187,6 +187,16 @@ SELECT i.indexname, i.indexdef FROM pg_indexes i
 WHERE i.schemaname = 'public' AND i.tablename = 'chunks'
   AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conname = i.indexname)
 """
+# The leaf partitions of `chunks` and their indexes, read into the OS cache. Not their TOAST: a
+# search reads only its few answers from it.
+_PREWARM_CHUNKS: Final = """
+SELECT sum(pg_prewarm(r.relid, 'read')) FROM (
+  SELECT t.relid FROM pg_partition_tree('chunks') t WHERE t.isleaf
+  UNION
+  SELECT x.indexrelid FROM pg_partition_tree('chunks') t JOIN pg_index x ON x.indrelid = t.relid
+  WHERE t.isleaf
+) AS r(relid)
+"""
 _SIZES: Final = """
 SELECT r.name, pg_size_pretty(sum(pg_total_relation_size(t.relid))) AS size
 FROM unnest(ARRAY['chunks', 'chunks_embedding', 'graph_edge', 'context_packs']) AS r(name)
@@ -307,6 +317,13 @@ def seed(url: str, scale: Scale) -> dict[str, float]:
             " context_packs"
         )
         took["vacuum analyze"] = time.perf_counter() - start
+        # Measure steady state: no checkpoint flushing the seed's writes during the run, and the
+        # chunk partitions and their indexes cached, as on a server sized to hold them.
+        start = time.perf_counter()
+        conn.execute("CHECKPOINT")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pg_prewarm")
+        conn.execute(_PREWARM_CHUNKS)
+        took["checkpoint and prewarm"] = time.perf_counter() - start
     return took
 
 
@@ -464,7 +481,8 @@ def report(
         f"Seed: {scale.orgs} orgs, {scale.chunks:,} chunks in {scale.documents:,} documents,"
         f" {scale.projects} projects with {scale.vertices * scale.projects:,} vertices,"
         f" {scale.vertices * scale.projects * OUT_DEGREE:,} edges and"
-        f" {scale.modules * scale.projects:,} packs. One client, {scale.samples} samples a query.",
+        f" {scale.modules * scale.projects:,} packs. One client, {scale.samples} samples a query,"
+        " measured warm: after a checkpoint, with the chunk partitions and indexes prewarmed.",
         f"Chunks are spread evenly: {scale.chunks // scale.orgs:,} an org, so each of the"
         f" {CHUNK_PARTITIONS} partitions of `chunks` holds about"
         f" {scale.orgs / CHUNK_PARTITIONS:.1f} orgs.",

@@ -29,6 +29,7 @@ export const options = {
   thresholds: {
     "errors{scenario:recovered}": ["rate<0.001"],
     "gateway_overhead_ms{scenario:recovered}": ["p(95)<=100", "p(99)<=250"],
+    "http_reqs{scenario:recovered}": ["count>0"], // a run that sent nothing passes nothing
   },
 };
 

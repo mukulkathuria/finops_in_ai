@@ -16,6 +16,7 @@ export const options = {
   thresholds: {
     unexpected_answers: ["count==0"],
     checks: ["rate==1"],
+    "http_reqs{name:chat}": ["count>=500"], // every user sent its request
   },
 };
 

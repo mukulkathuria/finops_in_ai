@@ -41,7 +41,7 @@ fingerprint() {
     SELECT 'schema ' || nspname || ' ' || nspowner::regrole || ' ' || coalesce(nspacl::text, '')
     FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'
     UNION ALL
-    SELECT 'relation ' || c.oid::regclass || ' ' || c.relkind || ' ' || c.relowner::regrole
+    SELECT 'relation ' || c.oid::regclass || ' ' || c.relkind::text || ' ' || c.relowner::regrole
            || ' rls ' || c.relrowsecurity || ' forced ' || c.relforcerowsecurity
            || ' ' || coalesce(c.relacl::text, '')
     FROM pg_class c
@@ -58,7 +58,7 @@ fingerprint() {
     SELECT 'constraint ' || conrelid::regclass || ' ' || conname || ' ' || pg_get_constraintdef(oid)
     FROM pg_constraint WHERE connamespace = 'public'::regnamespace
     UNION ALL
-    SELECT 'trigger ' || t.tgrelid::regclass || ' ' || t.tgname || ' ' || t.tgenabled
+    SELECT 'trigger ' || t.tgrelid::regclass || ' ' || t.tgname || ' ' || t.tgenabled::text
     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
     WHERE c.relnamespace = 'public'::regnamespace AND NOT t.tgisinternal
     UNION ALL

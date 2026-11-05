@@ -21,6 +21,7 @@ export const options = {
   thresholds: {
     gateway_overhead_ms: ["p(95)<=100", "p(99)<=250"],
     errors: ["rate<0.001"],
+    "http_reqs{name:chat}": ["count>0"], // a run that sent nothing passes nothing
   },
 };
 

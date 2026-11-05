@@ -12,7 +12,8 @@ export const overhead = new Trend("gateway_overhead_ms", true);
 export const errors = new Rate("errors");
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
-const PASSWORD = "Load-Profile-Password-7!";
+// Must not contain a word of the org name or the email name (gateway/domain/identity.py).
+const PASSWORD = "Steady-Harbor-Lantern-58!";
 
 function authorised(token) {
   return { headers: { ...JSON_HEADERS, Authorization: `Bearer ${token}` } };
