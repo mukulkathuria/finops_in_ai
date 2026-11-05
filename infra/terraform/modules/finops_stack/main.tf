@@ -224,7 +224,7 @@ resource "docker_container" "worker" {
     ]
     interval     = "30s"
     timeout      = "5s"
-    start_period = "60s"
+    start_period = "1m0s" # as Docker reports it back, so a second plan changes nothing
     retries      = 3
   }
   depends_on = [docker_container.migrate]
