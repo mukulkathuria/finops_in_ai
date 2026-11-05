@@ -1,0 +1,46 @@
+# pg_upgrade rehearsal (spec section 10): PostgreSQL 18 to 19 on a seeded copy
+# (scripts/upgrade_rehearsal.sh). Weekly, on demand, and on any change to the migrations, the
+# database image or the rehearsal.
+name: upgrade
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 5 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "migrations/**"
+      - "infra/docker/postgres/**"
+      - "scripts/upgrade_rehearsal.sh"
+      - "scripts/db_fingerprint.sql"
+      - ".github/workflows/upgrade.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  rehearsal:
+    name: pg_upgrade from PostgreSQL 18 to 19 on a seeded copy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync
+      - name: Rehearse the upgrade and compare the database before and after
+        shell: bash # with pipefail, so a failed rehearsal fails the step through the tee
+        run: |
+          { echo '### pg_upgrade rehearsal'; echo '```'; scripts/upgrade_rehearsal.sh; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
