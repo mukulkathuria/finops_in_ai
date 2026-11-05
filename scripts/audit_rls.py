@@ -1,4 +1,5 @@
-"""Audit: every tenant table has forced RLS and a tenant policy (spec section 12).
+"""Audit: every tenant table has forced RLS and a tenant policy (spec section 12), and every
+other policy is a hash lookup or the worker's.
 
 A table is a tenant table when it has an `org_id` column (or is `orgs`). Any other table must be
 listed in GLOBAL_TABLES, which catches tenant data that forgot its `org_id`.
@@ -37,11 +38,32 @@ _POLICIES = """
 SELECT polcmd, pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid)
   FROM pg_policy WHERE polrelid = %s AND polname = 'tenant_isolation'
 """
+# Permissive policies are OR-ed: any policy beside tenant_isolation widens what a role sees.
+_EXTRA_POLICIES = """
+SELECT c.relname, p.polname, p.polcmd, pg_get_expr(p.polqual, p.polrelid),
+       ARRAY(SELECT CASE WHEN r = 0 THEN 'public' ELSE pg_get_userbyid(r) END
+               FROM unnest(p.polroles) AS r ORDER BY 1)
+  FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'public' AND p.polpermissive AND p.polname <> 'tenant_isolation'
+ ORDER BY 1, 2
+"""
 _PARTITIONS = """
 SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'public' AND c.relispartition
    AND (has_table_privilege(%s, c.oid, 'SELECT') OR has_table_privilege(%s, c.oid, 'INSERT'))
 """
+
+
+def extra_policy_problem(
+    table: str, name: str, cmd: str, using: str | None, roles: list[str]
+) -> str | None:
+    """None for the two shapes a policy beside tenant_isolation may take (ADR 0002)."""
+    if roles == ["worker"]:
+        return None  # the cross-tenant role: its table grants bound what it may do
+    if roles == ["public"] and cmd == "r" and "app_lookup(" in (using or ""):
+        return None  # a pre-tenant lookup: the one row matching the hash of a secret
+    return f"{table}: policy {name} is neither a hash lookup nor the worker's ({cmd}, {roles})"
 
 
 def find_violations(conn: psycopg.Connection) -> list[str]:
@@ -67,6 +89,9 @@ def find_violations(conn: psycopg.Connection) -> list[str]:
             or "app_current_org()" not in (check or "")
         ):
             problems.append(f"{name}: tenant_isolation must cover ALL with USING and WITH CHECK")
+    for table, name, cmd, using, roles in conn.execute(_EXTRA_POLICIES).fetchall():
+        if (problem := extra_policy_problem(table, name, cmd, using, list(roles))) is not None:
+            problems.append(problem)
     for role in RUNTIME_ROLES:
         for (part,) in conn.execute(_PARTITIONS, (role, role)).fetchall():
             problems.append(f"{part}: partition directly accessible by {role}")

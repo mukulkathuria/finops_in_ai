@@ -35,6 +35,30 @@ def test_rls_audit_detects_unprotected_tenant_table(test_db: DisposableDatabase)
     assert any(p.startswith("audit_probe: row level security") for p in problems)
 
 
+def test_rls_audit_flags_a_policy_that_widens_access(test_db: DisposableDatabase) -> None:
+    """Release review P3: only tenant_isolation was checked, but permissive policies are OR-ed,
+    so one broad policy beside it would have shown every org's rows."""
+    with psycopg.connect(test_db.migrator_url) as conn:
+        conn.execute("CREATE POLICY probe_open ON users FOR SELECT TO app USING (true)")
+        try:
+            problems = find_violations(conn)
+        finally:
+            conn.rollback()
+    assert any(p.startswith("users: policy probe_open") for p in problems), problems
+
+
+def test_the_worker_reads_budgets_but_cannot_change_them(test_db: DisposableDatabase) -> None:
+    """Release review L1: the janitor only reads budgets; its write grants were never needed."""
+    with psycopg.connect(test_db.superuser_url) as conn:
+        allowed = conn.execute(
+            "SELECT has_table_privilege('worker', 'budgets', 'SELECT'),"
+            " has_table_privilege('worker', 'budgets', 'UPDATE'),"
+            " has_table_privilege('worker', 'budget_requests', 'INSERT'),"
+            " has_table_privilege('worker', 'budget_usage', 'UPDATE')"
+        ).fetchone()
+    assert allowed == (True, False, False, True)
+
+
 async def _create_org(db: Database, slug: str) -> object:
     org_id = uuid7()
     async with db.transaction(TenantContext(org_id)) as conn:
