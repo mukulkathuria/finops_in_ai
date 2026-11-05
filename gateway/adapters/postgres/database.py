@@ -22,7 +22,9 @@ _SET_CONTEXT: Final = text(
     " set_config('app.groups', :groups, true)"
 )
 _SET_LOOKUP: Final = text("SELECT set_config('app.lookup_' || :name, :value, true)")
-_LOOKUP_NAMES: Final = frozenset({"email", "key_hash", "token_hash"})
+# Each name has a lookup policy that exposes only the row matching it (migrations 0002-0006,
+# and 0028 for single sign-on: an org by its slug, a sign-in secret by its hash).
+_LOOKUP_NAMES: Final = frozenset({"email", "key_hash", "token_hash", "org_slug", "sso_secret"})
 _READY_DEADLINE_S: Final = 2.0
 
 
