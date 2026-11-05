@@ -1,6 +1,6 @@
 # Phase 4 latency gate (spec section 11): seeded packs, 2-3 hop graph queries and the filtered
-# vector search at 1M chunks, measured through the gateway's own queries. Run by hand; the report
-# lands in the job summary.
+# vector search at 1M chunks, measured through the gateway's own queries. Runs when the benchmark
+# changes, weekly, or by hand; the report lands in the job summary.
 name: bench
 
 on:
@@ -15,9 +15,20 @@ on:
       samples:
         description: Samples per query
         default: "1000"
+  push:
+    branches: [main]
+    paths:
+      - "tests/load/**"
+      - ".github/workflows/bench.yml"
+  schedule:
+    - cron: "17 3 * * 1" # Mondays, 03:17 UTC
 
 permissions:
   contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: true
 
 env:
   UV_FROZEN: "1"
@@ -35,9 +46,9 @@ jobs:
       FINOPS_WORKER_PASSWORD: bench-worker-pw
       FINOPS_READONLY_PASSWORD: bench-readonly-pw
       TEST_DATABASE_URL: postgresql://postgres:bench-superuser-pw@127.0.0.1:5432/postgres
-      CHUNKS: ${{ inputs.chunks }}
-      EDGES: ${{ inputs.edges }}
-      SAMPLES: ${{ inputs.samples }}
+      CHUNKS: ${{ inputs.chunks || '1000000' }} # pushes and the schedule have no inputs
+      EDGES: ${{ inputs.edges || '1000000' }}
+      SAMPLES: ${{ inputs.samples || '1000' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
