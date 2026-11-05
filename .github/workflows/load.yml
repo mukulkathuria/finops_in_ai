@@ -36,13 +36,21 @@ jobs:
         run: |
           python3 scripts/init_env.py
           printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
-            MOCK_EMBED_LATENCY_MS=10 >> .env
+            MOCK_EMBED_LATENCY_MS=10 WEB_CONCURRENCY=2 >> .env
           docker compose up -d --build --wait --wait-timeout 900
       # Each profile runs whenever the stack is up, so one run reports them all; any failure
       # still fails the job.
       - name: Baseline (100 users)
         if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
-        run: tests/load/k6/run.sh baseline -e VUS=100 -e RAMP=1m -e HOLD=3m
+        run: |
+          (sleep 150 && docker stats --no-stream \
+            --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' > /tmp/busy.txt) &
+          status=0
+          tests/load/k6/run.sh baseline -e VUS=100 -e RAMP=1m -e HOLD=3m || status=$?
+          wait
+          { echo '### Resource use during the baseline'; echo '```'; cat /tmp/busy.txt; echo '```'; } \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Spike (18 to 90 requests a second, then 60)
         if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: tests/load/k6/run.sh spike -e RATE=60

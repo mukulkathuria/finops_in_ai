@@ -142,7 +142,9 @@ services:
 
   gateway:
     image: finops-gateway:dev
-    environment: *app-env
+    environment:
+      <<: *app-env
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1} # uvicorn worker processes
     volumes:
       - objects:/var/lib/finops/objects
     depends_on:

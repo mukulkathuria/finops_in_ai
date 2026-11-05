@@ -26,8 +26,10 @@ function expect(res, what, statuses) {
 
 /** A new org (the stack runs with open signup), one team and `keys` API keys of it. */
 export function organisation(keys) {
-  const email = `load-${Date.now()}-${Math.floor(Math.random() * 1e9)}@example.com`;
-  const signup = JSON.stringify({ org_name: "Load profile", email, password: PASSWORD });
+  const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  const email = `load-${stamp}@example.com`;
+  // Every profile makes its own org, so its name (and slug) must be new too.
+  const signup = JSON.stringify({ org_name: `Load profile ${stamp}`, email, password: PASSWORD });
   const token = expect(
     http.post(`${BASE}/v1/auth/signup`, signup, { headers: JSON_HEADERS }),
     "signup",
