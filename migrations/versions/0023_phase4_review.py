@@ -3,7 +3,9 @@ project filter without a heap fetch.
 
 - `projects`: `UNIQUE (org_id, name)` let anyone in the org learn, from a refused create, the
   name of a project they cannot read (review S-L2). A name is now unique per owner: the user who
-  created the project, or the team whose key did.
+  created the project, or the team whose key did. A project whose owner is gone (both
+  columns NULL) may share a name; forcing one would block deleting its user. The
+  downgrade restores `UNIQUE (org_id, name)` and fails while two owners share a name.
 - `graph_edge_out` and `graph_edge_in` also cover `project_id`, so the first hop of a walk is
   filtered inside the index (review C-L7).
 

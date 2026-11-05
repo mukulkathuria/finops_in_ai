@@ -262,3 +262,18 @@ def test_code_context_is_screened_framed_and_reported_without_a_claimed_saving()
     assert report.cost_delta_micro_usd == 0
     assert report.decisions["whole_module_tokens"] == 400
     assert code_context_report(None) is None
+
+
+def test_outlines_stop_at_the_graph_limit_and_calls_are_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review N-M1: the probe stops at the graph limit, so the gateway never builds more."""
+    from gateway.adapters.code import python_ast
+
+    monkeypatch.setattr(python_ast, "MAX_GRAPH", 3)
+    with pytest.raises(ValueError, match="at most 3"):
+        outline_all({"a.py": "def f(): pass\ndef g(): pass\n", "b.py": "x = 1"})
+    many = "def f():\n" + "".join(f"    g{i}()\n" for i in range(300))
+    module = outline("m.py", many)
+    assert module is not None
+    assert len(module.symbols[0].calls) == 200

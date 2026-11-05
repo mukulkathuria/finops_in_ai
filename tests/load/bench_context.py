@@ -144,9 +144,12 @@ SELECT md5('bench-org-' || (mod(p - 1, %(orgs)s) + 1))::uuid,
        500, 5000
 FROM generate_series(1, %(projects)s) p CROSS JOIN generate_series(1, %(modules)s) n
 """
+# Indexes that back a constraint (the primary key, unique keys) stay during the load; the others
+# (HNSW, GIN, the org lookup) are dropped and rebuilt after it.
 _CHUNK_INDEXES: Final = """
-SELECT indexname, indexdef FROM pg_indexes
-WHERE schemaname = 'public' AND tablename = 'chunks' AND indexname <> 'chunks_pkey'
+SELECT i.indexname, i.indexdef FROM pg_indexes i
+WHERE i.schemaname = 'public' AND i.tablename = 'chunks'
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conname = i.indexname)
 """
 _SIZES: Final = """
 SELECT relname, pg_size_pretty(pg_total_relation_size(oid)) AS size

@@ -145,6 +145,7 @@ class CodeService:
         self._repo = repo
         self._files = files
         self._probe = probe
+        self._indexing = asyncio.Semaphore(1)  # an index holds a whole graph in memory
 
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
@@ -213,9 +214,13 @@ class CodeService:
                 f"a code bundle is at most {MAX_BUNDLE_BYTES // (1024 * 1024)} MiB",
                 code="bundle_too_large",
             )
+        async with self._indexing:
+            return await self._load(owner, project_id, file_id)
+
+    async def _load(self, owner: Owner, project_id: UUID, file_id: UUID) -> IndexReport:
         _, chunks = await self._files.content(owner, file_id)
         raw = b"".join([chunk async for chunk in chunks])
-        data = read_upload(raw)
+        data = await asyncio.to_thread(read_upload, raw)  # up to 20 MiB of JSON
         if "files" in data:
             modules, skipped = await self._probe.outlines(raw)
             graph, report = await asyncio.to_thread(python_graph, modules, skipped)

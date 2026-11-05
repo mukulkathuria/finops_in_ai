@@ -19,9 +19,11 @@ from gateway.domain.code import (
     module_name,
     one_line,
 )
+from gateway.domain.graph import MAX_GRAPH
 from gateway.domain.parsing import text_tokens
 
 _MAX_SIGNATURE: Final = 300
+_MAX_CALLS: Final = 200  # names one symbol calls; more would only add edges
 Function = ast.FunctionDef | ast.AsyncFunctionDef
 
 
@@ -45,7 +47,7 @@ def _calls(node: ast.AST) -> tuple[str, ...]:
                 names.add(sub.func.id)
             elif isinstance(sub.func, ast.Attribute):
                 names.add(sub.func.attr)
-    return tuple(sorted(names))
+    return tuple(sorted(names)[:_MAX_CALLS])
 
 
 def _function(node: Function, owner: str) -> Symbol:
@@ -122,6 +124,7 @@ def outline_all(files: Mapping[object, object]) -> Outlines:
     modules: list[Module] = []
     skipped: list[str] = []
     names: set[str] = set()
+    vertices = 0  # modules and symbols: the graph's size
     for raw_path, source in sorted(files.items(), key=lambda item: str(item[0])):
         path = clean_path(str(raw_path))
         module = None
@@ -137,4 +140,7 @@ def outline_all(files: Mapping[object, object]) -> Outlines:
             continue
         names.add(module.name)
         modules.append(module)
+        vertices += 1 + len(module.symbols)
+        if vertices > MAX_GRAPH:  # stop here, before the gateway builds it all
+            raise ValueError(f"a project's graph holds at most {MAX_GRAPH} modules and symbols")
     return Outlines(tuple(modules), tuple(skipped))

@@ -51,3 +51,20 @@ S marks the security review, C the correctness review.
 - A re-index rewrites a whole graph, so frequent re-indexes leave dead rows for autovacuum.
 - A team key's project belongs to its team: a new key of the same team may index it, and a deleted
   team leaves it to org admins.
+
+## Re-review (`84ea1ca`)
+
+Both reviewers verified every fix above (C-L10's integration test by reading; it runs on CI).
+New findings, none Critical or High:
+
+| Id | Severity | Finding | Resolution |
+| --- | --- | --- | --- |
+| N-M1 | Medium | The probe's answer still became objects in the gateway with no bound until the whole graph was built: a 20 MiB bundle of tiny functions could reach about a million symbols | The probe stops at MAX_GRAPH modules and symbols, a symbol keeps at most 200 call names, an answer over 128 MiB is refused unparsed, and one index runs at a time per process (`test_outlines_stop_at_the_graph_limit_and_calls_are_capped`, `test_an_oversized_answer_is_refused`) |
+| N-L1 | Low | A cancelled request left its probe running to the deadline, past the two-at-a-time bound | A cancelled call kills its probe, or never starts it, and frees its slot once the process is gone (`test_a_stopped_child_never_starts_and_a_running_one_is_killed`) |
+| N1 | Low | The upload's JSON was parsed on the event loop again | It is parsed in a worker thread |
+| N2 | Low | A project whose owner is gone may share a name, and the downgrade of 0023 fails while two owners share one | Kept and documented in the migration: forcing a name on orphaned projects would block deleting their user |
+| N-L2, N3, N4, H1-H3 | Low, Info | Names repeat across owners in a listing; `find` sorts all matches of a common term before its limit; Python and the database lower-case non-ASCII alike only in a UTF-8 locale; the benchmark walks from one start vertex on a sparse graph, explains three queries and runs warm; the full run is heavy | Accepted (D-27): listings carry ids; the database must run a UTF-8 locale (the repo sets none, so the base image's default applies, and a C-locale cluster would not find non-ASCII names); the walk cap bounds the worst case; the Phase 6 load tests extend the benchmark |
+
+The `bench` workflow's first runs exposed one harness defect, fixed before any measurement: it
+dropped the index behind the chunks' unique key, which PostgreSQL refuses. Indexes that back a
+constraint now stay during the load.

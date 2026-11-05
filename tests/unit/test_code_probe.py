@@ -30,3 +30,27 @@ async def test_a_bundle_past_its_deadline_or_malformed_is_refused() -> None:
         await OutlineProbe().outlines(b'{"files": 5}')
     with pytest.raises(InvalidInput, match="not a source bundle"):
         await OutlineProbe().outlines(b"not json")
+
+
+def test_a_stopped_child_never_starts_and_a_running_one_is_killed() -> None:
+    """Review N-L1: a cancelled call stops its probe instead of leaving it to its deadline."""
+    from gateway.adapters.code.probe import _Child
+
+    early = _Child()
+    early.stop()
+    assert early.start() is None
+    child = _Child()
+    proc = child.start()
+    assert proc is not None
+    with proc:  # the probe waits for its bundle on stdin
+        child.stop()
+        assert proc.wait(timeout=10) != 0
+
+
+async def test_an_oversized_answer_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review N-M1: the gateway never parses an answer past its bound."""
+    from gateway.adapters.code import probe
+
+    monkeypatch.setattr(probe, "_MAX_ANSWER", 10)
+    with pytest.raises(InvalidInput, match="too large"):
+        await OutlineProbe().outlines(orjson.dumps({"files": {"shop/cart.py": CART}}))
