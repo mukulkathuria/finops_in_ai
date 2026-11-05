@@ -80,7 +80,7 @@ async def test_us24_images_are_priced_counted_and_held_to_member_and_team_quotas
     refused = await _image(client, theirs)
     assert refused.status_code == 429, refused.text
     unknown = await _image(client, theirs, size="512x512")
-    assert unknown.status_code == 400
+    assert unknown.status_code == 422, unknown.text  # invalid input, as everywhere in the API
     assert unknown.json()["error"]["code"] == "unsupported_image_option"
 
 

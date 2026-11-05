@@ -5,7 +5,9 @@ FROM python:3.14.10-slim-trixie@sha256:930e1abba7c4e8f96ed93e8012c35d174d7732752
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY sidecars/docparse/requirements.txt .
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt \
+# Debian's security fixes released since the pinned base was built (e.g. CVE-2026-109518 in apt).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --require-hashes -r requirements.txt \
  && python -m pip uninstall --yes --quiet pip
 COPY sidecars/docparse/__init__.py sidecars/docparse/app.py sidecars/docparse/config.py \
      sidecars/docparse/documents.py sidecars/docparse/vision.py /app/docparse/
