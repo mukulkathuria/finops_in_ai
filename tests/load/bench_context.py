@@ -64,8 +64,12 @@ GROUPS: Final = frozenset({ORG})
 
 # The seed SQL uses mod(), not the % operator: psycopg reads a bare % as a placeholder; and
 # casts its counts to int, since psycopg sends small ints as smallint, which leaves
-# generate_series() ambiguous. 70% of the
-# documents are shared with their whole org, 30% with one of three teams of it.
+# generate_series() ambiguous. 70% of the documents are shared with their whole org, 30% with
+# one of three teams of it. With 50 orgs an org's documents all fall on one side (the org of a
+# document repeats every 50, a multiple of 10): orgs 7-9, 17-19 and so on share with teams only.
+_TEAM_SCOPES: Final = """
+SELECT DISTINCT org_id, acl_groups[1] FROM documents WHERE acl_groups[1] LIKE 'team:%'
+"""
 _SEED_ORGS: Final = """
 INSERT INTO orgs (id, name, slug)
 SELECT md5('bench-org-' || i)::uuid, 'Bench org ' || i, 'bench-org-' || i
@@ -306,6 +310,12 @@ def seed(url: str, scale: Scale) -> dict[str, float]:
     return took
 
 
+def _team_scopes(url: str) -> list[tuple[UUID, str]]:
+    """The (org, team group) pairs that own documents: a team-only search has passages."""
+    with psycopg.connect(url) as conn:
+        return [(row[0], str(row[1])) for row in conn.execute(_TEAM_SCOPES).fetchall()]
+
+
 def _centroids(url: str) -> list[list[float]]:
     with psycopg.connect(url) as conn:
         rows = conn.execute("SELECT v::text FROM bench_centroids ORDER BY c").fetchall()
@@ -338,6 +348,7 @@ async def measure(
 ) -> tuple[list[Result], dict[str, str]]:
     """Each query through the gateway's own code, one at a time, as the `app` role."""
     centroids = _centroids(superuser_url)
+    teams = _team_scopes(superuser_url)
     db = Database(app_url, pool_size=2, max_overflow=0)
     store, repo, docs = PostgresGraphStore(db), GraphRepository(), DocumentRepository()
 
@@ -383,10 +394,10 @@ async def measure(
                 raise RuntimeError("the small org returned no passage")
 
     async def search_team() -> None:
-        o, _, vector = question()
-        team = frozenset({team_group(_uuid(f"bench-team-{o}-{rng.randint(0, 2)}"))})
-        async with db.transaction(TenantContext(_org(o))) as conn:
-            if not await docs.search(conn, vector, groups=team, model=MODEL, k=5):
+        org, team = rng.choice(teams)
+        _, _, vector = question()
+        async with db.transaction(TenantContext(org)) as conn:
+            if not await docs.search(conn, vector, groups=frozenset({team}), model=MODEL, k=5):
                 raise RuntimeError("a team returned no passage")
 
     try:
