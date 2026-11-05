@@ -128,12 +128,14 @@ _TASK_COUNTS: Final = """
 SELECT (SELECT count(*) FROM facts WHERE task_id = :task) AS facts,
        (SELECT count(*) FROM agent_messages WHERE task_id = :task) AS messages
 """
-# A name new to the task is bound to the member using it, while the task has room; a name
-# bound before migration 0027 (no principal) is bound now.
+# A name new to the task is bound to the member using it, while that member has a slot left (each
+# member has its own, so no member can take another's); a name used before migration 0027 (no
+# principal) is bound now, at any count.
 _CLAIM_AGENT: Final = """
 INSERT INTO task_agents (task_id, agent, org_id, principal)
 SELECT :task, :agent, app_current_org(), :principal
-WHERE (SELECT count(*) FROM task_agents WHERE task_id = :task) < :cap
+WHERE (SELECT count(*) FROM task_agents WHERE task_id = :task AND principal = :principal) < :cap
+   OR EXISTS (SELECT 1 FROM task_agents WHERE task_id = :task AND agent = :agent)
 ON CONFLICT (task_id, agent) DO UPDATE SET principal = excluded.principal
   WHERE task_agents.principal IS NULL
 """
@@ -407,6 +409,11 @@ class WorkspaceRepository:
         await conn.execute(text(_CLAIM_AGENT), params)
         row = await fetch_one(conn, _AGENT_PRINCIPAL, params)
         return AgentClaim(row is not None, row["principal"] if row is not None else None)
+
+    async def joined(self, conn: AsyncConnection, task_id: UUID, agent: str) -> bool:
+        """Whether the agent has acted in the task (and so holds its name there)."""
+        row = await fetch_one(conn, _AGENT_PRINCIPAL, {"task": task_id, "agent": agent})
+        return row is not None
 
     async def charge(self, conn: AsyncConnection, task_id: UUID, agent: str, tokens: int) -> bool:
         """Add a claimed agent's discovery tokens to a task, within the task's budget; False when

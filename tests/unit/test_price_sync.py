@@ -114,6 +114,19 @@ def test_a_new_image_model_priced_by_its_table_alone_is_accepted() -> None:
     assert plan_sync([table_only], {}, NOW).inserts == (table_only,)
 
 
+def test_re_review_a_table_replacing_another_or_a_flat_price_is_checked_once() -> None:
+    """Re-review R-C3: a new option far under the cheapest before is refused, even when it
+    replaces the whole table. R-C4: moving from a flat price to a table alone is a change of
+    form, compared on the default image only."""
+    bogus = replace(IMAGE, image_prices=(("1024x1024/low", 1),))
+    assert (
+        suspicious(IMAGE, bogus)
+        == "image option 1024x1024/low would cost under a tenth of any option before"
+    )
+    table_alone = replace(FLAT, price_image=None, image_prices=IMAGE.image_prices)
+    assert suspicious(FLAT, table_alone) is None
+
+
 def test_dropping_an_optional_price_falls_back_to_the_base_rate() -> None:
     assert suspicious(OPUS, replace(OPUS, price_cached_input=None)) is None
     image = replace(OPUS, kind="image", price_image=40_000)

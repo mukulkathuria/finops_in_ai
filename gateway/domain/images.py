@@ -50,12 +50,18 @@ def image_option(entry: ModelPrice, size: str | None, quality: str | None) -> Im
     """The size, quality and per-image price of a request: what is rendered is what is priced.
 
     - A model with an `image_prices` table offers exactly those options. An option the request
-      leaves out is the cheapest the table offers with the ones it names, and the provider is
-      asked for it by name, so the image made is the image priced.
+      leaves out is the default (DEFAULT_SIZE, DEFAULT_QUALITY) when the table offers it with
+      the ones named, else the cheapest it offers with them; the provider is asked for it by
+      name, so the image made is the image priced.
     - A model priced per image without a table is priced for its default image: a request may
       leave size and quality to it or name the defaults, nothing bigger or better.
     - A model with neither is refused: an unpriced image would escape the money budgets."""
     if entry.image_prices:
+        prices = dict(entry.image_prices)
+        usual = f"{size or DEFAULT_SIZE}/{quality or DEFAULT_QUALITY}"
+        if usual in prices:
+            usual_size, _, usual_quality = usual.partition("/")
+            return ImageOption(usual_size, usual_quality, prices[usual])
         matching = [
             (price, key) for key, price in entry.image_prices if _offers(key, size, quality)
         ]

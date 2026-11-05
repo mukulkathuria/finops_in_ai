@@ -19,7 +19,7 @@ AGENT_PATTERN: Final = r"^[A-Za-z0-9_.:-]{1,100}$"
 # Bounds (Phase 5 review): what one workspace or task may hold.
 MAX_FACTS: Final = 2_000  # a workspace's facts: its exact search reads every one
 MAX_SUMMARIES: Final = 10_000  # file summaries in a workspace
-MAX_AGENTS: Final = 100  # agent names in a task, each with a budget of its own
+MAX_AGENTS: Final = 100  # agent names one member may use in a task, each with its own budget
 MAX_MESSAGES: Final = 5_000  # questions in a task
 MAX_QUERIES: Final = 5_000  # searches remembered in a task; past it they still run
 

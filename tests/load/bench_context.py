@@ -47,6 +47,10 @@ TARGETS: Final = {
     "graph 2 hops": 30.0,
     "graph 3 hops": 30.0,
     "vector search": 50.0,
+    # The same gate for searches whose filter is narrow (Phase 5 re-review R-C1): an org of a
+    # few chunks sharing its partition with large ones, and a caller who reads one team's only.
+    "vector search, a 50-chunk org": 50.0,
+    "vector search, one team's chunks": 50.0,
 }
 MODEL: Final = "bench-embedder"
 DIMENSIONS: Final = 1024
@@ -107,6 +111,31 @@ FROM generate_series(%(lo)s::int, %(hi)s::int) d
 CROSS JOIN generate_series(0, 9) o
 JOIN bench_centroids c ON c.c = mod(d * 7 + o, %(centroids)s::int)
 """
+# One small org beside the large ones: 5 documents of 10 chunks, shared with the whole org.
+SMALL_ORG: Final = "bench-org-small"
+_SEED_SMALL_ORG: Final = (
+    "INSERT INTO orgs (id, name, slug) VALUES (md5('bench-org-small')::uuid, 'Bench small org',"
+    " 'bench-org-small')",
+    """
+INSERT INTO documents (id, org_id, title, acl_groups, embedding_model, chunk_count, token_count)
+SELECT md5('bench-small-doc-' || d)::uuid, md5('bench-org-small')::uuid, 'Small document ' || d,
+       ARRAY['org'], %(model)s, 10, 1200
+FROM generate_series(1, 5) d
+""",
+    """
+INSERT INTO chunks (id, org_id, document_id, ordinal, content, token_count, acl_groups,
+                    embedding_model, embedding)
+SELECT md5('bench-small-chunk-' || d || '-' || o)::uuid, md5('bench-org-small')::uuid,
+       md5('bench-small-doc-' || d)::uuid, o,
+       'Passage ' || o || ' of small document ' || d || '. ' || repeat('lorem ipsum ', 30), 120,
+       ARRAY['org'], %(model)s,
+       c.v + (SELECT array_agg((random() - 0.5) * 0.25)::real[]
+              FROM generate_series(1, %(dims)s::int) WHERE d > 0 AND o >= 0)::vector
+FROM generate_series(1, 5) d
+CROSS JOIN generate_series(0, 9) o
+JOIN bench_centroids c ON c.c = mod(d * 7 + o, %(centroids)s::int)
+""",
+)
 _SEED_PROJECTS: Final = """
 INSERT INTO projects (id, org_id, name, acl_groups, indexed_at)
 SELECT md5('bench-project-' || p)::uuid,
@@ -254,6 +283,9 @@ def seed(url: str, scale: Scale) -> dict[str, float]:
     with ThreadPoolExecutor(max_workers=scale.workers) as pool:
         for done in [pool.submit(_chunk_batch, url, params, lo, hi) for lo, hi in batches]:
             done.result()
+    with psycopg.connect(url, autocommit=True) as conn:
+        for statement in _SEED_SMALL_ORG:
+            conn.execute(statement, params)
     took["chunks"] = time.perf_counter() - start
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("SET max_parallel_maintenance_workers = 3")
@@ -344,12 +376,27 @@ async def measure(
             if not await docs.search(conn, vector, groups=groups, model=MODEL, k=5):
                 raise RuntimeError("a seeded org returned no passage")
 
+    async def search_small() -> None:
+        _, _, vector = question()
+        async with db.transaction(TenantContext(_uuid(SMALL_ORG))) as conn:
+            if not await docs.search(conn, vector, groups=GROUPS, model=MODEL, k=5):
+                raise RuntimeError("the small org returned no passage")
+
+    async def search_team() -> None:
+        o, _, vector = question()
+        team = frozenset({team_group(_uuid(f"bench-team-{o}-{rng.randint(0, 2)}"))})
+        async with db.transaction(TenantContext(_org(o))) as conn:
+            if not await docs.search(conn, vector, groups=team, model=MODEL, k=5):
+                raise RuntimeError("a team returned no passage")
+
     try:
         results = [
             Result("pack read", await _timed(pack_read, scale.samples)),
             Result("graph 2 hops", await _timed(lambda: hops(2), scale.samples)),
             Result("graph 3 hops", await _timed(lambda: hops(3), scale.samples)),
             Result("vector search", await _timed(search, scale.samples)),
+            Result("vector search, a 50-chunk org", await _timed(search_small, scale.samples)),
+            Result("vector search, one team's chunks", await _timed(search_team, scale.samples)),
         ]
         p = rng.randint(1, scale.projects)
         org, project = _org_of_project(scale, p), _project(p)
@@ -373,6 +420,14 @@ async def measure(
             ),
             "vector search": await _explain(
                 db, _org(o), documents_sql._SEARCH, search_params, documents_sql._TUNE
+            ),
+            # The index attempt for the small org: it comes back short, and the exact search
+            # (planned as below) answers.
+            "vector search, a 50-chunk org (index)": await _explain(
+                db, _uuid(SMALL_ORG), documents_sql._SEARCH, search_params, documents_sql._TUNE
+            ),
+            "vector search, a 50-chunk org (exact)": await _explain(
+                db, _uuid(SMALL_ORG), documents_sql._SEARCH_EXACT, search_params
             ),
         }
     finally:

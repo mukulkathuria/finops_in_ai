@@ -145,6 +145,19 @@ def test_0027_counts_the_facts_every_org_already_has(at_0026: DisposableDatabase
         ).fetchone()
     assert counted == {"org-a": 3, "org-b": 1}
     assert forced == (True,)  # lifted for the count only
+    assert _app_may_delete_workspaces_and_refresh_memos(db) == (True, True)
 
     migrate_down(db, "0026")
+    assert _app_may_delete_workspaces_and_refresh_memos(db) == (False, False)
     migrate_up(db)
+    assert _app_may_delete_workspaces_and_refresh_memos(db) == (True, True)
+
+
+def _app_may_delete_workspaces_and_refresh_memos(db: DisposableDatabase) -> tuple[bool, bool]:
+    with psycopg.connect(db.superuser_url, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT has_table_privilege('app', 'workspaces', 'DELETE'),"
+            " has_column_privilege('app', 'task_queries', 'fact_ids', 'UPDATE')"
+        ).fetchone()
+    assert row is not None
+    return bool(row[0]), bool(row[1])

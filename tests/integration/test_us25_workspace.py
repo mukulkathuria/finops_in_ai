@@ -124,6 +124,8 @@ async def test_us25_questions_are_deduplicated_and_loops_hops_and_budgets_stop(a
     ).json()["id"]
     task = await _task(client, key, workspace, title="ship the returns label")
     ask = {"workspace_id": workspace, "task_id": task, "to_agent": "carrier-expert"}
+    joining = {"workspace_id": workspace, "task_id": task, "agent": "carrier-expert"}
+    assert (await _tool(client, key, "read_inbox", joining))["isError"] is False  # joins the task
     question = "Which carrier ships returns?"
 
     first = await _tool(client, key, "ask_agent", {**ask, "agent": "agent-a", "question": question})

@@ -64,6 +64,8 @@ def suspicious(old: ModelPrice, new: ModelPrice) -> str | None:
     if old.kind != new.kind:
         return "the kind of model would change"
     for name in _PRICES:
+        if name == "price_image" and new.image_prices:
+            continue  # a table prices the images; each option is compared below
         before, after = getattr(old, name), getattr(new, name)
         if after is None and name in _FREE_WHEN_UNSET:
             after = 0
@@ -88,16 +90,19 @@ def _image_prices(entry: ModelPrice) -> dict[str, int]:
 
 def _suspicious_images(old: ModelPrice, new: ModelPrice) -> str | None:
     """The same rules per image option: a paid option must not become free or move more than
-    tenfold, and a model that charges for images must not gain a free option. An option the
-    list drops is refused to requests, which costs no money."""
+    tenfold, and a model that charges for images must not gain a free option, nor one under a
+    tenth of the cheapest it had (a request that leaves its options out can land on it). An
+    option the list drops is refused to requests, which costs no money."""
     before = _image_prices(old)
-    paid = any(before.values())
+    floor = min((price for price in before.values() if price), default=0)
     for option, after in sorted(_image_prices(new).items()):
         was = before.get(option)
-        if after == 0 and (was or (was is None and paid)):
+        if after == 0 and (was or (was is None and floor)):
             return f"image option {option} would be free"
         if was and max(was, after) > MAX_FACTOR * min(was, after):
             return f"image option {option} would move more than {MAX_FACTOR}x"
+        if was is None and after * MAX_FACTOR < floor:
+            return f"image option {option} would cost under a tenth of any option before"
     return None
 
 

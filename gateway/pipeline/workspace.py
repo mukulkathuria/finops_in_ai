@@ -6,14 +6,18 @@ out) accrue per task and agent, and a task's budget caps each agent's.
 Within a task an agent's name belongs to the member that first used it there (the user, or the
 team of a team key): another member cannot read its inbox, answer for it or spend its budget.
 Everything the workspace hands an agent passes the organisation's passage screen, as retrieved
-documents do, and every write records the member behind it. Workspaces and tasks are bounded
-(MAX_FACTS and its siblings), and an embedding is made only after the cheap checks pass."""
+documents do, and every write records the member behind it. An agent is asked a question only
+once it has joined the task (acted in it), so no member can take a name to read questions meant
+for another's agent. Workspaces and tasks are bounded (MAX_FACTS and its siblings), and an
+embedding is made only after the cheap checks pass."""
 
 import html
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from gateway.adapters.postgres.database import Database, TenantContext
@@ -153,6 +157,11 @@ def _full(what: str, limit: int) -> Forbidden:
     )
 
 
+def _fact_text(f: FactRecord) -> str:
+    """Everything an agent wrote into a fact: its key and source are screened with it."""
+    return "\n".join(part for part in (f.key, f.source, f.content) if part)
+
+
 def _message_text(m: MessageRecord) -> str:
     return m.question if m.answer is None else f"{m.question}\n{m.answer}"
 
@@ -174,6 +183,18 @@ class WorkspaceService:
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
 
+    @asynccontextmanager
+    async def _tx(self, owner: Owner) -> AsyncIterator[AsyncConnection]:
+        """A tenant transaction. A row that names a workspace or task deleted meanwhile breaks a
+        foreign key: the caller gets the 404 the deletion means, not a 500."""
+        try:
+            async with self._db.transaction(self._ctx(owner)) as conn:
+                yield conn
+        except IntegrityError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "23503":  # foreign_key_violation
+                raise
+            raise NotFound("the workspace or task is gone", code="workspace_not_found") from exc
+
     async def _task(
         self, conn: AsyncConnection, workspace_id: UUID, groups: frozenset[str], task_id: UUID
     ) -> TaskRecord:
@@ -186,7 +207,10 @@ class WorkspaceService:
         """The agent's name in the task is the caller's: new there, or bound to the caller."""
         claim = await self._repo.claim(conn, task_id, agent, principal(owner), cap=MAX_AGENTS)
         if not claim.present:
-            raise Forbidden(f"a task has at most {MAX_AGENTS} agents", code="too_many_agents")
+            raise Forbidden(
+                f"a member may use at most {MAX_AGENTS} agent names in a task",
+                code="too_many_agents",
+            )
         if claim.principal is not None and claim.principal != principal(owner):
             raise AgentClaimed(
                 f"agent {agent} belongs to another member's run in this task",
@@ -217,7 +241,7 @@ class WorkspaceService:
         return {h.chunk_id for h in kept}
 
     async def create(self, owner: Owner, name: str, groups: frozenset[str]) -> WorkspaceRecord:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             return await self._repo.create(
                 conn,
                 name=name,
@@ -229,12 +253,12 @@ class WorkspaceService:
     async def workspaces(
         self, owner: Owner, groups: frozenset[str], *, limit: int
     ) -> list[WorkspaceRecord]:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             return await self._repo.workspaces(conn, groups=groups, limit=limit)
 
     async def delete(self, owner: Owner, workspace_id: UUID, *, admin: bool) -> None:
         """The workspace and everything in it. Its creator decides, or an admin."""
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             deleted = await self._repo.delete(
                 conn, workspace_id, admin=admin, user_id=owner.user_id, team_id=owner.team_id
             )
@@ -250,7 +274,7 @@ class WorkspaceService:
         title: str,
         budget: int | None,
     ) -> TaskRecord:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             task = await self._repo.create_task(
                 conn, workspace_id, groups=groups, title=title, budget=budget
             )
@@ -261,7 +285,7 @@ class WorkspaceService:
     async def report(
         self, owner: Owner, groups: frozenset[str], workspace_id: UUID, task_id: UUID
     ) -> TaskReport:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             task = await self._task(conn, workspace_id, groups, task_id)
             agents = await self._repo.task_agents(conn, task_id)
             facts, messages = await self._repo.task_counts(conn, task_id)
@@ -284,7 +308,7 @@ class WorkspaceService:
         workspace, the task and the agent's name are checked, and a known fact found, before the
         content is embedded."""
         content_hash = digest(content)
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             workspace = await self._repo.workspace(conn, workspace_id, groups=groups)
             if workspace is None:
                 raise NotFound("workspace not found", code="workspace_not_found")
@@ -299,7 +323,7 @@ class WorkspaceService:
         if workspace.fact_count >= MAX_FACTS:
             raise _full("facts", MAX_FACTS)
         (vector,) = await self._embedder.embed([content])
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             stored = await self._repo.put_fact(
                 conn,
                 workspace_id,
@@ -338,7 +362,7 @@ class WorkspaceService:
         charge: Charge | None,
     ) -> tuple[FactRecord, str]:
         policy = await self._guardrails.policy(owner.org_id)
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             if charge is not None:
                 await self._task(conn, workspace_id, groups, charge.task_id)
             fact = await self._repo.fact(
@@ -346,7 +370,7 @@ class WorkspaceService:
             )
             if fact is None:
                 raise NotFound("fact not found", code="fact_not_found")
-            if not await self._kept(policy, workspace_id, [(fact.id, fact.content)]):
+            if not await self._kept(policy, workspace_id, [(fact.id, _fact_text(fact))]):
                 raise _withheld("fact")
             text = facts_text([fact], whole=True)
             await self._charge(conn, owner, charge, text)
@@ -365,7 +389,7 @@ class WorkspaceService:
         """The facts nearest a query, as snippets. The same agent repeating a search in a task
         is answered from the record (the facts' ids) while the workspace has no new fact."""
         asked = digest(query)
-        async with self._db.transaction(self._ctx(owner)) as conn:  # before any embedding
+        async with self._tx(owner) as conn:  # before any embedding
             workspace = await self._repo.workspace(conn, workspace_id, groups=groups)
             if workspace is None:
                 raise NotFound("workspace not found", code="workspace_not_found")
@@ -383,7 +407,7 @@ class WorkspaceService:
                     return SearchResult((), text, True, tokens)
         policy = await self._guardrails.policy(owner.org_id)
         (vector,) = await self._embedder.embed([query])
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             # The count before the search: a fact added meanwhile only makes a repeat run again.
             workspace = await self._repo.workspace(conn, workspace_id, groups=groups)
             if workspace is None:
@@ -391,7 +415,7 @@ class WorkspaceService:
             found = await self._repo.search(
                 conn, workspace_id, groups=groups, vector=vector, model=self._embedder.model, k=k
             )
-            kept = await self._kept(policy, workspace_id, [(f.id, f.content) for f in found])
+            kept = await self._kept(policy, workspace_id, [(f.id, _fact_text(f)) for f in found])
             facts = [f for f in found if f.id in kept]
             text = facts_text(facts, whole=False) if facts else "No fact in the workspace yet."
             tokens = 0
@@ -418,7 +442,7 @@ class WorkspaceService:
         summary: str,
         agent: str,
     ) -> None:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             stored = await self._repo.put_summary(
                 conn,
                 workspace_id,
@@ -446,13 +470,14 @@ class WorkspaceService:
         charge: Charge | None,
     ) -> tuple[SummaryRecord, str]:
         policy = await self._guardrails.policy(owner.org_id)
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             if charge is not None:
                 await self._task(conn, workspace_id, groups, charge.task_id)
             found = await self._repo.summary(conn, workspace_id, groups=groups, path=path)
             if found is None:
                 raise NotFound("no summary for this path", code="summary_not_found")
-            if not await self._kept(policy, workspace_id, [(workspace_id, found.summary)]):
+            screened = f"{found.path}\n{found.summary}"
+            if not await self._kept(policy, workspace_id, [(workspace_id, screened)]):
                 raise _withheld("summary")
             text = summary_text(found)
             await self._charge(conn, owner, charge, text)
@@ -474,9 +499,15 @@ class WorkspaceService:
         once there is one). An unanswered question asked LOOP_REPEATS times is a loop, and a
         chain of clarifications stops at MAX_HOPS."""
         policy = await self._guardrails.policy(owner.org_id)
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             await self._task(conn, workspace_id, groups, task_id)
             await self._claim(conn, owner, task_id, agent)
+            if not await self._repo.joined(conn, task_id, to_agent):
+                raise NotFound(
+                    f"agent {to_agent} has not joined this task; an agent joins by acting in it"
+                    " (read_inbox, for one)",
+                    code="agent_not_in_task",
+                )
             parent_hops = None
             if reply_to is not None:
                 parent = await self._repo.message(conn, workspace_id, reply_to, groups=groups)
@@ -520,7 +551,7 @@ class WorkspaceService:
         agent: str,
         answer: str,
     ) -> MessageRecord:
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             message = await self._repo.message(conn, workspace_id, message_id, groups=groups)
             if message is None:
                 raise NotFound("message not found", code="message_not_found")
@@ -541,7 +572,7 @@ class WorkspaceService:
     ) -> tuple[list[MessageRecord], str]:
         """The questions waiting for an agent in a task, and the answers to its own."""
         policy = await self._guardrails.policy(owner.org_id)
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             await self._task(conn, workspace_id, groups, task_id)
             await self._claim(conn, owner, task_id, agent)
             waiting = await self._repo.inbox(conn, task_id, agent, limit=_INBOX_LIMIT)
@@ -557,6 +588,6 @@ class WorkspaceService:
         self, owner: Owner, groups: frozenset[str], workspace_id: UUID, charge: Charge, text: str
     ) -> int:
         """Count another tool's read (documents, code context) as an agent's discovery."""
-        async with self._db.transaction(self._ctx(owner)) as conn:
+        async with self._tx(owner) as conn:
             await self._task(conn, workspace_id, groups, charge.task_id)
             return await self._charge(conn, owner, charge, text)

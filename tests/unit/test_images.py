@@ -46,13 +46,19 @@ def test_what_is_rendered_is_what_is_priced() -> None:
         ("1536x1024/low", 16_000),
     )
     tiered = replace(PRICED, image_prices=tiers)
-    # An option left out is the cheapest offered with the ones named, and is asked for by name.
+    # An option left out is the cheapest offered with the ones named (this table has no
+    # "standard"), and the provider is asked for it by name.
     assert image_option(tiered, None, None) == ImageOption("1024x1024", "low", 11_000)
     assert image_option(tiered, "1536x1024", None) == ImageOption("1536x1024", "low", 16_000)
     assert image_option(tiered, None, "high") == ImageOption("1024x1024", "high", 167_000)
     with pytest.raises(InvalidInput) as unknown:
         image_option(tiered, None, "hd")
     assert unknown.value.param == "quality"
+    # Re-review R-C2: the default comes first where the table offers it, even when a smaller
+    # image is cheaper: leaving size out does not shrink the picture.
+    with_small = replace(PRICED, image_prices=(("256x256/standard", 16_000), *TABLE))
+    assert image_option(with_small, None, None) == ImageOption("1024x1024", "standard", 40_000)
+    assert image_option(with_small, "256x256", None) == ImageOption("256x256", "standard", 16_000)
     # Priced per image without a table: the default image, left to the provider or named.
     flat = ModelPrice(1, "p", "m", "image", 0, 0, price_image=10_000)
     assert image_option(flat, None, None) == ImageOption(None, None, 10_000)
