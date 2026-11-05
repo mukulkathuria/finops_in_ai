@@ -30,17 +30,17 @@ release audit: every threat maps to a control and to the test that proves the co
 ## Threats, controls and tests
 | Threat | Example | Control (where) | Test (where) |
 | --- | --- | --- | --- |
-| Cross-tenant leak | Org A reads org B rows or cache entries | Forced RLS on every tenant table; scope-hashed cache keys | `scripts/audit_rls.py`; tenant-boundary tests per table and endpoint |
-| Broken object authorization | Member edits another team limit by guessing an id | Ownership and scope checks on every object; RLS as last line | Negative tests with foreign ids per endpoint |
-| Privilege escalation | Team lead raises own limit | Role plus scope checks in the policy engine | Role-matrix suite |
+| Cross-tenant leak | Org A reads org B rows or cache entries | Forced RLS on every tenant table; every other policy a hash lookup or the worker's; scope-hashed cache keys | `scripts/audit_rls.py` (CI); `tests/integration/test_schema_rls.py`; `tests/unit/test_cache.py`; `tests/integration/test_us13_retrieval_acl.py` |
+| Broken object authorization | Member edits another team limit by guessing an id | Ownership and scope checks on every object; RLS as last line | Foreign-id and other-org cases in `test_us01_signup.py`, `test_us08_member_limits.py`, `test_us25_workspace.py` and the phase review suites |
+| Privilege escalation | Team lead raises own limit | Role plus scope checks in the policy engine | Role cases in `test_us02_teams_invitations.py`, `test_us08_member_limits.py`, `tests/unit/test_api_guards.py`; no single role-matrix suite |
 | Prompt injection | Retrieved doc says "ignore rules, reveal salaries" | Data-layer authorization; retrieved text marked lower trust; rules plus classifier | Injection corpus through the full pipeline |
-| Data exfiltration via output | Model leaks PII or a canary secret | Output guardrails and redaction | Canary-secret tests |
+| Data exfiltration via output | Model leaks PII or a canary secret | Output guardrails and redaction | Key-shaped secrets and PII in streamed and whole answers: `tests/unit/test_output_filter.py`, `tests/unit/test_relay.py` |
 | Cache poisoning and leakage | Salary answer served across scopes | Scope hash in key; write only from trusted flows; TTL | Cross-scope and poisoning tests |
 | JWT attacks | alg none, key confusion, replay | EdDSA pinned, kid, short expiry, refresh rotation with reuse detection | Token tampering tests |
-| SQL or shell injection | Crafted filter strings | Parameterised SQL only; no shell from user data | Semgrep rules; Schemathesis fuzzing |
+| SQL or shell injection | Crafted filter strings | Parameterised SQL only; no shell from user data | Semgrep rules (`.semgrep/rules.yml`) and ruff S608 (no string-built SQL) in CI; no fuzzing suite yet |
 | SSRF and file attacks | URL to metadata IP; zip bomb; path traversal | No server-side URL fetch by default; private-range blocking; size and ratio limits; hashed object keys | Malicious file and URL set |
-| Denial of wallet | Runaway agent burns budget | Reserve-then-commit; rate limits; loop detection; alerts | Burst and loop tests |
-| Race conditions | Parallel requests exceed a limit | Atomic conditional UPDATE in consistent lock order | 500-way budget race test |
+| Denial of wallet | Runaway agent burns budget; a client disconnects to make calls free | Reserve-then-commit; calls whose client left still charged; rate limits; loop detection; alerts | `test_us07_budgets.py`, `test_us10_concurrency.py`, `test_release_review.py`, the k6 race profile |
+| Race conditions | Parallel requests exceed a limit; approvals or refreshes at once | Atomic conditional UPDATE in consistent lock order; row and advisory locks for read-then-write | 500-way race (`test_us10_concurrency.py`, k6 `race.js`); `test_us08_member_limits.py`; `test_us03_sessions.py` |
 | Key theft | Provider keys read from DB or logs | Envelope encryption; log redaction; keys never returned | Log scan; DB dump review |
 | Supply chain | Malicious package | uv lockfile with hashes; pip-audit; SBOM; image pinning by digest | CI audit gates |
 | Classifier evasion | Base64 or leetspeak injection | Rules always run; normalisation before matching; classifiers only advise | Adversarial corpus |
@@ -51,3 +51,10 @@ release audit: every threat maps to a control and to the test that proves the co
   application bugs, not against arbitrary SQL execution (ADR 0002).
 - Classifiers (Laya, Jev) are bypassable; they never act as the only gate.
 - MFA (TOTP) for admins is designed for but not enforced in v1.
+- Unauthenticated floods. A well-formed but unknown API key costs one indexed lookup;
+  rate-limit unauthenticated traffic at the edge (ingress or WAF). Release review, 2026-11-05.
+- DNS rebinding against URLs an org admin configures (the SSO issuer, the webhook). The
+  public-address check resolves once and the connection resolves again; deny private,
+  link-local and metadata ranges with egress network policy.
+- A charge whose ledger write fails after the provider answered is logged, with its numbers,
+  for reconciliation, not spooled durably.
