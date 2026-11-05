@@ -94,6 +94,14 @@ jobs:
         run: |
           uv export --no-dev --no-emit-project --extra litellm --format requirements-txt > /tmp/requirements.txt
           uv run pip-audit --strict --disable-pip -r /tmp/requirements.txt
+      - name: Licenses of the runtime closures (copyleft needs approval in scripts/check_licenses.py)
+        run: |
+          UV_PROJECT_ENVIRONMENT=/tmp/gateway-runtime uv sync --frozen --no-dev --all-extras --no-install-project
+          # the sidecar image installs its own pinned file with pip, so no project overrides apply
+          uv pip install --no-config --python /tmp/gateway-runtime/bin/python \
+            --target /tmp/docparse-runtime --require-hashes -r sidecars/docparse/requirements.txt
+          uv run python scripts/check_licenses.py --npm-lock web/package-lock.json \
+            /tmp/gateway-runtime /tmp/docparse-runtime
       - name: Gitleaks (whole history)
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --redact --exit-code 1 --gitleaks-ignore-path /repo/.gitleaksignore
       - name: Semgrep (custom rules + Python ruleset)
