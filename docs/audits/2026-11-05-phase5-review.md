@@ -98,6 +98,6 @@ Two fresh reviewers checked every fix in the code, both security and correctness
 | R-C4 | Low | Moving from a flat price to a table alone was refused as "price_image would drop to zero" | The flat check is skipped where a table prices the images |
 | R-C7 | Info | Test gaps | Added: the exact fact cap under 8 concurrent writers; the summary, question and remembered-search caps; withheld summaries and answers; the grants 0027's downgrade revokes |
 | R-S2 | Low | A name used before 0027 has no principal, so the first member to use it again takes it | Accepted (ADR 0009): a one-time window for tasks created before the upgrade |
-| R-S5 | Low | A flat-priced model leaves omitted options to the provider, whose default may be dearer (`quality: auto`) | Accepted: `price_image` is the price of the model's default rendering. A model whose default varies needs an `image_prices` table (README) |
+| R-S5 | Low | A flat-priced model leaves omitted options to the provider, whose default may be dearer (`quality: auto`) | Accepted: `price_image` is the price of the model's default rendering. A model whose default varies needs an `image_prices` table (`README_dev.md`) |
 | R-S7 | Info | `search_workspace` embeds under the standard limit | As document search does; the query is at most 4,000 characters |
 | R-S9 | Info | Screening drops what a blocking rule matches; a redact-only policy leaves MCP tool output unredacted | Accepted (ADR 0009), as for the Phase 4 document and code tools: an org that needs agents kept from such values sets those rules to block |
