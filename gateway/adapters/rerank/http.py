@@ -2,7 +2,6 @@
 Cohere and Jina: `{"model", "query", "documents"}` in, `{"results": [{"index",
 "relevance_score"}]}` out. The mock provider serves it too."""
 
-import math
 from collections.abc import Sequence
 from typing import Final
 
@@ -22,8 +21,11 @@ def scores_from(raw: bytes, count: int) -> list[float]:
     try:
         for item in orjson.loads(raw)["results"]:
             index, score = int(item["index"]), float(item["relevance_score"])
-            if not 0 <= index < count or scores[index] is not None or not math.isfinite(score):
-                raise ValueError("a bad or repeated index, or a score that is not a number")
+            if not 0 <= index < count or scores[index] is not None or not 0.0 <= score <= 1.0:
+                raise ValueError(
+                    "a bad or repeated index, or a score outside 0 to 1"
+                    " (normalise the reranker's scores)"
+                )
             scores[index] = score
     except (KeyError, TypeError, ValueError) as exc:
         raise RerankError("malformed reranker answer") from exc

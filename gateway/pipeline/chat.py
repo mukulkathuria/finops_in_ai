@@ -568,7 +568,7 @@ class ChatService:
             call.reports.append(conversion)
         if relevance := relevance_report(call.notes.get("retrieval"), r.entry):
             call.reports.append(relevance)
-        if code := code_context_report(call.notes.get("code_context"), r.entry):
+        if code := code_context_report(call.notes.get("code_context")):
             call.reports.append(code)
         return call
 

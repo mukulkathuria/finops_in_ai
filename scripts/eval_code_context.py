@@ -4,9 +4,10 @@
 
 The repository is read by the Python indexer, as `POST /v1/projects/{id}/index` reads a source
 bundle, and each question gets the packs `GET /v1/projects/{id}/context` would choose: vertices
-the question names (the last part of a dotted name), ranked, packed within 4,000 tokens; the
-signatures one call away are left out. A question hits when its context holds the expected module
-and symbol. Exits 1 under the 0.9 hit-rate gate."""
+the question names (the last part of a dotted name), whole names first, ranked, packed within
+4,000 tokens; the signatures one call away are left out. A question hits when its context holds
+the expected module and symbol. The questions name the identifiers they are about, which is what
+the term index serves (D-25). Exits 1 under the 0.9 hit-rate gate."""
 
 import sys
 from collections.abc import Sequence
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from gateway.adapters.code.python_ast import outline
+from gateway.adapters.code.python_ast import outline_all
 from gateway.domain.code import (
     FIND_KINDS,
     FOUND_LIMIT,
@@ -23,6 +24,7 @@ from gateway.domain.code import (
     build_graph,
     choose,
     question_terms,
+    question_words,
     rank,
     term_of,
 )
@@ -107,20 +109,21 @@ class Result:
     source_tokens: int  # the whole modules
 
 
-def find(graph: CodeGraph, terms: frozenset[str]) -> list[Vertex]:
-    """`GraphStore.find` in memory: the same match, order and limit as its SQL."""
+def find(graph: CodeGraph, terms: frozenset[str], words: frozenset[str]) -> list[Vertex]:
+    """`GraphRepository.find` in memory: the same match, order and limit as its SQL."""
     found = [v for v in graph.vertices if v.kind in FIND_KINDS and term_of(v.name) in terms]
-    return sorted(found, key=lambda v: (v.kind, v.name))[:FOUND_LIMIT]
+    found.sort(key=lambda v: (term_of(v.name) not in words, v.kind, v.name, str(v.id)))
+    return found[:FOUND_LIMIT]
 
 
 def index(root: Path) -> CodeGraph:
-    outlines = (outline(path, source) for path, source in bundle(root).items())
-    return build_graph([m for m in outlines if m is not None])
+    return build_graph(outline_all(bundle(root)).modules)
 
 
 def ask(graph: CodeGraph, question: Question) -> Result:
-    found = find(graph, question_terms(question.text))
-    chosen = choose(graph.packs, rank(found)[:MAX_PACKS], BUDGET)
+    words = question_words(question.text)
+    found = find(graph, question_terms(question.text), words)
+    chosen = choose(graph.packs, rank(found, words)[:MAX_PACKS], BUDGET)
     paths = {p.path for p in chosen}
     symbols = {v.name for v in found if v.kind == "symbol" and v.path in paths}
     return Result(

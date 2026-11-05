@@ -1,29 +1,16 @@
-"""The graph store (spec section 2, "PostgreSQL version policy"; ADR 0004): the only way business
-code reads the code graph. Every read takes the caller's groups: a caller who cannot read a
-project gets nothing of its graph."""
+"""The graph store (spec section 2, "PostgreSQL version policy"; ADR 0004): how business code
+walks the code graph, by fixed-depth patterns and by reachability. Finding vertices by name and
+reading context packs happen in the repository, inside the caller's transaction. Every read takes
+the caller's groups: a caller who cannot read a project gets nothing of its graph."""
 
 from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from gateway.domain.graph import Direction, Reached, Vertex
+from gateway.domain.graph import Direction, Reached
 
 
 class GraphStore(Protocol):
-    async def find(
-        self,
-        org_id: UUID,
-        *,
-        project_id: UUID,
-        groups: frozenset[str],
-        terms: frozenset[str],
-        kinds: Sequence[str],
-        limit: int = 200,
-    ) -> list[Vertex]:
-        """The vertices of `kinds` whose name (its last dotted part) is one of `terms`,
-        lower-cased."""
-        ...
-
     async def neighbors(
         self,
         org_id: UUID,
@@ -37,7 +24,8 @@ class GraphStore(Protocol):
         limit: int = 200,
     ) -> list[Reached]:
         """The vertices exactly `depth` hops away (1 to 3) along edges of `kinds`, each with
-        the weakest edge on its best path; deterministic edges first."""
+        the weakest edge on its best path; deterministic edges first. A walk of 2 or 3 hops
+        starts from at most MAX_WALK_IDS vertices."""
         ...
 
     async def reachable(

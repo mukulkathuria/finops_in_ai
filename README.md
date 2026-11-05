@@ -66,6 +66,7 @@ If port 5432 is taken on your host, create the env file with
 | Unit and contract tests | `uv run pytest tests/unit tests/contract` |
 | Integration tests (real PostgreSQL 19) | `uv run pytest -m integration` (needs `TEST_DATABASE_URL` in `.env`) |
 | Route authorization audit | `uv run python scripts/audit_routes.py` |
+| Latency gate on seeded data (section 11) | `uv run python -m tests.load.bench_context` (needs `TEST_DATABASE_URL`; the `bench` workflow runs it at 1M chunks and 1M edges) |
 | RLS coverage audit | `AUDIT_DATABASE_URL=... uv run python scripts/audit_rls.py` |
 | Migrations | `uv run alembic upgrade head` (uses `MIGRATOR_DATABASE_URL`) |
 | Dashboard (dev server, proxies `/v1` to the gateway) | `cd web && npm ci && npm run dev` |
@@ -220,6 +221,8 @@ fraction of the source's tokens. A project is shared like a document (`access`).
 - Only an org admin, the user who created the project, or the team whose key created it can
   index it.
 
+A project's name is unique for its owner: the user who created it, or the team whose key did.
+
 1. Create a project: `POST /v1/projects` (`{"name": "shop", "access": {"org": true}}`).
 2. Upload its sources to `/v1/files` in one of two forms:
    - a source bundle that `python scripts/pack_sources.py <repo> bundle.json` writes;
@@ -232,7 +235,10 @@ fraction of the source's tokens. A project is shared like a document (`access`).
 
 How the indexers read the code:
 
-- The Python indexer reads modules with the standard library's `ast`, and never runs them.
+- The Python indexer reads modules with the standard library's `ast` and never runs them. It
+  parses in a separate process with none of the gateway's environment: at most two at a time,
+  each stopped after 120 seconds and held to 2 GiB of memory (on Linux). A file over 512,000
+  characters is left out, like one that does not parse.
 - A call between modules gets confidence 0.6 when only a project-wide unique name resolves it.
 - Graphify relations outside the gateway's edge kinds are skipped and counted.
 
@@ -246,7 +252,8 @@ A chat request asks for the context with `"code_context": {"project_id": "...", 
 - So do the signatures the named symbols call in other modules, one hop along `calls` edges.
 - A pack the org's policy would block on is dropped (`flags.code_context.dropped`).
 - The response header `x-finops-code-context-tokens` says how many tokens the context took.
-- The savings report shows the difference from the whole modules as `code_context`.
+- The `code_context` stage report records the context's tokens next to the whole modules'
+  (`whole_module_tokens`). It claims no saving: the caller never sent those files.
 
 `python scripts/eval_code_context.py` indexes this repository and asks fixed questions. It
 reports the hit rate (expected module and symbol in the context) and the context's tokens against
@@ -267,6 +274,9 @@ Protocol versions:
   `_meta`, and the `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers must repeat the
   body (400 otherwise).
 - 2025-11-25 and 2025-06-18: the `initialize` handshake, answered without a session.
+
+Both tools screen what they return as a chat request does: a passage or pack the org's policy
+blocks on is dropped and counted (`dropped`). Every answer is sent with `Cache-Control: no-store`.
 
 A request with an `Origin` header is refused (403), so no web page can drive the tools. To add the
 server to Claude Code: `claude mcp add --transport http finops https://<gateway>/v1/mcp --header

@@ -118,3 +118,14 @@ async def test_the_filter_is_listed_and_gated_like_a_stage_but_runs_in_retrieval
         [], _Modes({"rag_relevance": StageSetting("on", "1.0")}), descriptors=[RagRelevance()]
     )
     assert await on.mode(uuid4(), "rag_relevance") == "on"
+
+
+def test_scores_outside_zero_to_one_fail_open() -> None:
+    """Review C-L9: raw logits would make the 0 to 1 threshold meaningless, so they are an
+    unusable answer and the vector order stands."""
+    import orjson
+
+    for score in (1.5, -0.2):
+        raw = orjson.dumps({"results": [{"index": 0, "relevance_score": score}]})
+        with pytest.raises(RerankError):
+            scores_from(raw, 1)

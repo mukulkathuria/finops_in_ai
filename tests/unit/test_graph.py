@@ -45,3 +45,25 @@ def test_a_graph_is_validated_before_it_is_written() -> None:
     ):
         with pytest.raises(ValueError, match=r"repeat|unknown|leaves|confidence"):
             check_graph(vertices, edges)
+
+
+def test_reads_order_deterministically_and_whole_names_first() -> None:
+    for sql in store._NEIGHBORS.values():
+        assert "ORDER BY confidence DESC, name, id" in sql  # review C-L1
+    for sql in store._REACH.values():
+        assert "ORDER BY depth, v.name, v.id" in sql
+    assert "ANY(CAST(:words AS text[])) DESC" in store._FIND  # review C-M6
+
+
+async def test_a_walk_of_two_or_three_hops_starts_from_few_vertices() -> None:
+    graph = store.PostgresGraphStore(None)  # refused before any query
+    for depth in (2, 3):
+        with pytest.raises(ValueError, match="at most"):
+            await graph.neighbors(
+                uuid7(),
+                project_id=uuid7(),
+                groups=frozenset({"org"}),
+                ids=[uuid7() for _ in range(21)],
+                kinds=["calls"],
+                depth=depth,
+            )

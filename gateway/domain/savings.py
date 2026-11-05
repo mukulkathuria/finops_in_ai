@@ -146,26 +146,27 @@ def unserved(reports: Sequence[StageReport]) -> list[StageReport]:
     return [replace(r, cost_delta_micro_usd=0, applied=False) for r in reports]
 
 
-def code_context_report(code: object, price: ModelPrice) -> StageReport | None:
-    """US-22: context packs sent in place of the whole modules they outline, as a stage report
-    from the request's code-context notes."""
+def code_context_report(code: object) -> StageReport | None:
+    """US-22: the code context a request asked for, as a stage report. It saves nothing against
+    the request as sent: the packs were added at the caller's request, like retrieved passages,
+    and the whole modules were never sent (review C-M1). The decisions keep the whole modules'
+    tokens beside the context's: the comparison US-22 asks for, not money."""
     if not isinstance(code, Mapping):
         return None
-    before = int(code.get("source_tokens") or 0)
-    after = int(code.get("tokens") or 0)
+    tokens = int(code.get("tokens") or 0)
     return StageReport(
         "code_context",
         "1",
         "pre_llm",
-        before,
-        after,
-        price.cost(Usage(input_tokens=after)) - price.cost(Usage(input_tokens=before)),
-        quality_risk=0.1,
-        applied=before != after,
+        tokens,
+        tokens,
+        0,
+        applied=tokens > 0,
         decisions={
             "modules": len(code.get("modules") or ()),
             "related": int(code.get("related") or 0),
             "dropped": len(code.get("dropped") or ()),
+            "whole_module_tokens": int(code.get("source_tokens") or 0),
         },
     )
 

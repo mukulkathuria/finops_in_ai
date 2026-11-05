@@ -22,6 +22,7 @@ from gateway.domain.graph import (
     MAX_DEPTH,
     MAX_FIXED_DEPTH,
     MAX_RESULTS,
+    MAX_WALK_IDS,
     VERTEX_KINDS,
     Direction,
     Edge,
@@ -42,7 +43,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, e1.confidence DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _OUT_2: Final = """
@@ -58,7 +59,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, least(e1.confidence, e2.confidence) DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _OUT_3: Final = """
@@ -75,7 +76,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, least(e1.confidence, e2.confidence, e3.confidence) DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _IN_1: Final = """
@@ -89,7 +90,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, e1.confidence DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _IN_2: Final = """
@@ -105,7 +106,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, least(e1.confidence, e2.confidence) DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _IN_3: Final = """
@@ -122,7 +123,7 @@ SELECT id, kind, name, path, props, confidence FROM (
                 WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
   ORDER BY v.id, least(e1.confidence, e2.confidence, e3.confidence) DESC
 ) best
-ORDER BY confidence DESC, name
+ORDER BY confidence DESC, name, id
 LIMIT :limit
 """
 _REACH_OUT: Final = """
@@ -144,7 +145,7 @@ SELECT v.id, v.kind, v.name, v.path, v.props, min(w.depth) AS depth
 FROM walk w
 JOIN graph_vertex v ON v.id = w.id
 GROUP BY v.id
-ORDER BY depth, v.name
+ORDER BY depth, v.name, v.id
 LIMIT :limit
 """
 _REACH_IN: Final = """
@@ -166,7 +167,7 @@ SELECT v.id, v.kind, v.name, v.path, v.props, min(w.depth) AS depth
 FROM walk w
 JOIN graph_vertex v ON v.id = w.id
 GROUP BY v.id
-ORDER BY depth, v.name
+ORDER BY depth, v.name, v.id
 LIMIT :limit
 """
 _NEIGHBORS: Final[Mapping[tuple[Direction, int], str]] = {
@@ -186,7 +187,8 @@ WHERE v.project_id = :project
   AND v.kind = ANY(CAST(:kinds AS text[]))
   AND EXISTS (SELECT 1 FROM projects p
               WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
-ORDER BY v.kind, v.name
+ORDER BY lower(split_part(v.name, '.', -1)) = ANY(CAST(:words AS text[])) DESC,
+         v.kind, v.name, v.id
 LIMIT :limit
 """
 _PGQ: Final = "SELECT to_regclass('pg_catalog.pg_propgraph_element') IS NOT NULL AS present"
@@ -196,6 +198,7 @@ INSERT INTO projects (org_id, name, acl_groups, created_by, created_by_team)
 VALUES (app_current_org(), :name, CAST(:groups AS text[]), :created_by, :created_by_team)
 RETURNING id
 """
+PROJECT_NAME_INDEX: Final = "projects_owner_name"  # a name is unique per owner (0023)
 _GET_PROJECT: Final = """
 SELECT p.id, p.name, p.acl_groups, p.created_by, p.created_by_team, p.indexed_at,
        p.created_at
@@ -271,33 +274,6 @@ class PostgresGraphStore:
         self._db = db
         self._pgq: bool | None = None
 
-    async def find(
-        self,
-        org_id: UUID,
-        *,
-        project_id: UUID,
-        groups: frozenset[str],
-        terms: frozenset[str],
-        kinds: Sequence[str],
-        limit: int = 200,
-    ) -> list[Vertex]:
-        if not kinds or not set(kinds) <= VERTEX_KINDS:
-            raise ValueError(f"vertex kinds are among {sorted(VERTEX_KINDS)}")
-        if not 1 <= limit <= MAX_RESULTS:
-            raise ValueError(f"limit is between 1 and {MAX_RESULTS}")
-        if not terms or not groups:
-            return []
-        params = {
-            "project": project_id,
-            "terms": sorted(terms),
-            "kinds": sorted(set(kinds)),
-            "groups": sorted(groups),
-            "limit": limit,
-        }
-        async with self._db.transaction(TenantContext(org_id)) as conn:
-            rows = await fetch_all(conn, _FIND, params)
-        return [_vertex(r) for r in rows]
-
     async def neighbors(
         self,
         org_id: UUID,
@@ -311,6 +287,8 @@ class PostgresGraphStore:
         limit: int = 200,
     ) -> list[Reached]:
         check_read(kinds, depth, limit, max_depth=MAX_FIXED_DEPTH)
+        if depth > 1 and len(ids) > MAX_WALK_IDS:  # the joins multiply paths per hop
+            raise ValueError(f"a walk of {depth} hops starts from at most {MAX_WALK_IDS} vertices")
         sql = _NEIGHBORS.get((direction, depth))
         if sql is None:
             raise ValueError("direction is out or in")
@@ -389,6 +367,37 @@ class GraphRepository:
     ) -> list[ProjectRecord]:
         rows = await fetch_all(conn, _LIST_PROJECTS, {"groups": sorted(groups), "limit": limit})
         return [_project(r) for r in rows]
+
+    async def find(
+        self,
+        conn: AsyncConnection,
+        project_id: UUID,
+        *,
+        groups: frozenset[str],
+        terms: frozenset[str],
+        words: frozenset[str],
+        kinds: Sequence[str],
+        limit: int,
+    ) -> list[Vertex]:
+        """The vertices of `kinds` whose name (its last dotted part, lower-cased) is one of
+        `terms`. Those the question names whole (`words`) come first, so the limit cuts the
+        vertices matched only by a part of a longer name."""
+        if not kinds or not set(kinds) <= VERTEX_KINDS:
+            raise ValueError(f"vertex kinds are among {sorted(VERTEX_KINDS)}")
+        if not 1 <= limit <= MAX_RESULTS:
+            raise ValueError(f"limit is between 1 and {MAX_RESULTS}")
+        if not terms or not groups:
+            return []
+        params = {
+            "project": project_id,
+            "terms": sorted(terms),
+            "words": sorted(words),
+            "kinds": sorted(set(kinds)),
+            "groups": sorted(groups),
+            "limit": limit,
+        }
+        rows = await fetch_all(conn, _FIND, params)
+        return [_vertex(r) for r in rows]
 
     async def packs(
         self,

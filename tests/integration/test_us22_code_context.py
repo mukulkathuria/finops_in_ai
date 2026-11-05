@@ -175,7 +175,8 @@ async def test_us22_chat_with_code_context_sends_outlines_and_reports_the_saving
         assert hidden.status_code == 404
     with psycopg.connect(test_db.superuser_url) as conn:
         report = conn.execute(
-            "SELECT applied, tokens_before, tokens_after, cost_delta_micro_usd FROM stage_reports"
+            "SELECT applied, tokens_before, tokens_after, cost_delta_micro_usd, decisions"
+            " FROM stage_reports"
             " WHERE request_id = %s AND stage = 'code_context'",
             (resp.headers["x-request-id"],),
         ).fetchone()
@@ -184,10 +185,25 @@ async def test_us22_chat_with_code_context_sends_outlines_and_reports_the_saving
             (resp.headers["x-request-id"],),
         ).fetchone()
     assert report is not None
-    applied, before, after, delta = report
+    applied, before, after, delta, decisions = report
     assert applied
-    assert after == tokens
-    assert before > 3 * after  # far fewer tokens than the whole module
-    assert delta < 0
+    assert before == after == tokens  # asked for: nothing saved against files never sent
+    assert delta == 0
+    assert decisions["whole_module_tokens"] > 3 * tokens  # far fewer than the whole module
     assert notes is not None
     assert notes[0]["modules"] == ["shop/cart.py"]
+
+
+async def test_us22_project_names_are_unique_per_owner_and_reveal_nothing(api: Api) -> None:
+    """Review S-L2: a refused create no longer tells anyone in the org the name of a project
+    they cannot read."""
+    _, client = api
+    admin = await signup(client)
+    team_a = bearer(await _team_key(client, admin))
+    team_b = bearer(await _team_key(client, admin))
+    made = await client.post("/v1/projects", json={"name": "shop"}, headers=team_a)
+    assert made.status_code == 200, made.text
+    again = await client.post("/v1/projects", json={"name": "shop"}, headers=team_a)
+    assert (again.status_code, again.json()["error"]["code"]) == (409, "project_exists")
+    other = await client.post("/v1/projects", json={"name": "shop"}, headers=team_b)
+    assert other.status_code == 200, other.text  # another owner's private name stays private

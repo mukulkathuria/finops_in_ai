@@ -30,10 +30,12 @@ from gateway import __version__
 from gateway.api.caller import Caller, ModelCaller
 from gateway.api.documents import Retrieval
 from gateway.api.files import file_owner
+from gateway.api.openai import Chat
 from gateway.api.projects import Code
 from gateway.domain.errors import DomainError
 from gateway.domain.retrieval import retrieved_context
-from gateway.pipeline.code import CodeService, packs_text
+from gateway.pipeline.chat import ChatService
+from gateway.pipeline.code import CodeService, keep, pack_hits, packs_text
 from gateway.pipeline.retrieval import RetrievalService
 
 log = logging.getLogger(__name__)
@@ -173,15 +175,19 @@ class _Session:
     caller: Caller
     code: CodeService
     retrieval: RetrievalService
+    chat: ChatService  # screens what the tools return: it reaches a model, as in chat
 
     async def get_code_context(self, args: _CodeArgs) -> dict[str, Any]:
-        context = await self.code.context(
+        found = await self.code.context(
             file_owner(self.caller),
             self.caller.groups,
             args.project_id,
             args.question,
             max_tokens=args.max_tokens,
         )
+        hits = pack_hits(args.project_id, found)
+        kept, dropped = await self.chat.passages(self.caller.org_id, hits)
+        context = keep(found, kept, args.project_id)
         if not (context.packs or context.related):
             return tool_result(
                 "No module of the project matches the question: name the modules, classes or"
@@ -194,6 +200,7 @@ class _Session:
             "related": list(context.related),
             "tokens": context.tokens,
             "source_tokens": context.source_tokens,
+            "dropped": len(dropped),
         }
         return tool_result(packs_text(context.packs, context.related), summary)
 
@@ -201,8 +208,12 @@ class _Session:
         hits = await self.retrieval.search(
             file_owner(self.caller), self.caller.groups, args.query, args.k, source="mcp"
         )
+        hits, dropped = await self.chat.passages(self.caller.org_id, hits)
         if not hits:
-            return tool_result("No document you may read matches the query.")
+            return tool_result(
+                "No document you may read matches the query.",
+                {"results": [], "dropped": len(dropped)},
+            )
         results = [
             {
                 "document_id": str(h.document_id),
@@ -212,7 +223,7 @@ class _Session:
             }
             for h in hits
         ]
-        return tool_result(retrieved_context(hits), {"results": results})
+        return tool_result(retrieved_context(hits), {"results": results, "dropped": len(dropped)})
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,15 +318,25 @@ async def dispatch(rpc: Rpc, version: str, session: _Session) -> dict[str, Any]:
     raise RpcError(status, METHOD_NOT_FOUND, f"Method not found: {rpc.method}")
 
 
+_NO_STORE: Final = {"cache-control": "no-store"}  # answers are per caller
+
+
 def _reply(status: int, rid: str | int | None, body: Mapping[str, Any]) -> Response:
     message: dict[str, Any] = {"jsonrpc": "2.0", **body}
     if rid is not None:
         message["id"] = rid
-    return Response(orjson.dumps(message), status_code=status, media_type="application/json")
+    return Response(
+        orjson.dumps(message),
+        status_code=status,
+        media_type="application/json",
+        headers=_NO_STORE,
+    )
 
 
 @router.post("/v1/mcp", response_model=None)
-async def mcp(request: Request, caller: ModelCaller, code: Code, retrieval: Retrieval) -> Response:
+async def mcp(
+    request: Request, caller: ModelCaller, code: Code, retrieval: Retrieval, chat: Chat
+) -> Response:
     rid: str | int | None = None
     try:
         if "origin" in request.headers:
@@ -324,8 +345,8 @@ async def mcp(request: Request, caller: ModelCaller, code: Code, retrieval: Retr
         rid = rpc.id
         version = version_of(request.headers, rpc)
         if rpc.id is None:
-            return Response(status_code=202)
-        result = await dispatch(rpc, version, _Session(caller, code, retrieval))
+            return Response(status_code=202, headers=_NO_STORE)
+        result = await dispatch(rpc, version, _Session(caller, code, retrieval, chat))
     except RpcError as exc:
         error: dict[str, Any] = {"code": exc.code, "message": exc.message}
         if exc.data is not None:

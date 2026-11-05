@@ -26,6 +26,7 @@ from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
 from gateway.adapters.classifiers.registry import build_classifier
+from gateway.adapters.code.probe import OutlineProbe
 from gateway.adapters.embeddings.openai_compat import OpenAICompatEmbedder
 from gateway.adapters.files.clamav import ClamAV
 from gateway.adapters.files.pdf import PdfProbe
@@ -395,7 +396,11 @@ def build_container(
         retrieval_service=retrieval_service,
         graph_store=graph_store,
         code_service=CodeService(
-            db=db, graph=graph_store, repo=GraphRepository(), files=file_service
+            db=db,
+            graph=graph_store,
+            repo=GraphRepository(),
+            files=file_service,
+            probe=OutlineProbe(),
         ),
         metrics=observability.metrics,
         telemetry=observability.telemetry,

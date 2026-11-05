@@ -1,7 +1,7 @@
 """Code projects and their context (spec section 4, F5; US-22). A project is indexed from an
 uploaded file: a source bundle (`{"files": {path: source}}`, see `scripts/pack_sources.py`) read
-by the Python indexer, or Graphify's `graph.json`. A question gets the context packs of the
-modules it names, within a token budget, instead of whole files."""
+by the Python indexer in its isolated probe process, or Graphify's `graph.json`. A question gets
+the context packs of the modules it names, within a token budget, instead of whole files."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
@@ -10,24 +10,28 @@ from typing import Any, Final
 from uuid import UUID
 
 import orjson
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from gateway.adapters.code.graphify import load_graphify
-from gateway.adapters.code.python_ast import outline
+from gateway.adapters.code.probe import OutlineProbe
 from gateway.adapters.postgres.database import Database, TenantContext
-from gateway.adapters.postgres.graph import GraphRepository, PostgresGraphStore, ProjectRecord
+from gateway.adapters.postgres.graph import (
+    PROJECT_NAME_INDEX,
+    GraphRepository,
+    PostgresGraphStore,
+    ProjectRecord,
+)
 from gateway.domain.code import (
     FIND_KINDS,
     FOUND_LIMIT,
-    MAX_MODULES,
     MAX_PACKS,
     CodeGraph,
     Module,
     Pack,
     build_graph,
     choose,
-    clean_path,
     question_terms,
+    question_words,
     rank,
 )
 from gateway.domain.errors import Conflict, Forbidden, InvalidInput, NotFound
@@ -49,7 +53,7 @@ class IndexReport:
     symbols: int
     edges: int
     packs: int
-    skipped: tuple[str, ...]  # files that were not Python or did not parse
+    skipped: tuple[str, ...]  # files left out: not Python, unparsable, too big, or repeated
     skipped_links: int  # Graphify relations outside the gateway's edge kinds
 
 
@@ -73,35 +77,24 @@ class CodeContext:
         return sum(p.source_tokens for p in self.packs)
 
 
-def _bundle(files: object) -> tuple[CodeGraph, IndexReport]:
-    if not isinstance(files, dict) or len(files) > MAX_MODULES:
-        raise InvalidInput(
-            f"`files` maps at most {MAX_MODULES} paths to sources", code="invalid_code_bundle"
-        )
-    modules: list[Module] = []
-    skipped: list[str] = []
-    for raw_path, source in sorted(files.items(), key=lambda item: str(item[0])):
-        path = clean_path(str(raw_path))
-        module = (
-            outline(path, source)
-            if path is not None and path.endswith(".py") and isinstance(source, str)
-            else None
-        )
-        if module is None:
-            skipped.append(str(raw_path)[:200])
-        else:
-            modules.append(module)
-    graph = build_graph(modules)
-    symbols = sum(len(m.symbols) for m in modules)
-    report = IndexReport(
-        "python", len(modules), symbols, len(graph.edges), len(graph.packs), tuple(skipped[:50]), 0
+def _report(
+    source: str, graph: CodeGraph, skipped: Sequence[str], skipped_links: int
+) -> IndexReport:
+    modules = sum(1 for v in graph.vertices if v.kind in ("module", "file"))
+    symbols = sum(1 for v in graph.vertices if v.kind == "symbol")
+    return IndexReport(
+        source,
+        modules,
+        symbols,
+        len(graph.edges),
+        len(graph.packs),
+        tuple(skipped[:50]),
+        skipped_links,
     )
-    return graph, report
 
 
-def index_file(raw: bytes) -> tuple[CodeGraph, IndexReport]:
-    """A source bundle or Graphify output as a project's graph (CPU work: run it off the event
-    loop)."""
+def read_upload(raw: bytes) -> dict[str, Any]:
+    """The uploaded file as a source bundle (`files`) or a Graphify graph (`nodes`)."""
     try:
         data = orjson.loads(raw)
     except orjson.JSONDecodeError as exc:
@@ -109,24 +102,32 @@ def index_file(raw: bytes) -> tuple[CodeGraph, IndexReport]:
             "the file is not JSON: send a source bundle or Graphify's graph.json",
             code="invalid_code_bundle",
         ) from exc
-    if isinstance(data, dict) and "files" in data:
-        return _bundle(data["files"])
-    if isinstance(data, dict) and "nodes" in data:
-        try:
-            loaded = load_graphify(data)
-        except ValueError as exc:
-            raise InvalidInput(str(exc), code="invalid_code_bundle") from exc
-        graph = loaded.graph
-        modules = sum(1 for v in graph.vertices if v.kind in ("module", "file"))
-        symbols = sum(1 for v in graph.vertices if v.kind == "symbol")
-        report = IndexReport(
-            "graphify", modules, symbols, len(graph.edges), len(graph.packs), (), loaded.skipped
-        )
-        return graph, report
+    if isinstance(data, dict) and ("files" in data or "nodes" in data):
+        return data
     raise InvalidInput(
         'send a source bundle ({"files": {path: source}}) or Graphify\'s graph.json',
         code="invalid_code_bundle",
     )
+
+
+def python_graph(
+    modules: Sequence[Module], skipped: Sequence[str]
+) -> tuple[CodeGraph, IndexReport]:
+    graph = build_graph(modules)
+    return graph, _report("python", graph, skipped, 0)
+
+
+def graphify_graph(data: Mapping[str, Any]) -> tuple[CodeGraph, IndexReport]:
+    try:
+        loaded = load_graphify(data)
+    except ValueError as exc:
+        raise InvalidInput(str(exc), code="invalid_code_bundle") from exc
+    return loaded.graph, _report("graphify", loaded.graph, (), loaded.skipped)
+
+
+def _constraint(exc: IntegrityError) -> str | None:
+    name = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+    return name if isinstance(name, str) else None
 
 
 class CodeService:
@@ -137,11 +138,13 @@ class CodeService:
         graph: PostgresGraphStore,
         repo: GraphRepository,
         files: FileService,
+        probe: OutlineProbe,
     ) -> None:
         self._db = db
         self._graph = graph
         self._repo = repo
         self._files = files
+        self._probe = probe
 
     def _ctx(self, owner: Owner) -> TenantContext:
         return TenantContext(owner.org_id, owner.user_id)
@@ -167,7 +170,11 @@ class CodeService:
                 )
                 project = await self._repo.project(conn, project_id, groups=groups)
         except IntegrityError as exc:
-            raise Conflict(f"a project named {name!r} exists", code="project_exists") from exc
+            if _constraint(exc) == PROJECT_NAME_INDEX:
+                raise Conflict(
+                    "you already have a project with this name", code="project_exists", param="name"
+                ) from exc
+            raise
         if project is None:  # pragma: no cover - its own groups read it
             raise NotFound("project not found", code="project_not_found")
         return project
@@ -189,7 +196,7 @@ class CodeService:
     ) -> IndexReport:
         """Replace a project's graph and packs from an uploaded file, in one transaction. Only
         an org admin, the user who created the project or, for a project a team key created, that
-        team's keys may."""
+        team's keys may. Python is parsed in the isolated outline probe."""
         project = await self._readable(owner, groups, project_id)
         if owner.user_id is not None:
             owns = project.created_by == owner.user_id
@@ -208,7 +215,12 @@ class CodeService:
             )
         _, chunks = await self._files.content(owner, file_id)
         raw = b"".join([chunk async for chunk in chunks])
-        graph, report = await asyncio.to_thread(index_file, raw)
+        data = read_upload(raw)
+        if "files" in data:
+            modules, skipped = await self._probe.outlines(raw)
+            graph, report = await asyncio.to_thread(python_graph, modules, skipped)
+        else:
+            graph, report = await asyncio.to_thread(graphify_graph, data)
         try:
             async with self._db.transaction(self._ctx(owner)) as conn:
                 await self._repo.replace_graph(
@@ -220,6 +232,10 @@ class CodeService:
                 )
         except ValueError as exc:
             raise InvalidInput(str(exc), code="invalid_code_bundle") from exc
+        except DataError as exc:  # text the database cannot store; the old graph stays
+            raise InvalidInput(
+                "the bundle holds text the database cannot store", code="invalid_code_bundle"
+            ) from exc
         return report
 
     async def context(
@@ -231,25 +247,27 @@ class CodeService:
         *,
         max_tokens: int,
     ) -> CodeContext:
-        """The packs of the modules a question names (single-row reads), best first, then the
-        signatures their named symbols call in other modules (one hop along `calls`), within the
-        budget."""
-        await self._readable(owner, groups, project_id)
-        terms = question_terms(question)
-        if not terms:
-            return CodeContext((), ())
-        found = await self._graph.find(
-            owner.org_id,
-            project_id=project_id,
-            groups=groups,
-            terms=terms,
-            kinds=FIND_KINDS,
-            limit=FOUND_LIMIT,
-        )
-        order = rank(found)[:MAX_PACKS]
-        if not order:
-            return CodeContext((), ())
+        """The packs of the modules a question names, best first, then the signatures their named
+        symbols call in other modules (one hop along `calls`), within the budget. The project,
+        its matching vertices and their packs are read in one transaction."""
+        terms, words = question_terms(question), question_words(question)
         async with self._db.transaction(self._ctx(owner)) as conn:
+            if await self._repo.project(conn, project_id, groups=groups) is None:
+                raise NotFound("project not found", code="project_not_found")
+            if not terms:
+                return CodeContext((), ())
+            found = await self._repo.find(
+                conn,
+                project_id,
+                groups=groups,
+                terms=terms,
+                words=words,
+                kinds=FIND_KINDS,
+                limit=FOUND_LIMIT,
+            )
+            order = rank(found, words)[:MAX_PACKS]
+            if not order:
+                return CodeContext((), ())
             packs = await self._repo.packs(conn, project_id, groups=groups, paths=order)
         chosen = choose(packs, order, max_tokens)
         paths = {p.path for p in chosen}

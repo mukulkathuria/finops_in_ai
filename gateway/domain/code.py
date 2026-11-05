@@ -4,7 +4,7 @@ model can reason about it without the whole source, at a fraction of the tokens.
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Final
 from uuid import UUID, uuid7
@@ -16,11 +16,13 @@ INFERRED: Final = 0.6  # a call resolved by a name unique in the project, not by
 MAX_PACK_CHARS: Final = 20_000  # a pack is a module's outline, never its source
 MAX_NAME: Final = 500  # a vertex name's limit in the database
 MAX_MODULES: Final = 20_000
+MAX_MODULE_CHARS: Final = 512_000  # a bigger file (generated code, data) is left out
 FIND_KINDS: Final = ("module", "file", "symbol")  # what a question's terms match
 FOUND_LIMIT: Final = 200  # vertices one question may match
 MAX_PACKS: Final = 40  # modules considered for one context
-_WORD: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
+_WORD: Final = re.compile(r"[^\W\d]\w+")  # an identifier, in any script
 _CAMEL: Final = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f-\x9f\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]+")
 _STOP: Final = frozenset(
     {
         "about",
@@ -98,14 +100,29 @@ class CodeGraph:
     packs: tuple[Pack, ...]
 
 
+def one_line(text: str, limit: int) -> str:
+    """Text safe to store and to show on one line: control characters and line breaks become a
+    space, and a lone surrogate (a docstring's escapes can make one) a question mark."""
+    single = _CONTROL.sub(" ", text).strip()
+    return single.encode("utf-8", "replace").decode("utf-8")[:limit]
+
+
 def first_line(text: str | None) -> str:
-    return (text or "").strip().split("\n", 1)[0][:300]
+    lines = (text or "").strip().splitlines()
+    return one_line(lines[0], 300) if lines else ""
 
 
 def clean_path(raw: str) -> str | None:
-    """A relative posix path inside the project, or None (absolute, climbing out, or empty)."""
+    """A relative posix path inside the project, or None: absolute, climbing out, empty, too long,
+    or holding control characters or anything UTF-8 cannot carry."""
+    if len(raw) > MAX_NAME or _CONTROL.search(raw):
+        return None
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
     path = PurePosixPath(raw.replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts or not path.parts or len(raw) > MAX_NAME:
+    if path.is_absolute() or ".." in path.parts or not path.parts:
         return None
     return path.as_posix()
 
@@ -129,6 +146,31 @@ def _resolve(imported: str, modules: Mapping[str, Module]) -> str | None:
     return None
 
 
+def cut(text: str, max_chars: int) -> str:
+    """The text cut at a line end to fit `max_chars`, saying how many lines it left out; "" when
+    not even the first line fits."""
+    if len(text) <= max_chars:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    size = 0
+    for i, line in enumerate(lines):
+        if size + len(line) + 1 + len(f"- ... {len(lines) - i} more lines") > max_chars:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join([*kept, f"- ... {len(lines) - len(kept)} more lines"]) if kept else ""
+
+
+def fit(pack: Pack, budget: int) -> Pack | None:
+    """The pack within `budget` tokens: whole, cut at a line end, or None when not even its first
+    line fits."""
+    if pack.tokens <= budget:
+        return pack
+    text = cut(pack.text, budget * 4 - 3)  # text_tokens counts four characters a token
+    return replace(pack, text=text, tokens=text_tokens(text)) if text else None
+
+
 def render_pack(module: Module, imports: Sequence[str], importers: Sequence[str]) -> str:
     lines = [f"# {module.path} ({module.name})"]
     if module.doc:
@@ -140,7 +182,7 @@ def render_pack(module: Module, imports: Sequence[str], importers: Sequence[str]
         more = f" and {len(shown) - 30} more" if len(shown) > 30 else ""
         lines.append("imported by: " + ", ".join(shown[:30]) + more)
     lines += [f"- {s.signature}" + (f"  # {s.doc}" if s.doc else "") for s in module.symbols]
-    return "\n".join(lines)[:MAX_PACK_CHARS]
+    return cut("\n".join(lines), MAX_PACK_CHARS)
 
 
 def build_graph(modules: Sequence[Module]) -> CodeGraph:
@@ -203,31 +245,49 @@ def term_of(name: str) -> str:
     return name.rpartition(".")[2].lower()
 
 
+def _identifiers(question: str) -> list[str]:
+    return _WORD.findall(question[:4_000])
+
+
+def _useful(term: str) -> bool:
+    return len(term) > 2 and term not in _STOP
+
+
+def question_words(question: str) -> frozenset[str]:
+    """The whole identifiers a question names, lower-cased: a vertex named one of them is named by
+    the question itself, not by a part of a longer name."""
+    return frozenset(w for w in (i.lower() for i in _identifiers(question)) if _useful(w))
+
+
 def question_terms(question: str) -> frozenset[str]:
-    """The identifiers a question names, lower-cased; CamelCase and snake_case names also count
-    by their parts: `ChatService.settle_hold` gives chatservice, chat, service, settle_hold,
-    settle and hold."""
+    """The identifiers a question names, lower-cased, and their CamelCase and snake_case parts:
+    `ChatService.settle_hold` gives chatservice, chat, service, settle_hold, settle and hold."""
     terms: set[str] = set()
-    for word in _WORD.findall(question[:4_000]):
+    for word in _identifiers(question):
         terms.add(word.lower())
         terms.update(part.lower() for part in word.split("_") if part)
         terms.update(part.lower() for part in _CAMEL.findall(word))
-    return frozenset(t for t in terms if len(t) > 2 and t not in _STOP)
+    return frozenset(t for t in terms if _useful(t))
 
 
-def rank(found: Sequence[Vertex]) -> list[str]:
+def rank(found: Sequence[Vertex], words: frozenset[str] = frozenset()) -> list[str]:
     """Module paths by how much of a question they hold: a module named in it counts 3, each of
-    its symbols named 2; ties go to the shorter path."""
+    its symbols 2, and 2 more for a name the question gives whole rather than by a part; ties go
+    to the shorter path."""
     scores: dict[str, int] = {}
     for v in found:
         if v.path:
-            scores[v.path] = scores.get(v.path, 0) + (3 if v.kind in ("module", "file") else 2)
+            score = 3 if v.kind in ("module", "file") else 2
+            if term_of(v.name) in words:
+                score += 2
+            scores[v.path] = scores.get(v.path, 0) + score
     return sorted(scores, key=lambda p: (-scores[p], len(p), p))
 
 
 def choose(packs: Sequence[Pack], order: Sequence[str], max_tokens: int) -> list[Pack]:
     """The packs of the best-ranked modules that fit the budget (a smaller one may still fit
-    after a bigger one did not)."""
+    after a bigger one did not). The best-ranked module is never left out for its size: its pack
+    is cut to the budget instead."""
     by_path: dict[str, list[Pack]] = {}
     for p in packs:
         by_path.setdefault(p.path, []).append(p)
@@ -238,4 +298,7 @@ def choose(packs: Sequence[Pack], order: Sequence[str], max_tokens: int) -> list
             if used + p.tokens <= max_tokens:
                 chosen.append(p)
                 used += p.tokens
+            elif not chosen and (cut_pack := fit(p, max_tokens - used)) is not None:
+                chosen.append(cut_pack)
+                used += cut_pack.tokens
     return chosen

@@ -150,3 +150,29 @@ async def test_us22_mcp_checks_versions_headers_and_origins(api: Api) -> None:
         headers={**key, "MCP-Protocol-Version": "2025-06-18"},
     )
     assert len(listed.json()["result"]["tools"]) == 2
+
+
+async def test_us22_mcp_tools_screen_passages_like_chat(api: Api) -> None:
+    """Review S-L4: the tools' output reaches a model, so a passage the org's policy blocks on is
+    dropped as it is for a chat request. S-I2: answers are not cached."""
+    _, client = api
+    key = bearer(await _team_key(client, await signup(client)))
+    secret = "AK" + "IA" + "QWERTYUIOPASDFGH"
+    for title, text in (
+        ("Runbook", "Deploy with the blue pipeline."),
+        ("Old", f"deploy: {secret}"),
+    ):
+        made = await client.post("/v1/documents", json={"title": title, "text": text}, headers=key)
+        assert made.status_code == 200, made.text
+    body = _rpc(
+        "tools/call", {"name": "search_documents", "arguments": {"query": "How do we deploy?"}}
+    )
+    resp = await client.post(
+        "/v1/mcp", json=body, headers=_headers(key, "tools/call", "search_documents")
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["cache-control"] == "no-store"
+    result = resp.json()["result"]
+    assert "blue pipeline" in result["content"][0]["text"]
+    assert secret not in resp.text  # dropped before any model could see it
+    assert result["structuredContent"]["dropped"] == 1

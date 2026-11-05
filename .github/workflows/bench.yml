@@ -1,0 +1,70 @@
+# Phase 4 latency gate (spec section 11): seeded packs, 2-3 hop graph queries and the filtered
+# vector search at 1M chunks, measured through the gateway's own queries. Run by hand; the report
+# lands in the job summary.
+name: bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunks:
+        description: RAG chunks to seed
+        default: "1000000"
+      edges:
+        description: Graph edges to seed
+        default: "1000000"
+      samples:
+        description: Samples per query
+        default: "1000"
+
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "1"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  context-latency:
+    name: seeded context latency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      POSTGRES_PASSWORD: bench-superuser-pw
+      FINOPS_MIGRATOR_PASSWORD: bench-migrator-pw
+      FINOPS_APP_PASSWORD: bench-app-pw
+      FINOPS_WORKER_PASSWORD: bench-worker-pw
+      FINOPS_READONLY_PASSWORD: bench-readonly-pw
+      TEST_DATABASE_URL: postgresql://postgres:bench-superuser-pw@127.0.0.1:5432/postgres
+      CHUNKS: ${{ inputs.chunks }}
+      EDGES: ${{ inputs.edges }}
+      SAMPLES: ${{ inputs.samples }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync
+      - name: Start PostgreSQL 19 on the large disk, sized for a 1M-vector HNSW build
+        run: |
+          sudo mkdir -p /mnt/pg
+          docker build -t finops-postgres:ci infra/docker/postgres
+          docker run -d --name pg -p 127.0.0.1:5432:5432 --shm-size=8g \
+            -v /mnt/pg:/var/lib/postgresql \
+            -e POSTGRES_PASSWORD -e FINOPS_MIGRATOR_PASSWORD -e FINOPS_APP_PASSWORD \
+            -e FINOPS_WORKER_PASSWORD -e FINOPS_READONLY_PASSWORD finops-postgres:ci \
+            -c shared_buffers=3GB -c effective_cache_size=10GB -c maintenance_work_mem=6GB \
+            -c max_parallel_maintenance_workers=3 -c max_wal_size=16GB \
+            -c checkpoint_timeout=30min -c synchronous_commit=off
+          for i in $(seq 1 60); do
+            docker exec pg pg_isready -U postgres -d finops && break
+            sleep 2
+          done
+          docker exec pg pg_isready -U postgres -d finops
+      - name: Seed and measure
+        run: |
+          uv run python -m tests.load.bench_context --chunks "$CHUNKS" --edges "$EDGES" \
+            --samples "$SAMPLES" --report bench.md
+      - name: Report
+        if: always()
+        run: test -f bench.md && cat bench.md >> "$GITHUB_STEP_SUMMARY" || true

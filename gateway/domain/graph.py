@@ -12,6 +12,7 @@ VERTEX_KINDS: Final = frozenset({"module", "file", "symbol", "doc", "owner"})
 EDGE_KINDS: Final = frozenset({"imports", "calls", "defines", "documents", "owns"})
 MAX_FIXED_DEPTH: Final = 3  # what one query of explicit joins answers
 MAX_DEPTH: Final = 8  # reachability, by recursive CTE
+MAX_WALK_IDS: Final = 20  # start vertices of a 2- or 3-hop walk (joins multiply paths)
 MAX_RESULTS: Final = 1_000
 MAX_GRAPH: Final = 200_000  # vertices, and edges, per project
 

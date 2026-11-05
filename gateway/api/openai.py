@@ -351,7 +351,7 @@ async def chat_completions(
             retrieved["relevance"] = relevance
             if plan.mode == "on" and relevance["rerank"] == "ok":
                 pruned = relevance["tokens_before"] - relevance["tokens_after"]
-                headers["x-finops-pruned-tokens"] = str(pruned)
+                headers["x-finops-pruned-tokens"] = str(max(0, pruned))  # it may keep more than k
         notes = {**(notes or {}), "retrieval": retrieved}
     if body.code_context is not None:  # US-22: outlines of the modules the question names
         project_id = body.code_context.project_id

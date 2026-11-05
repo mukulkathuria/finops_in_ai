@@ -26,7 +26,9 @@ _SENTENCE_END: Final = re.compile(r"(?<=[.!?])\s+")
 # A frame tag's opening bracket, in any case and spacing: the ASCII "<" or its small and
 # fullwidth forms, with invisible characters (zero-width, soft hyphen, BOM) allowed where
 # spaces are.
-_GAP: Final = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*"
+# Possessive (*+): two adjacent optional runs must not re-split a long run between them,
+# which made a `<` followed by many spaces cost quadratic time (review S-M1).
+_GAP: Final = r"[\s\u00ad\u200b-\u200f\u2060-\u2064\ufeff]*+"
 _FRAMES: Final = "document|passage|retrieved|code_context"  # the tags data is framed with
 _FRAME_TAG: Final = re.compile(
     rf"[<\ufe64\uff1c](?={_GAP}[/\uff0f]?{_GAP}(?:{_FRAMES})\b)", re.IGNORECASE

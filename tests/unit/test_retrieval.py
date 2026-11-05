@@ -189,3 +189,18 @@ async def test_the_embedder_batches_and_rejects_broken_answers() -> None:
             with pytest.raises(Unavailable) as exc:
                 await embedder.embed(["one"])
             assert exc.value.code == "embedder_unavailable"
+
+
+def test_neutralizing_frames_takes_linear_time() -> None:
+    """Review S-M1: two adjacent runs of optional gap characters made a `<` followed by many
+    spaces cost quadratic time, minutes for a long run, on the event loop."""
+    import time
+
+    from gateway.domain.retrieval import neutralize_frames
+
+    started = time.perf_counter()
+    spaced = "<" + " " * 100_000
+    assert neutralize_frames(spaced) == spaced
+    assert time.perf_counter() - started < 1.0
+    assert neutralize_frames("< \u200b / document>") == "&lt; \u200b / document>"
+    assert neutralize_frames("<code_context>") == "&lt;code_context>"

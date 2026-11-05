@@ -2,7 +2,8 @@
 publishes no schema, so the node-link shape is read leniently. Nodes are taken by `id`, with a
 type and a name or label; links by `source` and `target`, with a relation. A relation outside
 the gateway's edge kinds, or a link to an unknown node, is counted and skipped. `EXTRACTED` edges
-are certain; `INFERRED` ones keep their score."""
+are certain; `INFERRED` ones keep their score. Names and paths are cleaned as the Python
+indexer's are: one line each, and paths inside the project."""
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -10,8 +11,16 @@ from pathlib import PurePosixPath
 from typing import Any, Final
 from uuid import UUID, uuid7
 
-from gateway.domain.code import MAX_NAME, MAX_PACK_CHARS, CodeGraph, Pack
-from gateway.domain.graph import Edge, Vertex
+from gateway.domain.code import (
+    MAX_NAME,
+    MAX_PACK_CHARS,
+    CodeGraph,
+    Pack,
+    clean_path,
+    cut,
+    one_line,
+)
+from gateway.domain.graph import MAX_GRAPH, Edge, Vertex
 from gateway.domain.parsing import text_tokens
 
 _NODE_KINDS: Final = {
@@ -67,6 +76,14 @@ def _confidence(link: Mapping[str, Any]) -> float:
     return _CONFIDENCE.get(_text(raw).lower(), 1.0)
 
 
+def _name(node: Mapping[str, Any], key: str, path: str | None) -> str:
+    name = one_line(_text(node.get("label") or node.get("name")), MAX_NAME)
+    name = name or one_line(key, MAX_NAME) or "node"
+    if path and name == PurePosixPath(path).name:  # named by its file: found by its stem
+        name = PurePosixPath(path).stem or name
+    return name
+
+
 def _packs(vertices: Iterable[Vertex], edges: Iterable[Edge]) -> tuple[Pack, ...]:
     """A pack per file or module: what it defines and imports (Graphify gives no signatures)."""
     by_id = {v.id: v for v in vertices}
@@ -85,7 +102,7 @@ def _packs(vertices: Iterable[Vertex], edges: Iterable[Edge]) -> tuple[Pack, ...
         if v.id in imports:
             lines.append("imports: " + ", ".join(sorted(imports[v.id])))
         lines += [f"- {name}" for name in sorted(defines.get(v.id, []))]
-        text = "\n".join(lines)[:MAX_PACK_CHARS]
+        text = cut("\n".join(lines), MAX_PACK_CHARS)
         packs.append(Pack(v.id, v.path, text, text_tokens(text), 0))
     return tuple(packs)
 
@@ -96,6 +113,8 @@ def load_graphify(data: Mapping[str, Any]) -> GraphifyGraph:
     links = data.get("links", data.get("edges"))
     if not isinstance(nodes, list) or not isinstance(links, list):
         raise ValueError("a graph needs `nodes` and `links` (or `edges`) lists")
+    if len(nodes) > MAX_GRAPH or len(links) > MAX_GRAPH:
+        raise ValueError(f"a project's graph holds at most {MAX_GRAPH} nodes and links")
     ids: dict[str, UUID] = {}
     vertices: list[Vertex] = []
     for node in nodes:
@@ -105,12 +124,10 @@ def load_graphify(data: Mapping[str, Any]) -> GraphifyGraph:
         if key in ids:
             continue
         kind = _text(node.get("type", node.get("kind", node.get("file_type")))).lower()
-        name = (_text(node.get("label") or node.get("name")) or key)[:MAX_NAME]
-        path = _text(node.get("source_file") or node.get("path") or node.get("file"))[:1_000]
-        if path and name == PurePosixPath(path).name:  # named by its file: found by its stem
-            name = PurePosixPath(path).stem or name
+        raw_path = _text(node.get("source_file") or node.get("path") or node.get("file"))
+        path = clean_path(raw_path) if raw_path else None
         vid = ids[key] = uuid7()
-        vertices.append(Vertex(vid, _NODE_KINDS.get(kind, "symbol"), name, path or None))
+        vertices.append(Vertex(vid, _NODE_KINDS.get(kind, "symbol"), _name(node, key, path), path))
     edges: dict[tuple[UUID, UUID, str], Edge] = {}
     skipped = 0
     for link in links:
