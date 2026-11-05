@@ -68,6 +68,15 @@ class SessionRepository:
         )
         return RefreshRecord(**dict(row)) if row else None
 
+    async def lock_family(self, conn: AsyncConnection, family_id: UUID) -> None:
+        """One change to a refresh family at a time, until the transaction ends. Without it,
+        concurrent refreshes and logouts locked the family's rows in different orders (a
+        deadlock), and a logout's snapshot could miss the token a rotation was adding."""
+        await conn.exec_driver_sql(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%(key)s, 0))",
+            {"key": f"refresh-family:{family_id}"},
+        )
+
     async def mark_rotated(self, conn: AsyncConnection, token_id: UUID) -> bool:
         """Atomic: only one concurrent refresh with the same token can rotate it."""
         row = await fetch_one(

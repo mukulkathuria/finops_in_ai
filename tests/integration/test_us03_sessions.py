@@ -13,9 +13,12 @@ import httpx2
 import psycopg
 from argon2 import PasswordHasher
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from gateway.adapters.postgres.counters import PostgresCounterStore
-from gateway.adapters.postgres.database import Database
+from gateway.adapters.postgres.database import Database, fetch_one
+from gateway.adapters.postgres.sessions import SessionRepository
+from gateway.domain.secrets import digest
 from tests.support.app import STRONG_PASSWORD, app_client, app_settings, bearer, signup
 from tests.support.database import DisposableDatabase
 
@@ -130,6 +133,51 @@ async def test_concurrent_refreshes_of_one_token_have_one_winner_then_revoke(api
     assert {r.status_code for r in results} == {200, 401}
     after = await _refresh(client, winners[0].json()["refresh_token"])
     assert after.status_code == 401
+
+
+async def test_a_logout_during_a_rotation_also_revokes_the_rotated_token(
+    api: Api, test_db: DisposableDatabase
+) -> None:
+    _, client = api
+    admin = await signup(client)
+    token = (await _login(client, admin["user"]["email"])).json()["refresh_token"]
+    rotated = digest("rotated-in-flight")
+    db = Database(test_db.superuser_url)
+    try:
+        # A rotation in flight, as refresh() makes one: family locked, token rotated, a new one in.
+        async with db.transaction() as conn:
+            row = await fetch_one(
+                conn,
+                "SELECT family_id FROM refresh_tokens WHERE token_hash = :h",
+                {"h": digest(token)},
+            )
+            assert row is not None
+            await SessionRepository().lock_family(conn, row["family_id"])
+            await conn.execute(
+                text("UPDATE refresh_tokens SET rotated_at = now() WHERE token_hash = :h"),
+                {"h": digest(token)},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO refresh_tokens (org_id, user_id, family_id, token_hash,"
+                    " expires_at, family_expires_at) SELECT org_id, user_id, family_id, :new,"
+                    " expires_at, family_expires_at FROM refresh_tokens WHERE token_hash = :h"
+                ),
+                {"new": rotated, "h": digest(token)},
+            )
+            logout = asyncio.create_task(
+                client.post("/v1/auth/logout", json={"refresh_token": token})
+            )
+            await asyncio.sleep(1)
+            assert not logout.done()  # it waits for the rotation to commit
+        assert (await logout).status_code == 204
+    finally:
+        await db.dispose()
+    with psycopg.connect(test_db.superuser_url) as check:
+        found = check.execute(
+            "SELECT revoked_reason FROM refresh_tokens WHERE token_hash = %s", (rotated,)
+        ).fetchone()
+    assert found == ("logout",)
 
 
 async def test_expired_refresh_token_is_rejected(api: Api, test_db: DisposableDatabase) -> None:

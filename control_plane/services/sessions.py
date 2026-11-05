@@ -180,6 +180,10 @@ class SessionService:
         async with self._db.transaction() as conn:
             await set_lookup(conn, "token_hash", token_hash)
             record = await self._sessions.find_refresh(conn, token_hash)
+            if record is not None:
+                # Waits for any other change to this family, so read the token again after.
+                await self._sessions.lock_family(conn, record.family_id)
+                record = await self._sessions.find_refresh(conn, token_hash)
             if record is None:
                 raise Unauthenticated("refresh token is not valid", code="invalid_refresh_token")
             await set_tenant(conn, TenantContext(record.org_id, record.user_id))
@@ -220,6 +224,8 @@ class SessionService:
             record = await self._sessions.find_refresh(conn, token_hash)
             if record is None:
                 return
+            # After a rotation in flight commits, so the revocation sees the token it added.
+            await self._sessions.lock_family(conn, record.family_id)
             await set_tenant(conn, TenantContext(record.org_id, record.user_id))
             if await self._sessions.revoke_family(conn, record.family_id, "logout"):
                 await self._audit.append(
