@@ -43,6 +43,7 @@ class WorkspaceOut(BaseModel):
     object: Literal["workspace"] = "workspace"
     name: str
     access: list[str]
+    facts: int
     created_at: int
 
     @classmethod
@@ -51,6 +52,7 @@ class WorkspaceOut(BaseModel):
             id=str(w.id),
             name=w.name,
             access=sorted(w.acl_groups),
+            facts=w.fact_count,
             created_at=int(w.created_at.timestamp()),
         )
 
@@ -137,6 +139,16 @@ async def list_workspaces(
 ) -> WorkspaceList:
     found = await workspaces.workspaces(file_owner(caller), caller.groups, limit=limit)
     return WorkspaceList(data=[WorkspaceOut.of(w) for w in found])
+
+
+@router.delete("/v1/workspaces/{workspace_id}")
+async def delete_workspace(
+    workspace_id: UUID, caller: ModelCaller, workspaces: Workspaces
+) -> dict[str, object]:
+    """The workspace and everything in it: its creator decides, or an admin."""
+    admin = caller.can(Permission.ORG_MANAGE)
+    await workspaces.delete(file_owner(caller), workspace_id, admin=admin)
+    return {"id": str(workspace_id), "object": "workspace", "deleted": True}
 
 
 @router.post("/v1/workspaces/{workspace_id}/tasks")

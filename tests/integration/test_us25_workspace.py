@@ -139,7 +139,7 @@ async def test_us25_questions_are_deduplicated_and_loops_hops_and_budgets_stop(a
     assert answered["isError"] is False
     late = await _tool(client, key, "ask_agent", {**ask, "agent": "agent-c", "question": question})
     assert late["structuredContent"]["status"] == "answered"
-    assert late["structuredContent"]["answer"] == "Parcel Co."
+    assert "answer: Parcel Co." in late["content"][0]["text"]  # framed, never bare
     wrong = await _tool(
         client, key, "answer_question", {**answer, "agent": "agent-a", "answer": "x"}
     )

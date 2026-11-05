@@ -16,11 +16,24 @@ MAX_RESULTS: Final = 20
 MAX_HOPS: Final = 3  # a clarification chain stops here
 LOOP_REPEATS: Final = 3  # an unanswered question asked this often is a loop
 AGENT_PATTERN: Final = r"^[A-Za-z0-9_.:-]{1,100}$"
+# Bounds (Phase 5 review): what one workspace or task may hold.
+MAX_FACTS: Final = 2_000  # a workspace's facts: its exact search reads every one
+MAX_SUMMARIES: Final = 10_000  # file summaries in a workspace
+MAX_AGENTS: Final = 100  # agent names in a task, each with a budget of its own
+MAX_MESSAGES: Final = 5_000  # questions in a task
+MAX_QUERIES: Final = 5_000  # searches remembered in a task; past it they still run
 
 
 class AgentBudgetExceeded(DomainError):
     kind = "budget_exceeded"
     default_code = "agent_budget_exceeded"
+
+
+class AgentClaimed(DomainError):
+    """An agent's name in a task belongs to the member that first used it there."""
+
+    kind = "permission"
+    default_code = "agent_claimed"
 
 
 class LoopDetected(DomainError):

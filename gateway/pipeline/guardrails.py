@@ -461,7 +461,13 @@ class Guardrails:
         document holding a blocked value or an injection must not stop every question that
         retrieves it. Returns the passages kept and, for the ledger, those dropped and why.
         Redacting policies apply later, with the rest of the request."""
-        policy = await self._policies.get(org_id)
+        return await self.screen(await self._policies.get(org_id), hits)
+
+    async def screen(
+        self, policy: GuardrailPolicy, hits: Sequence[Hit]
+    ) -> tuple[list[Hit], list[dict[str, str]]]:
+        """`screen_passages` under a policy fetched beforehand: it reads no database, so it may
+        run inside a transaction without taking a second connection from the pool."""
         return await _offload(sum(len(h.content) for h in hits), lambda: _screen(policy, hits))
 
     async def inspect_inputs(

@@ -292,7 +292,7 @@ through the MCP endpoint (`/v1/mcp`):
 | Tool | What it does |
 | --- | --- |
 | `put_fact`, `get_fact` | Record a fact (kept once per content; a `key` names it); get it whole by id or key |
-| `search_workspace` | The facts nearest a query, as ranked snippets. The same agent repeating a search in a task gets the record (the fact ids) instead |
+| `search_workspace` | The facts nearest a query, as ranked snippets. The same agent repeating a search in a task, with no fact added since, gets the record (the fact ids) instead |
 | `put_file_summary`, `get_file_summary` | One summary per file path, read instead of the file |
 | `ask_agent`, `answer_question`, `read_inbox` | Questions between agents (see below) |
 
@@ -311,6 +311,22 @@ Discovery tokens are what agents read to find things out:
 
 They accrue per task and agent, and `GET /v1/workspaces/{id}/tasks/{task_id}` reports them. A
 task's `agent_token_budget` refuses any read that would take an agent past it.
+
+Who may act, and how much a workspace holds:
+
+- An agent's name in a task belongs to the member that first used it there: the user, or the
+  team of a team key. Another member's call under that name (its inbox, its answers, its
+  budget) is refused with `agent_claimed`. Every fact, summary, question and answer records the
+  member behind it.
+- What the workspace hands an agent passes the organisation's passage screen, as retrieved
+  documents do. A fact holding a blocked value or an injection is withheld: `get_fact` answers
+  `content_withheld`, and a search leaves it out and counts it in `withheld`.
+- A workspace holds at most 2,000 facts (its search is exact) and 10,000 file summaries; a task
+  holds at most 100 agents and 5,000 questions. A full workspace answers 403 `workspace_full`.
+  `put_fact` embeds the fact, so it counts against the credential's heavy limit, as a document
+  ingest does.
+- `DELETE /v1/workspaces/{id}` removes the workspace and everything in it. Its creator decides
+  (the user, or a key of the team that made it), or an admin.
 
 ## Image generation
 

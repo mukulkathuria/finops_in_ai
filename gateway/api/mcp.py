@@ -27,7 +27,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from gateway import __version__
-from gateway.api.caller import Caller, ModelCaller
+from gateway.api.caller import Caller, ModelCaller, count_heavy
 from gateway.api.documents import Retrieval
 from gateway.api.files import file_owner
 from gateway.api.mcp_workspace import TOOLS as WORKSPACE_TOOLS
@@ -183,6 +183,7 @@ class _Session:
     retrieval: RetrievalService
     chat: ChatService  # screens what the tools return: it reaches a model, as in chat
     workspace: WorkspaceService  # the agents' blackboard, and their discovery tokens
+    heavy: Callable[[], Awaitable[None]]  # the credential's limit on embedding work (put_fact)
 
     async def _counted(self, args: Accounted, text: str, summary: dict[str, Any]) -> None:
         """A read that names its workspace task counts as the agent's discovery there."""
@@ -382,7 +383,10 @@ async def mcp(
         version = version_of(request.headers, rpc)
         if rpc.id is None:
             return Response(status_code=202, headers=_NO_STORE)
-        result = await dispatch(rpc, version, _Session(caller, code, retrieval, chat, workspaces))
+        session = _Session(
+            caller, code, retrieval, chat, workspaces, lambda: count_heavy(request, caller)
+        )
+        result = await dispatch(rpc, version, session)
     except RpcError as exc:
         error: dict[str, Any] = {"code": exc.code, "message": exc.message}
         if exc.data is not None:

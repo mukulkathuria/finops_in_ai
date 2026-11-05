@@ -24,7 +24,7 @@ from gateway.api.mcp import (
     tool_list,
     version_of,
 )
-from gateway.domain.errors import NotFound
+from gateway.domain.errors import NotFound, RateLimited
 
 META = {"_meta": {"io.modelcontextprotocol/protocolVersion": MODERN}}
 
@@ -44,11 +44,34 @@ class _Screen:
         return list(hits), []
 
 
+async def _unlimited() -> None:
+    return None
+
+
+async def test_put_fact_takes_the_heavy_limit_before_any_embedding() -> None:
+    """Phase 5 review C-W3: a fact is embedded as a document is, under the same limit."""
+
+    async def limited() -> None:
+        raise RateLimited("too many requests for this credential; slow down", retry_after_s=1)
+
+    caller = SimpleNamespace(
+        org_id=uuid7(), team_id=uuid7(), user_id=None, api_key_id=uuid7(), groups=frozenset()
+    )
+    session = _Session(caller, _Unreadable(), _Down(), _Screen(), None, limited)  # type: ignore[arg-type]
+    params = {
+        "name": "put_fact",
+        "arguments": {"workspace_id": str(uuid7()), "agent": "planner", "content": "a fact"},
+    }
+    refused = await dispatch(Rpc(1, "tools/call", params), MODERN, session)
+    assert refused["isError"] is True  # and the workspace (None here) was never reached
+    assert refused["content"][0]["text"] == "too many requests for this credential; slow down"
+
+
 async def test_tool_failures_reach_the_model_and_unknown_tools_do_not() -> None:
     caller = SimpleNamespace(
         org_id=uuid7(), team_id=uuid7(), user_id=None, api_key_id=uuid7(), groups=frozenset()
     )
-    session = _Session(caller, _Unreadable(), _Down(), _Screen(), None)  # type: ignore[arg-type]
+    session = _Session(caller, _Unreadable(), _Down(), _Screen(), None, _unlimited)  # type: ignore[arg-type]
 
     async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         params = {"name": name, "arguments": arguments}

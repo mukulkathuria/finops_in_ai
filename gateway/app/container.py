@@ -319,6 +319,12 @@ def build_container(
         model=settings.moderation_model,
         timeout_s=settings.moderation_timeout_s,
     )
+    guardrails = Guardrails(  # one policy cache and one classifier for chat and the workspace
+        classifier=classifier,
+        policies=policy_cache,
+        telemetry=observability.telemetry,
+        max_input_chars=settings.guardrail_max_input_chars,
+    )
     return Container(
         settings=settings,
         db=db,
@@ -358,12 +364,7 @@ def build_container(
         owns_http=http_client is None,
         chat_service=ChatService(
             db=db,
-            guardrails=Guardrails(
-                classifier=classifier,
-                policies=policy_cache,
-                telemetry=observability.telemetry,
-                max_input_chars=settings.guardrail_max_input_chars,
-            ),
+            guardrails=guardrails,
             catalog=catalog,
             adapters=adapters,
             usage=usage,
@@ -408,7 +409,9 @@ def build_container(
         parse_service=parse_service,
         retrieval_service=retrieval_service,
         graph_store=graph_store,
-        workspace_service=WorkspaceService(db=db, repo=WorkspaceRepository(), embedder=embedder),
+        workspace_service=WorkspaceService(
+            db=db, repo=WorkspaceRepository(), embedder=embedder, guardrails=guardrails
+        ),
         code_service=CodeService(
             db=db,
             graph=graph_store,

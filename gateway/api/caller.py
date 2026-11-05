@@ -171,14 +171,19 @@ async def require_model_access(caller: Annotated[Caller, Depends(current_caller)
     return caller
 
 
+async def count_heavy(request: Request, caller: Caller) -> None:
+    """One request against the credential's separate limit on conversion or embedding work no
+    money budget covers: uploads, document ingests, Markdown conversions, workspace facts."""
+    services = get_caller_services(request)
+    await _count(services, "heavy", caller, services.settings.heavy_rate_limit_per_minute)
+
+
 @authz_dependency
 async def require_heavy_access(
     request: Request, caller: Annotated[Caller, Depends(require_model_access)]
 ) -> Caller:
-    """Model access, within the credential's separate limit on requests that cost conversion or
-    embedding work no money budget covers: uploads, document ingests, Markdown conversions."""
-    services = get_caller_services(request)
-    await _count(services, "heavy", caller, services.settings.heavy_rate_limit_per_minute)
+    """Model access, within the credential's limit on heavy work (`count_heavy`)."""
+    await count_heavy(request, caller)
     return caller
 
 

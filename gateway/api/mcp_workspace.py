@@ -29,6 +29,9 @@ class WorkspaceSession(Protocol):
     @property
     def workspace(self) -> WorkspaceService: ...
 
+    @property
+    def heavy(self) -> Callable[[], Awaitable[None]]: ...
+
 
 class Accounted(BaseModel):
     """Optional on other tools' reads (documents, code context): with all three, the read's
@@ -132,6 +135,7 @@ def _owner(session: WorkspaceSession) -> tuple[Any, frozenset[str]]:
 
 
 async def put_fact(session: WorkspaceSession, args: PutFactArgs) -> tuple[str, dict[str, Any]]:
+    await session.heavy()  # a new fact is embedded, as a document ingest is
     owner, groups = _owner(session)
     fact_id, known = await session.workspace.put_fact(
         owner,
@@ -167,7 +171,12 @@ async def search_workspace(
         {"fact_id": str(f.id), "key": f.key, "agent": f.agent, "score": round(f.score or 0, 4)}
         for f in found.facts
     ]
-    summary = {"results": results, "deduplicated": found.deduplicated, "tokens": found.tokens}
+    summary = {
+        "results": results,
+        "deduplicated": found.deduplicated,
+        "tokens": found.tokens,
+        "withheld": found.withheld,
+    }
     return found.text, summary
 
 
@@ -203,10 +212,9 @@ async def ask_agent(session: WorkspaceSession, args: AskArgs) -> tuple[str, dict
         question=args.question,
         reply_to=args.reply_to,
     )
-    summary = {
+    summary = {  # the answer itself only in the framed text, never bare (Phase 5 review S-E2)
         "message_id": str(asked.message.id),
         "status": asked.status,
-        "answer": asked.message.answer,
         "asked": asked.message.asked,
         "hops": asked.message.hops,
     }
@@ -254,7 +262,7 @@ TOOLS: Final[dict[str, tuple[str, str, type[BaseModel], Run]]] = {
     "search_workspace": (
         "Search the workspace",
         "Facts of the workspace nearest a query, as ranked snippets. The same agent repeating"
-        " a search in a task is answered from the record.",
+        " a search in a task, with no fact added since, is answered from the record.",
         SearchWorkspaceArgs,
         search_workspace,
     ),
