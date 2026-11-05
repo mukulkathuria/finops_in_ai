@@ -125,6 +125,10 @@ Setting up:
 
 - Register the answer's `callback_url`, `<PUBLIC_BASE_URL>/v1/auth/sso/callback`, as the
   client's redirect URI. Without `PUBLIC_BASE_URL`, single sign-on is off.
+- Serve the dashboard on the same host as `PUBLIC_BASE_URL` (the web container proxies `/v1`
+  to the gateway). A sign-in is bound to the browser that started it by a cookie the gateway
+  sets. The cookie is HttpOnly and SameSite=Lax, and https-only when `PUBLIC_BASE_URL` is
+  https.
 - The client secret is sealed with the org's envelope key and never returned.
 - Outside development, the provider is reached only on public addresses.
 
@@ -138,10 +142,16 @@ Signing in:
 5. The browser comes back to the dashboard with a one-time code. The dashboard trades it once
    for the usual session (`POST /v1/auth/sso/exchange`), so no token travels in a URL.
 
+Both the provider's answer and the one-time code work only in the browser that started the
+sign-in. So nobody can sign you into their account (login CSRF) by sending you their own
+callback link or code.
+
 Accounts and local login:
 
-- A first sign-in links an existing member through an email the provider has verified, in an
-  allowed domain. Single sign-on never creates an account: invite people first.
+- A first sign-in links an existing member through an email the provider has verified, in one
+  of the `allowed_domains`. With no domain listed, nothing links: a provider's word that an
+  email is verified is not enough on its own. Identities already linked keep working.
+- Single sign-on never creates an account: invite people first.
 - With `local_login_disabled`, members sign in only through the provider. Admins keep their
   password, so a broken provider cannot lock the org out.
 

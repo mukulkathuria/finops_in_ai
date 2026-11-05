@@ -176,3 +176,33 @@ async def test_us27_local_login_can_be_disabled_per_org(
     assert (await client.delete("/v1/admin/sso", headers=admin)).status_code == 204
     assert (await client.get("/v1/admin/sso", headers=admin)).status_code == 404
     assert (await client.post("/v1/auth/login", json=login)).status_code == 200  # local again
+
+
+async def test_us27_a_sign_in_completes_only_in_the_browser_that_started_it(api: Api) -> None:
+    """Login CSRF: someone signs in at the provider as themselves, then gets a victim's browser
+    to finish the sign-in (the callback) or to trade their one-time code. Either would sign the
+    victim into the attacker's account."""
+    app, client = api
+    owner = await signup(client)
+    admin, slug, email = bearer(owner["access_token"]), owner["org"]["slug"], owner["user"]["email"]
+    assert (await _configure(client, admin)).status_code == 200
+    request = await _to_provider(client, slug)
+    code = f"code-{uuid4().hex}"
+    fake_idp.arrange(
+        code,
+        challenge=request["code_challenge"],
+        redirect_uri=request["redirect_uri"],
+        subject="idp-csrf",
+        email=email,
+        nonce=request["nonce"],
+    )
+    callback = {"code": code, "state": request["state"]}
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://gateway.test") as victim:
+        assert await _back(victim, callback) == {"error": "sso_expired"}  # another browser
+        issued = await _back(client, callback)  # the browser that started it
+        traded = await victim.post("/v1/auth/sso/exchange", json={"code": issued["code"]})
+        assert traded.status_code == 401
+    session = await client.post("/v1/auth/sso/exchange", json={"code": issued["code"]})
+    assert session.status_code == 200, session.text
+    assert session.json()["user"]["id"] == owner["user"]["id"]

@@ -154,8 +154,10 @@ def clean_domains(domains: Sequence[str]) -> list[str]:
 
 
 def domain_allowed(email: str, domains: Sequence[str]) -> bool:
-    """Any domain when the org names none; otherwise the email's own domain must be named."""
-    return not domains or email.rpartition("@")[2] in domains
+    """Whether a first sign-in may link by this email: its domain must be one the org named.
+    Naming none links nothing, so the provider's word that an email is verified is never
+    enough on its own (some providers assert it for addresses their users simply typed)."""
+    return email.rpartition("@")[2] in domains
 
 
 def issuer_url(value: str, *, allow_insecure: bool) -> str:

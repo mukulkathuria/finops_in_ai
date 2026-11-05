@@ -118,7 +118,7 @@ def test_domains_and_issuers_are_checked() -> None:
         clean_domains(["not a domain"])
     assert domain_allowed("a@example.com", ["example.com"])
     assert not domain_allowed("a@evil.example", ["example.com"])
-    assert domain_allowed("a@anything.example", [])
+    assert not domain_allowed("a@anything.example", [])  # naming no domain links nothing
     issuer = "https://login.example/tenant/"
     assert issuer_url(f" {issuer} ", allow_insecure=False) == issuer  # kept exactly
     for bad in (

@@ -69,6 +69,11 @@ class SsoSettings:
     updated_at: datetime
 
 
+def _bound(secret: str, browser: str) -> str:
+    """How a single-use sign-in secret is stored: hashed with the browser's cookie secret."""
+    return digest(f"{secret}.{browser}")
+
+
 class _Refused(Exception):
     """A sign-in that ends at the web app with a reason code."""
 
@@ -194,8 +199,15 @@ class SsoService:
 
     # ---------------------------------------------------------------- the browser flow
 
-    async def start(self, org_slug: str) -> str:
-        """The provider's authorization URL for a new sign-in to the org."""
+    @property
+    def secure_cookies(self) -> bool:
+        """The sign-in cookie must be https-only when the gateway is reached over https."""
+        return (self._callback_url or "").startswith("https://")
+
+    async def start(self, org_slug: str) -> tuple[str, str]:
+        """The provider's authorization URL for a new sign-in to the org, and the secret the
+        browser keeps (a cookie) for the callback and the code exchange: a sign-in someone else
+        started, or a one-time code they obtained, then does not work in a victim's browser."""
         callback = self._callback()
         async with self._db.transaction() as conn:
             await set_lookup(conn, "org_slug", org_slug.strip().lower())
@@ -214,17 +226,17 @@ class SsoService:
             raise Unavailable(
                 "the organisation's sign-in provider cannot be reached", code="sso_unavailable"
             ) from exc
-        state, nonce, pkce = new_secret(), new_secret(), new_pkce()
+        state, nonce, pkce, browser = new_secret(), new_secret(), new_pkce(), new_secret()
         async with self._db.transaction(TenantContext(org_id)) as conn:
             await self._repo.save_login(
                 conn,
-                secret_hash=digest(state),
+                secret_hash=_bound(state, browser),
                 kind="state",
                 ttl_s=STATE_TTL_S,
                 nonce=nonce,
                 verifier=pkce.verifier,
             )
-        return authorization_url(
+        url = authorization_url(
             provider.authorization_endpoint,
             client_id=config.client_id,
             redirect_uri=callback,
@@ -232,12 +244,19 @@ class SsoService:
             nonce=nonce,
             challenge=pkce.challenge,
         )
+        return url, browser
 
     async def callback(
-        self, *, code: str | None, state: str | None, error: str | None, meta: RequestMeta
+        self,
+        *,
+        code: str | None,
+        state: str | None,
+        error: str | None,
+        browser: str,
+        meta: RequestMeta,
     ) -> str:
         """Where the browser goes back to in the web app: with a one-time code, or a reason."""
-        pending = await self._take(state, "state") if state else None
+        pending = await self._take(state, "state", browser) if state else None
         if pending is None or pending.expired:
             return self._back(error="sso_expired")
         org_id = pending.org_id
@@ -252,16 +271,20 @@ class SsoService:
         one_time = new_secret()
         async with self._db.transaction(TenantContext(org_id, user_id)) as conn:
             await self._repo.save_login(
-                conn, secret_hash=digest(one_time), kind="code", ttl_s=CODE_TTL_S, user_id=user_id
+                conn,
+                secret_hash=_bound(one_time, browser),
+                kind="code",
+                ttl_s=CODE_TTL_S,
+                user_id=user_id,
             )
             await self._audit.append(
                 conn, _event(AuditAction.SSO_LOGIN_SUCCEEDED, user_id, meta, {"issuer": issuer})
             )
         return self._back(code=one_time)
 
-    async def exchange(self, code: str, meta: RequestMeta) -> Session:
-        """The session for a one-time code from `callback`."""
-        issued = await self._take(code, "code")
+    async def exchange(self, code: str, browser: str, meta: RequestMeta) -> Session:
+        """The session for a one-time code from `callback`, in the browser that signed in."""
+        issued = await self._take(code, "code", browser)
         if issued is None or issued.expired or issued.user_id is None:
             raise Unauthenticated(
                 "the sign-in code is invalid, used or expired", code="invalid_sso_code"
@@ -339,9 +362,10 @@ class SsoService:
             raise _Refused("sso_account_inactive", "the member's account is not active")
         return user_id
 
-    async def _take(self, secret: str, kind: str) -> PendingLogin | None:
-        """Find a single-use secret by its hash and delete it, in one transaction."""
-        secret_hash = digest(secret)
+    async def _take(self, secret: str, kind: str, browser: str) -> PendingLogin | None:
+        """Find a single-use secret by its hash and delete it, in one transaction. Only the
+        browser it was issued to finds it."""
+        secret_hash = _bound(secret, browser)
         async with self._db.transaction() as conn:
             await set_lookup(conn, "sso_secret", secret_hash)
             found = await self._repo.find_login(conn)

@@ -6,9 +6,9 @@ and the one-time code are what they act on. Each is rate limited per client addr
 is cached. The client secret goes in and never comes out."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,11 +18,24 @@ from control_plane.services.sso import SsoChange, SsoSettings
 from gateway.api.deps import request_meta, require
 from gateway.api.markers import public
 from gateway.domain.policy import Permission, Principal
+from gateway.domain.sso import STATE_TTL_S
 
 router = APIRouter(prefix="/v1/auth/sso", tags=["auth"])
 admin_router = APIRouter(prefix="/v1/admin/sso", tags=["sso"])
 Admin = Annotated[Principal, Depends(require(Permission.ORG_MANAGE))]
 _NO_STORE = {"cache-control": "no-store", "referrer-policy": "no-referrer"}
+# The browser that started a sign-in keeps this secret. The provider's redirect back is a
+# top-level GET, which a SameSite=Lax cookie still accompanies.
+_BROWSER = "finops_sso"
+
+
+def _cookie(services: Services) -> dict[str, Any]:
+    return {
+        "path": "/v1/auth/sso",
+        "secure": services.sso_service.secure_cookies,
+        "httponly": True,
+        "samesite": "lax",
+    }
 
 
 class SsoIn(BaseModel):
@@ -68,8 +81,10 @@ class ExchangeIn(BaseModel):
 async def start(
     services: Services, org: Annotated[str, Query(min_length=1, max_length=63)]
 ) -> RedirectResponse:
-    url = await services.sso_service.start(org)
-    return RedirectResponse(url, status_code=303, headers=_NO_STORE)
+    url, browser = await services.sso_service.start(org)
+    response = RedirectResponse(url, status_code=303, headers=_NO_STORE)
+    response.set_cookie(_BROWSER, browser, max_age=STATE_TTL_S, **_cookie(services))
+    return response
 
 
 @router.get("/callback", dependencies=auth_rate_limit)
@@ -82,15 +97,24 @@ async def callback(
     error: Annotated[str | None, Query(max_length=200)] = None,
 ) -> RedirectResponse:
     url = await services.sso_service.callback(
-        code=code, state=state, error=error, meta=request_meta(request)
+        code=code,
+        state=state,
+        error=error,
+        browser=request.cookies.get(_BROWSER, ""),
+        meta=request_meta(request),
     )
     return RedirectResponse(url, status_code=303, headers=_NO_STORE)
 
 
 @router.post("/exchange", dependencies=auth_rate_limit)
 @public
-async def exchange(body: ExchangeIn, request: Request, services: Services) -> SessionOut:
-    return session_out(await services.sso_service.exchange(body.code, request_meta(request)))
+async def exchange(
+    body: ExchangeIn, request: Request, response: Response, services: Services
+) -> SessionOut:
+    browser = request.cookies.get(_BROWSER, "")
+    session = await services.sso_service.exchange(body.code, browser, request_meta(request))
+    response.delete_cookie(_BROWSER, **_cookie(services))
+    return session_out(session)
 
 
 @admin_router.get("")
