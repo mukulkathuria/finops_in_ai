@@ -55,6 +55,7 @@ from tests.load.bench_context import Scale, seed
 took = seed(sys.argv[1], Scale(orgs=5, chunks=4000, edges=4000, projects=4, samples=1, workers=2))
 print("seeded:", ", ".join(f"{step} {seconds:.1f} s" for step, seconds in took.items()))
 PY
+psql_q -d finops -c "DROP TABLE bench_centroids" # the bench's own query helper, not product data
 before="$(fingerprint)"
 was="$(psql_q -d finops -At -c "SHOW server_version")"
 as_pg "$(bin "$old")/pg_ctl" -D "$data/$old" -m fast -w stop >/dev/null
