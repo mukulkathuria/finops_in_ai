@@ -37,6 +37,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-26 a stage registers by config (registry order, per-org mode), runs in shadow on a copy, reports to `stage_reports` with the ledger row, and goes `on` only after a passed eval run for its current version; a failing stage is skipped and reported | `feat(US-26)` | `tests/unit/test_stages.py`, `tests/integration/test_us26_stages.py` |
 | US-21 RAG with relevance filtering: the `rag_relevance` stage (off, shadow, on after a passed eval) reranks the candidates, drops passages under the org's threshold and packs the rest within its token budget; pruned tokens in the response, the ledger and the savings report; a failing reranker keeps the vector order | `feat(US-21)` | `tests/unit/test_relevance.py`, `tests/integration/test_us21_rag_relevance.py` |
 | US-22 (indexing and context packs) code projects shared like documents; Python indexer (`ast`) and Graphify adapter into `graph_vertex`/`graph_edge` with one context pack per module; `GraphStore` reads (find, neighbours, reachability) check the ACL in the same statement; `GET /v1/projects/{id}/context` serves the packs of the modules a question names within a token budget; chat requests take `code_context` (packs and the signatures one call away, screened like retrieved passages, reported as the `code_context` stage). Eval on this repository: 12 of 12 questions hit, context 19,952 tokens against 91,500 for the whole modules (21.8%). MCP tools at `POST /v1/mcp` (`get_code_context`, `search_documents`; protocol 2026-07-28 with header checks, and the 2025 `initialize` handshake) | `feat(US-22)` | `tests/unit/test_code_index.py`, `tests/unit/test_code_eval.py`, `tests/unit/test_graph.py`, `tests/integration/test_us22_code_context.py`, `tests/integration/test_us22_graph_store.py`, `tests/unit/test_mcp.py`, `tests/integration/test_us22_mcp.py`, `scripts/eval_code_context.py` |
+| US-24 image generation with quotas: `POST /v1/images/generations` (OpenAI shape, base64 images); prompts pass the guardrails and moderation (built-in rules or an OpenAI-compatible moderation API, failing closed) before any spend; image budgets per member and team are reserved like money, so concurrent requests cannot pass a quota; each image is priced from the catalog by size and quality (migration 0024, `image_prices` in the price list) and counted in the ledger; the org's exact cache serves a repeat at no cost | `feat(US-24)` | `tests/unit/test_images.py`, `tests/contract/test_llm_contract.py`, `tests/integration/test_us24_images.py` |
 | Phase 4 review loop: Python parsed in an isolated probe process (deadline, memory cap, two at a time, files over 512,000 characters left out); frame neutralizing linear; text reaching the database one clean line; `code_context` cost-neutral in the ledger; packs cut at a line end, never dropped for size; whole names found first; walks of 2-3 hops from at most 20 vertices; project names unique per owner and edge indexes covering `project_id` (migration 0023); MCP tools screened like chat and not cached; reranker scores held to 0-1; seeded latency benchmark (`bench` workflow) | `fix(phase-4)` | `docs/audits/2026-11-05-phase4-review.md`, `tests/unit/test_code_probe.py`, `tests/load/bench_context.py`, `tests/integration/test_bench_context.py` |
 | Phase 3 review loop: hold released on a disconnect during the cache lookup; eval gate on the latest run with demotion; cached answers sealed and the worker limited to cleanup (janitor with expiry and per-org cap); cache key on the inspecting policy and rules version; price-sync errors without URLs, unpriced new models refused; LiteLLM without `.env` and imported at startup, streams closed; quality checks charged to the org; compaction leaves tool output and tabs alone; savings by technique reconcile for cache hits and unserved requests | `fix(phase-3)` | `docs/audits/2026-11-04-phase3-review.md`, `tests/integration/test_phase3_review.py`, `tests/unit/test_phase3_review.py` |
 | Phase 2 review loop: per-credential and heavy-work limits, budget precheck before conversion and retrieval, blocked passages dropped, exact search behind HNSW, linear detectors, input size cap | `c8740df`, `4ce7d06`, `201a9a2` | `docs/audits/2026-11-04-phase2-review.md`, `tests/integration/test_phase2_review.py`, `tests/unit/test_relay.py` |
@@ -84,15 +85,15 @@ Phase 3 review loop (spec section 12): two independent reviewers (security; corr
 money); no Critical or High finding and no cross-tenant path; every Medium and most Lows fixed
 with a regression test. See `docs/audits/2026-11-04-phase3-review.md` (accepted Lows: D-24).
 
-## Next: Phase 4 (US-21, US-22: context engineering)
+## Next: Phase 5 (US-24, US-25: agents and image generation)
 
-Plan: `docs/superpowers/plans/2026-11-04-phase4-context.md`. Phase 3's plan:
-`docs/superpowers/plans/2026-11-04-phase3-savings.md`.
+Plan: `docs/superpowers/plans/2026-11-05-phase5-agents-images.md`. Earlier plans:
+`docs/superpowers/plans/2026-11-04-phase4-context.md`, `docs/superpowers/plans/2026-11-04-phase3-savings.md`.
 
 ## Remaining stories
 
-Phase 4: the seeded latency run at full scale (the `bench` workflow) and the review loop's re-review;
-Phase 5 US-24, US-25; Phase 6 US-27, US-30.
+Phase 4: the seeded latency run at full scale (the `bench` workflow); Phase 5 US-25 and
+the review loop; Phase 6 US-27, US-30.
 
 ## Findings and deviations from the spec
 

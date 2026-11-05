@@ -3,8 +3,9 @@ writes: rows are only ever appended."""
 
 import asyncio
 import time
-from typing import Final
+from typing import Any, Final
 
+import orjson
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from gateway.adapters.postgres.database import Database, fetch_all, fetch_one
@@ -15,17 +16,19 @@ _CURRENT: Final = (
     "SELECT DISTINCT ON (provider, model) id AS catalog_version, provider, model, kind,"
     " price_input, price_output, price_cached_input, price_cache_write, price_image,"
     " tier_threshold_tokens, tier_price_input, tier_price_output, context_window,"
-    " max_output_tokens FROM model_catalog WHERE effective_from <= now()"
+    " max_output_tokens, capabilities -> 'image_prices' AS image_prices"
+    " FROM model_catalog WHERE effective_from <= now()"
     " ORDER BY provider, model, effective_from DESC"
 )
 _LOCK: Final = "SELECT pg_try_advisory_xact_lock(hashtext('finops.price_sync')) AS locked"
 _INSERT: Final = """
 INSERT INTO model_catalog (provider, model, kind, price_input, price_output, price_cached_input,
   price_cache_write, price_image, tier_threshold_tokens, tier_price_input, tier_price_output,
-  context_window, max_output_tokens, source, effective_from)
+  context_window, max_output_tokens, capabilities, source, effective_from)
 VALUES (:provider, :model, :kind, :price_input, :price_output, :price_cached_input,
   :price_cache_write, :price_image, :tier_threshold_tokens, :tier_price_input,
-  :tier_price_output, :context_window, :max_output_tokens, :source,
+  :tier_price_output, :context_window, :max_output_tokens, CAST(:capabilities AS jsonb),
+  :source,
   coalesce(CAST(:effective_from AS timestamptz), now()))
 ON CONFLICT (provider, model, effective_from) DO NOTHING
 RETURNING id
@@ -47,10 +50,17 @@ _FIELDS: Final = (
 )
 
 
+def _price(row: dict[str, Any]) -> ModelPrice:
+    """A catalog row; its image price table (capabilities.image_prices) as sorted pairs."""
+    table = row.pop("image_prices", None)
+    pairs = sorted((str(k), int(v)) for k, v in table.items()) if isinstance(table, dict) else []
+    return ModelPrice(**row, image_prices=tuple(pairs))
+
+
 class CatalogRepository:
     async def current(self, conn: AsyncConnection) -> list[ModelPrice]:
         rows = await fetch_all(conn, _CURRENT)
-        return [ModelPrice(**dict(r)) for r in rows]
+        return [_price(dict(r)) for r in rows]
 
     async def lock_sync(self, conn: AsyncConnection) -> bool:
         """One price sync at a time across workers, for this transaction: False while another
@@ -62,6 +72,8 @@ class CatalogRepository:
         """Append a row; False when the model already has one from that very time."""
         params: dict[str, object] = {name: getattr(entry.price, name) for name in _FIELDS}
         params |= {"source": source, "effective_from": entry.effective_from}
+        table = dict(entry.price.image_prices)
+        params["capabilities"] = orjson.dumps({"image_prices": table} if table else {}).decode()
         return await fetch_one(conn, _INSERT, params) is not None
 
 

@@ -15,7 +15,14 @@ from typing import Any, Final, Literal
 from uuid import UUID
 
 from gateway.domain.detectors import RULES_VERSION
-from gateway.domain.llm import CanonicalRequest, CanonicalResponse, Message, TextPart, Usage
+from gateway.domain.llm import (
+    CanonicalRequest,
+    CanonicalResponse,
+    ImageRequest,
+    Message,
+    TextPart,
+    Usage,
+)
 
 CacheMode = Literal["off", "exact", "semantic"]
 CACHE_MODES: Final[tuple[CacheMode, ...]] = ("off", "exact", "semantic")
@@ -130,6 +137,31 @@ def cache_keys(
     )
     conversation = _canonical([_message(m) for m in req.messages])
     return CacheKeys(_digest(partition.hex(), conversation), partition)
+
+
+def image_cache_keys(
+    *,
+    org_id: UUID,
+    team_id: UUID | None,
+    user_id: UUID | None,
+    req: ImageRequest,
+    policy: Mapping[str, Any],
+    rules: str = RULES_VERSION,
+) -> CacheKeys:
+    """US-24: an image answer is found again only for the same prompt and options, within the
+    same org, team and user and under the same policy and rules, as a chat answer is; a salt of
+    its own keeps image and chat keys apart."""
+    params = {"model": req.model, "n": req.n, "size": req.size, "quality": req.quality}
+    partition = _digest(
+        "finops-image-cache-v1",
+        rules,
+        str(org_id),
+        str(team_id),
+        str(user_id),
+        _canonical(params),
+        _canonical(dict(policy)),
+    )
+    return CacheKeys(_digest(partition.hex(), req.prompt), partition)
 
 
 def single_turn_question(req: CanonicalRequest) -> str | None:

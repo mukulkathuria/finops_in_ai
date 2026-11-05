@@ -103,6 +103,13 @@ def file_conversion_report(files: object, price: ModelPrice) -> StageReport | No
     )
 
 
+def image_cache_report(full: int, images: int) -> StageReport:
+    """Images served from the exact cache save what generating them would cost."""
+    return StageReport(
+        "exact_cache", "1", "pre_llm", 0, 0, -full, applied=True, decisions={"images": images}
+    )
+
+
 def provider_cache_report(price: ModelPrice, usage: Usage) -> StageReport | None:
     """The provider's prompt cache, reported as a stage once the request is priced: what reads
     at the cached price saved and writes at the write premium cost, against full price."""

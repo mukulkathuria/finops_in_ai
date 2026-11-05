@@ -26,6 +26,7 @@ _COMPARED: Final = (
     "tier_price_output",
     "context_window",
     "max_output_tokens",
+    "image_prices",
 )
 _PRICES: Final = (
     "price_input",

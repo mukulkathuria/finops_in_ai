@@ -258,3 +258,20 @@ async def test_embeddings(harness: Harness) -> None:
     resp = await harness.adapter.embed(request)
     assert resp.vectors == ((1.0, 0.0), (0.0, 1.0))
     assert resp.usage.input_tokens > 0
+
+
+async def test_image_generation(harness: Harness) -> None:
+    from gateway.domain.llm import ImageRequest
+
+    request = ImageRequest(model="image", prompt="a cat", n=1, size="1024x1024", quality="standard")
+    if harness.name not in ("openai_compat", "litellm"):
+        with pytest.raises(ProviderError) as err:
+            await harness.adapter.generate_images(request)
+        assert err.value.kind is ProviderErrorKind.BAD_REQUEST
+        return
+    resp = await harness.adapter.generate_images(request)
+    assert resp.images == ("aGk=",)
+    assert resp.revised_prompts == ("a cat, painted",)
+    sent = harness.requests[-1]["body"]
+    assert (sent["prompt"], sent["n"], sent["size"]) == ("a cat", 1, "1024x1024")
+    assert sent["response_format"] == "b64_json"

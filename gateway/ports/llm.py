@@ -9,6 +9,8 @@ from gateway.domain.llm import (
     CanonicalResponse,
     EmbedRequest,
     EmbedResponse,
+    ImageRequest,
+    ImageResponse,
     ModelCapabilities,
     ProviderError,
     Usage,
@@ -26,6 +28,10 @@ class LLMAdapter(Protocol):
         ...
 
     async def embed(self, req: EmbedRequest) -> EmbedResponse: ...
+
+    async def generate_images(self, req: ImageRequest) -> ImageResponse:
+        """Images as base64 data; ProviderError(BAD_REQUEST) where the provider has none."""
+        ...
 
     def capabilities(self, model: str) -> ModelCapabilities: ...
 

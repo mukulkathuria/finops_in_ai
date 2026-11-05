@@ -199,6 +199,9 @@ OPENAI: Routes = {
     ("malformed", True): Reply(
         sse=['data: {"choices": [{"delta": {"content": "hi"}}]}\n', "data: {not json\n"]
     ),
+    ("image", False): Reply(
+        body={"created": 1, "data": [{"b64_json": "aGk=", "revised_prompt": "a cat, painted"}]}
+    ),
     ("embed", False): Reply(
         body={
             "object": "list",

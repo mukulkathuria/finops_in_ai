@@ -19,6 +19,8 @@ from gateway.domain.llm import (
     EmbedResponse,
     FinishReason,
     ImagePart,
+    ImageRequest,
+    ImageResponse,
     Message,
     ModelCapabilities,
     ProviderError,
@@ -259,6 +261,43 @@ class OpenAICompatAdapter:
             model=str(data.get("model") or req.model),
             vectors=vectors,
             usage=Usage(input_tokens=tokens),
+        )
+
+    async def generate_images(self, req: ImageRequest) -> ImageResponse:
+        body: dict[str, Any] = {"model": req.model, "prompt": req.prompt, "n": req.n}
+        if req.size:
+            body["size"] = req.size
+        if req.quality:
+            body["quality"] = req.quality
+        if not req.model.startswith("gpt-image"):  # those answer in base64 and refuse the field
+            body["response_format"] = "b64_json"
+        try:
+            resp = await self._http.post(
+                f"{self._base}/images/generations",
+                content=orjson.dumps(body),
+                headers=self._headers,
+                timeout=self._timeout,
+            )
+        except httpx2.HTTPError as exc:
+            raise transport_error(exc, self._name) from exc
+        if resp.status_code >= 400:
+            raise self._status_error(resp)
+        return self._image_response(json_body(resp), req)
+
+    def _image_response(self, data: Mapping[str, Any], req: ImageRequest) -> ImageResponse:
+        """An images reply (OpenAI shape) as the canonical response: base64 data only."""
+        try:
+            items = list(data["data"])
+            images = tuple(item["b64_json"] for item in items)
+            revised = tuple(item.get("revised_prompt") for item in items)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise malformed(self._name) from exc
+        if not images or not all(isinstance(i, str) and i for i in images):
+            raise malformed(self._name)
+        return ImageResponse(
+            model=str(data.get("model") or req.model),
+            images=images[: req.n],
+            revised_prompts=tuple(r if isinstance(r, str) else None for r in revised[: req.n]),
         )
 
     # ------------------------------------------------------------------ normalisation

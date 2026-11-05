@@ -25,6 +25,8 @@ from gateway.domain.llm import (
     EmbedRequest,
     EmbedResponse,
     FinishReason,
+    ImageRequest,
+    ImageResponse,
     ModelCapabilities,
     ProviderError,
     ProviderErrorKind,
@@ -298,6 +300,13 @@ class GeminiAdapter:
         yield CanonicalChunk(
             finish_reason=final,
             usage=self.normalize_usage(usage) if usage else Usage(estimated=True),
+        )
+
+    async def generate_images(self, req: ImageRequest) -> ImageResponse:
+        raise ProviderError(
+            ProviderErrorKind.BAD_REQUEST,
+            "this adapter does not generate images with Gemini",
+            provider=self._name,
         )
 
     async def embed(self, req: EmbedRequest) -> EmbedResponse:

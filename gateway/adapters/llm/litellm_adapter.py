@@ -24,6 +24,8 @@ from gateway.domain.llm import (
     CanonicalResponse,
     EmbedRequest,
     EmbedResponse,
+    ImageRequest,
+    ImageResponse,
     ProviderError,
     ProviderErrorKind,
 )
@@ -153,6 +155,25 @@ class LiteLLMAdapter(OpenAICompatAdapter):
         except Exception as exc:
             raise self.classify_error(exc) from exc
         return self._embedding(resp.model_dump(), req)
+
+    async def generate_images(self, req: ImageRequest) -> ImageResponse:
+        arguments: dict[str, Any] = {
+            "model": f"openai/{req.model}",
+            "prompt": req.prompt,
+            "n": req.n,
+            "size": req.size,
+            "quality": req.quality,
+            "client": self._client,
+            "api_base": self._base,
+            "timeout": self._timeout,
+        }
+        if not req.model.startswith("gpt-image"):  # raw, like dimensions: no model rules
+            arguments["extra_body"] = {"response_format": "b64_json"}
+        try:
+            resp = await self._litellm.aimage_generation(**arguments)
+        except Exception as exc:
+            raise self.classify_error(exc) from exc
+        return self._image_response(resp.model_dump(), req)
 
     def classify_error(self, exc: BaseException) -> ProviderError:
         """LiteLLM raises the OpenAI SDK's exception types: a status error is mapped from its

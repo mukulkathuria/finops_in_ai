@@ -37,6 +37,7 @@ _FETCH_TIMEOUT_S: Final = 30.0
 
 Price = Annotated[int, Field(ge=0, le=10**12)]  # micro-USD per 1M tokens (images: each)
 Count = Annotated[int, Field(ge=0, le=2**31 - 1)]
+ImageOption = Annotated[str, Field(pattern=r"^(auto|[0-9]{2,5}x[0-9]{2,5})/[a-z]{1,20}$")]
 
 
 class _Entry(BaseModel):
@@ -49,6 +50,7 @@ class _Entry(BaseModel):
     price_cached_input: Price | None = None
     price_cache_write: Price | None = None
     price_image: Price | None = None
+    image_prices: dict[ImageOption, Price] | None = Field(default=None, max_length=50)
     tier_threshold_tokens: Annotated[int, Field(gt=0, le=2**31 - 1)] | None = None
     tier_price_input: Price | None = None
     tier_price_output: Price | None = None
@@ -87,7 +89,9 @@ def parse_price_list(raw: bytes) -> list[PriceEntry]:
         if key in seen:
             raise ValueError(f"invalid price list: {e.provider}/{e.model} is listed twice")
         seen.add(key)
-        price = ModelPrice(catalog_version=0, **e.model_dump(exclude={"effective_from"}))
+        fields = e.model_dump(exclude={"effective_from", "image_prices"})
+        table = tuple(sorted((e.image_prices or {}).items()))
+        price = ModelPrice(catalog_version=0, **fields, image_prices=table)
         entries.append(PriceEntry(price, e.effective_from))
     return entries
 

@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     reranker_model: str = "bge-reranker-v2-m3"
     reranker_api_key: SecretStr | None = None
     reranker_timeout_s: float = Field(default=10.0, gt=0, le=120)
+    # Image prompt moderation (US-24): built-in rules, or an OpenAI-compatible moderation
+    # API (POST {base}/moderations). Without a verdict an image request fails closed.
+    moderation_backend: Literal["rules", "openai_compat"] = "rules"
+    moderation_base_url: str | None = None
+    moderation_api_key: SecretStr | None = None
+    moderation_model: str = "omni-moderation-latest"
+    moderation_timeout_s: float = Field(default=5.0, gt=0, le=60)
     max_indexed_chunks_per_org: int = Field(default=1_000_000, ge=1, le=1_000_000_000)
 
     # Savings (US-17): what the gateway's own work costs (micro-USD), subtracted from
@@ -145,6 +152,12 @@ class Settings(BaseSettings):
     @property
     def is_production_like(self) -> bool:
         return self.environment in (Environment.STAGING, Environment.PRODUCTION)
+
+    @model_validator(mode="after")
+    def _moderation_needs_a_service(self) -> Settings:
+        if self.moderation_backend == "openai_compat" and not self.moderation_base_url:
+            raise ValueError("MODERATION_BACKEND=openai_compat needs MODERATION_BASE_URL")
+        return self
 
     @model_validator(mode="after")
     def _refuse_unsafe_production(self) -> Settings:

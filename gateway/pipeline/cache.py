@@ -5,7 +5,7 @@ entry's key; spec section 5, "Retention and privacy"); one that cannot be opened
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import orjson
@@ -17,12 +17,13 @@ from gateway.domain.cache import (
     CacheKeys,
     CacheSettings,
     cache_keys,
+    image_cache_keys,
     response_from,
     response_record,
     single_turn_question,
 )
 from gateway.domain.guardrails import GuardrailPolicy
-from gateway.domain.llm import CanonicalRequest, CanonicalResponse
+from gateway.domain.llm import CanonicalRequest, CanonicalResponse, ImageRequest, ImageResponse
 from gateway.domain.parsing import text_tokens
 from gateway.ports.embeddings import Embedder
 
@@ -95,18 +96,25 @@ class ResponseCache:
         (embedding,) = await self._embedder.embed([question])
         return Lookup(settings, keys, embedding, text_tokens(question))
 
-    def _open(
-        self, org_id: UUID, answer: CachedAnswer, request_id: str
-    ) -> CanonicalResponse | None:
+    def _record(self, org_id: UUID, answer: CachedAnswer, request_id: str) -> Any:
         sealed = Sealed(answer.ciphertext, answer.wrapped_key, answer.key_id)
         try:
-            record = orjson.loads(self._envelope.open(sealed, _aad(org_id, answer.key_hash)))
-            return response_from(record, response_id=request_id)
-        except DecryptionError, ValueError, KeyError, TypeError:
+            return orjson.loads(self._envelope.open(sealed, _aad(org_id, answer.key_hash)))
+        except DecryptionError, ValueError:
             # A master key no longer configured, or a damaged entry: the answer is gone.
             log.warning(
                 "a cached answer could not be opened; a miss", extra={"request_id": request_id}
             )
+            return None
+
+    def _open(
+        self, org_id: UUID, answer: CachedAnswer, request_id: str
+    ) -> CanonicalResponse | None:
+        record = self._record(org_id, answer, request_id)
+        try:
+            return response_from(record, response_id=request_id) if record is not None else None
+        except ValueError, KeyError, TypeError:
+            log.warning("a cached answer is unreadable; a miss", extra={"request_id": request_id})
             return None
 
     async def find(self, org_id: UUID, lookup: Lookup, *, request_id: str) -> CacheHit | None:
@@ -143,5 +151,65 @@ class ResponseCache:
                 cost=cost,
                 embedding=lookup.embedding,
                 embedding_model=self._embedder.model if self._embedder else None,
+                ttl_s=lookup.settings.ttl_s,
+            )
+
+    async def prepare_images(
+        self,
+        *,
+        org_id: UUID,
+        team_id: UUID | None,
+        user_id: UUID | None,
+        req: ImageRequest,
+        policy: GuardrailPolicy,
+    ) -> Lookup | None:
+        """US-24: an image request's exact key; None when the org's cache is off (images have no
+        semantic match)."""
+        settings = await self._settings.get(org_id)
+        if settings.mode == "off":
+            return None
+        keys = image_cache_keys(
+            org_id=org_id, team_id=team_id, user_id=user_id, req=req, policy=policy.to_dict()
+        )
+        return Lookup(settings, keys, None, 0)
+
+    async def find_images(
+        self, org_id: UUID, lookup: Lookup, *, request_id: str
+    ) -> tuple[ImageResponse, int] | None:
+        async with self._db.transaction(TenantContext(org_id)) as conn:
+            exact = await self._repo.exact(conn, lookup.keys.exact)
+        record = self._record(org_id, exact, request_id) if exact is not None else None
+        if exact is None or not isinstance(record, dict):
+            return None
+        try:
+            response = ImageResponse(
+                model=str(record["model"]),
+                images=tuple(str(i) for i in record["images"]),
+                revised_prompts=tuple(record.get("revised_prompts") or ()),
+            )
+        except KeyError, TypeError:
+            return None
+        return (response, exact.cost) if response.images else None
+
+    async def store_images(
+        self, org_id: UUID, lookup: Lookup, response: ImageResponse, cost: int
+    ) -> None:
+        record = {
+            "model": response.model,
+            "images": list(response.images),
+            "revised_prompts": list(response.revised_prompts),
+        }
+        sealed = self._envelope.seal(orjson.dumps(record).decode(), _aad(org_id, lookup.keys.exact))
+        async with self._db.transaction(TenantContext(org_id)) as conn:
+            await self._repo.store(
+                conn,
+                key=lookup.keys.exact,
+                partition=lookup.keys.partition,
+                ciphertext=sealed.ciphertext,
+                wrapped_key=sealed.wrapped_key,
+                key_id=sealed.key_id,
+                cost=cost,
+                embedding=None,
+                embedding_model=None,
                 ttl_s=lookup.settings.ttl_s,
             )

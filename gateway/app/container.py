@@ -31,6 +31,7 @@ from gateway.adapters.embeddings.openai_compat import OpenAICompatEmbedder
 from gateway.adapters.files.clamav import ClamAV
 from gateway.adapters.files.pdf import PdfProbe
 from gateway.adapters.llm.registry import OrgAdapters, build_adapters
+from gateway.adapters.moderation.registry import build_moderator
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.observability.telemetry import Telemetry
 from gateway.adapters.parsers.registry import build_parsers
@@ -307,6 +308,14 @@ def build_container(
         max_failed_logins=settings.login_max_failures,
     )
     graph_store = PostgresGraphStore(db)
+    moderator = build_moderator(
+        settings.moderation_backend,
+        http=http,
+        base_url=settings.moderation_base_url,
+        api_key=_secret(settings.moderation_api_key),
+        model=settings.moderation_model,
+        timeout_s=settings.moderation_timeout_s,
+    )
     return Container(
         settings=settings,
         db=db,
@@ -368,6 +377,7 @@ def build_container(
                 embedding_per_mtok=settings.embedding_micro_usd_per_mtok,
             ),
             baselines=baselines,
+            moderator=moderator,
             cache=ResponseCache(
                 db=db,
                 repo=cache_repo,

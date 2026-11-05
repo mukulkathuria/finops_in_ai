@@ -43,6 +43,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from gateway.adapters.llm.registry import OrgAdapters
+from gateway.adapters.moderation.rules import RulesModerator
 from gateway.adapters.observability.telemetry import Telemetry
 from gateway.adapters.postgres.budgets import BudgetRepository
 from gateway.adapters.postgres.catalog import CatalogCache
@@ -54,8 +55,9 @@ from gateway.adapters.postgres.usage import UsageEvent, UsageRepository
 from gateway.domain.budgets import BudgetExceeded, Demand, chat_demand, embed_demand
 from gateway.domain.cache import CACHE_STAGES, cacheable
 from gateway.domain.errors import DomainError, NotFound, Unavailable
-from gateway.domain.guardrails import GuardrailPolicy
+from gateway.domain.guardrails import GuardrailBlocked, GuardrailPolicy
 from gateway.domain.idempotency import Idempotency
+from gateway.domain.images import ImageOption, image_demand, image_option
 from gateway.domain.llm import (
     CanonicalChunk,
     CanonicalRequest,
@@ -63,6 +65,8 @@ from gateway.domain.llm import (
     EmbedRequest,
     EmbedResponse,
     FinishReason,
+    ImageRequest,
+    ImageResponse,
     ProviderError,
     ToolCall,
     ToolCallDelta,
@@ -77,6 +81,7 @@ from gateway.domain.savings import (
     cache_hit_report,
     code_context_report,
     file_conversion_report,
+    image_cache_report,
     overhead_cost,
     overhead_inputs,
     provider_cache_report,
@@ -86,10 +91,19 @@ from gateway.domain.savings import (
 from gateway.domain.stages import RequestContext, StageReport
 from gateway.pipeline.cache import CacheHit, Lookup, ResponseCache
 from gateway.pipeline.guardrails import Guardrails, Inspection, OutputFilter, OutputStream
-from gateway.pipeline.idempotency import Origin, dump_chat, dump_embed, load_chat, load_embed
+from gateway.pipeline.idempotency import (
+    Origin,
+    dump_chat,
+    dump_embed,
+    dump_image,
+    load_chat,
+    load_embed,
+    load_image,
+)
 from gateway.pipeline.routing import Verifier, said
 from gateway.pipeline.stages import StageRunner
 from gateway.ports.llm import LLMAdapter
+from gateway.ports.moderation import Moderator
 
 T = TypeVar("T")
 log = logging.getLogger(__name__)
@@ -158,6 +172,14 @@ class EmbedResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageResult:
+    response: ImageResponse
+    cost: int
+    origin: Origin
+    cache_hit: str = "none"
+
+
+@dataclass(frozen=True, slots=True)
 class StreamResult:
     chunks: ChunkStream
     origin: Origin
@@ -205,8 +227,8 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
 
-def _spent(usage: Usage, cost: int) -> Demand:
-    return Demand(usd_micro=cost, tokens=usage.input_tokens + usage.output_tokens)
+def _spent(usage: Usage, cost: int, images: int = 0) -> Demand:
+    return Demand(usd_micro=cost, tokens=usage.input_tokens + usage.output_tokens, images=images)
 
 
 def _measured(req: CanonicalRequest, response: CanonicalResponse) -> Usage:
@@ -438,8 +460,10 @@ class ChatService:
         cache: ResponseCache,
         verifier: Verifier | None = None,
         org_adapters: OrgAdapters | None = None,
+        moderator: Moderator | None = None,
     ) -> None:
         self._org_adapters = org_adapters
+        self._moderator: Moderator = moderator or RulesModerator()
         self._db = db
         self._catalog = catalog
         self._adapters = adapters
@@ -617,6 +641,8 @@ class ChatService:
         result: bytes | None = None,
         cache_hit: str = "none",
         counterfactual: Usage | None = None,
+        images: int = 0,
+        known_baseline: int | None = None,
     ) -> None:
         """Spec section 6, steps 5-6: settle the hold (or release it when nothing was charged),
         append the ledger row and complete (or forget) the idempotency key, atomically."""
@@ -624,6 +650,8 @@ class ChatService:
         baseline, overhead = await self._savings(
             call, usage, charged=charged, counterfactual=counterfactual
         )
+        if known_baseline is not None:  # images are priced per image, not per token
+            baseline = known_baseline
         event = UsageEvent(
             org_id=who.org_id,
             team_id=who.team_id,
@@ -637,6 +665,7 @@ class ChatService:
             catalog_version=r.entry.catalog_version,
             usage=usage,
             cost_micro_usd=cost,
+            images=images,
             baseline_micro_usd=baseline,
             overhead_micro_usd=overhead,
             cache_hit=cache_hit,
@@ -663,7 +692,7 @@ class ChatService:
                     conn, request_id=who.request_id, ts=who.at, reports=reports
                 )
             fired = await self._budgets.settle(
-                conn, hold=call.hold, actual=_spent(usage, cost) if charged else None
+                conn, hold=call.hold, actual=_spent(usage, cost, images) if charged else None
             )
             if call.idem is not None:
                 if result is not None:
@@ -1094,6 +1123,113 @@ class ChatService:
         stored = dump_embed(call.origin, cost, response) if idem is not None else None
         await self._settle(self._end(call, response.usage, cost, "ok", charged=True, result=stored))
         return EmbedResult(response, cost, call.origin)
+
+    async def generate_images(
+        self, who: Attribution, r: Resolved, req: ImageRequest, idem: Idempotency | None = None
+    ) -> ImageResult:
+        """US-24: the prompt passes the guardrails and moderation before any spend, the budgets
+        hold the images and their price, the org's exact cache may answer, and the ledger counts
+        the images. Each image costs its catalog price for the size and quality."""
+        option = image_option(r.entry, req.size, req.quality)
+        req = replace(req, size=option.size, quality=option.quality)
+        call = await self._begin(who, r, "image", image_demand(option, req.n), idem)
+        if isinstance(call, bytes):
+            return ImageResult(*load_image(call))
+        async with self._settles_on_failure(call):
+            prompts, decisions, blocked = await self._guardrails.inspect_inputs(
+                who.org_id, (req.prompt,), request_id=who.request_id
+            )
+            call.decisions.extend(decisions)
+            if blocked is None:  # no verdict raises: the request fails closed, nothing charged
+                blocked = await self._moderate(call, prompts[0])
+        if blocked is not None:
+            await self._block(call, blocked)
+        req = replace(req, prompt=prompts[0])
+        async with self._settles_on_failure(call):
+            policy = await self._guardrails.policy(who.org_id)
+            lookup = await self._cache.prepare_images(
+                org_id=who.org_id, team_id=who.team_id, user_id=who.user_id, req=req, policy=policy
+            )
+            hit = (
+                await self._cache.find_images(who.org_id, lookup, request_id=who.request_id)
+                if lookup is not None
+                else None
+            )
+        if hit is not None:
+            return await self._images_served(call, hit[0], option)
+        with self._telemetry.provider_call("images", r.entry.provider, r.entry.model) as span:
+            response = await self._call_provider(call, lambda: r.adapter.generate_images(req))
+            response = replace(
+                response,
+                images=response.images[: req.n],
+                revised_prompts=response.revised_prompts[: req.n],
+            )
+            made = len(response.images)
+            cost = option.price * made
+            self._telemetry.annotate(span, Usage(), cost, None)
+        stored = dump_image(call.origin, cost, response) if idem is not None else None
+        await self._settle(
+            self._end(
+                call,
+                Usage(),
+                cost,
+                "ok",
+                charged=True,
+                result=stored,
+                images=made,
+                known_baseline=cost,
+            )
+        )
+        if lookup is not None:
+            try:
+                await self._cache.store_images(who.org_id, lookup, response, cost)
+            except Exception:  # losing the entry never loses the images
+                log.exception("caching images failed", extra={"request_id": who.request_id})
+        return ImageResult(response, cost, call.origin)
+
+    async def _moderate(self, call: _Call, prompt: str) -> DomainError | None:
+        """The moderation verdict on an image prompt, kept with the guardrails' decisions: the
+        error that refuses the prompt, or None."""
+        verdict = await self._moderator.check(prompt)
+        decision: dict[str, object] = {
+            "check": "moderation",
+            "backend": self._moderator.name,
+            "action": "block" if verdict.flagged else "allow",
+        }
+        if verdict.flagged:
+            decision["categories"] = list(verdict.categories)
+        call.decisions.append(decision)
+        if not verdict.flagged:
+            return None
+        named = f" ({', '.join(verdict.categories)})" if verdict.categories else ""
+        return GuardrailBlocked(
+            f"the prompt is refused by the content policy{named}",
+            code="content_blocked",
+            details={"categories": list(verdict.categories)},
+        )
+
+    async def _images_served(
+        self, call: _Call, response: ImageResponse, option: ImageOption
+    ) -> ImageResult:
+        """Images from the exact cache: nothing is charged and no image counts against a quota;
+        the baseline is what generating them would cost."""
+        full = option.price * len(response.images)
+        call.reports.append(image_cache_report(full, len(response.images)))
+        stored = dump_image(call.origin, 0, response) if call.idem is not None else None
+        await self._settle(
+            self._end(
+                call,
+                Usage(),
+                0,
+                "ok",
+                charged=False,
+                result=stored,
+                cache_hit="exact",
+                counterfactual=Usage(),
+                known_baseline=full,
+            )
+        )
+        return ImageResult(response, 0, call.origin, cache_hit="exact")
 
     async def drain(self) -> None:
         """Graceful shutdown: no new quality check starts, and every write in flight is awaited,

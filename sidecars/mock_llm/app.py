@@ -331,6 +331,21 @@ async def images(request: Request) -> Response:
     return _json({"created": int(time.time()), "data": data})
 
 
+@app.post("/v1/moderations", response_model=None)
+async def moderations(request: Request) -> Response:
+    """OpenAI's moderation shape: `[[mock:flagged]]` flags the input, `[[mock:moderation_down]]`
+    is an outage."""
+    if not _authorized(request):
+        return _error(401, "invalid_api_key", "Missing bearer token", "invalid_request_error")
+    body = orjson.loads(await request.body())
+    text = str(body.get("input", ""))
+    if "[[mock:moderation_down]]" in text:
+        return _error(503, "unavailable", "the moderation model is down", "server_error")
+    flagged = "[[mock:flagged]]" in text
+    result = {"flagged": flagged, "categories": {"violence": flagged, "hate": False}}
+    return _json({"id": "modr-mock", "model": body.get("model"), "results": [result]})
+
+
 # Deterministic stand-in for Laya and Jev (the SystemOne protocol): keyword heuristics, not a model.
 _INJECTION_HINTS = re.compile(
     r"no restrictions|without restrictions|no limits|without limits|new persona|system override"

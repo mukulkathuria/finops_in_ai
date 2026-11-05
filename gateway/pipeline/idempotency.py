@@ -7,7 +7,7 @@ from typing import Any
 
 import orjson
 
-from gateway.domain.llm import CanonicalResponse, EmbedResponse, ToolCall, Usage
+from gateway.domain.llm import CanonicalResponse, EmbedResponse, ImageResponse, ToolCall, Usage
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,5 +81,24 @@ def load_embed(raw: bytes) -> tuple[EmbedResponse, int, Origin]:
         model=stored["model"],
         vectors=tuple(tuple(float(x) for x in v) for v in stored["vectors"]),
         usage=Usage(**stored["usage"]),
+    )
+    return response, int(stored["cost"]), _origin(stored)
+
+
+def dump_image(origin: Origin, cost: int, response: ImageResponse) -> bytes:
+    record = {
+        "model": response.model,
+        "images": list(response.images),
+        "revised_prompts": list(response.revised_prompts),
+    }
+    return _envelope(origin, cost, record)
+
+
+def load_image(raw: bytes) -> tuple[ImageResponse, int, Origin]:
+    stored = orjson.loads(raw)
+    response = ImageResponse(
+        model=stored["model"],
+        images=tuple(stored["images"]),
+        revised_prompts=tuple(stored.get("revised_prompts") or ()),
     )
     return response, int(stored["cost"]), _origin(stored)

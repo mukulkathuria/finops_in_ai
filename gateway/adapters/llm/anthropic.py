@@ -23,6 +23,8 @@ from gateway.domain.llm import (
     EmbedResponse,
     FinishReason,
     ImagePart,
+    ImageRequest,
+    ImageResponse,
     Message,
     ModelCapabilities,
     ProviderError,
@@ -252,6 +254,11 @@ class AnthropicAdapter:
             ProviderErrorKind.BAD_REQUEST,
             "Anthropic does not offer an embeddings API",
             provider=self._name,
+        )
+
+    async def generate_images(self, req: ImageRequest) -> ImageResponse:
+        raise ProviderError(
+            ProviderErrorKind.BAD_REQUEST, "Anthropic does not generate images", provider=self._name
         )
 
     def normalize_usage(self, raw: Mapping[str, Any]) -> Usage:

@@ -40,6 +40,7 @@ class ModelPrice:
     tier_price_output: int | None = None
     context_window: int = 0
     max_output_tokens: int = 0
+    image_prices: tuple[tuple[str, int], ...] = ()  # "WxH/quality": micro-USD per image
 
     @property
     def public_name(self) -> str:

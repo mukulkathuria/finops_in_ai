@@ -282,6 +282,25 @@ A request with an `Origin` header is refused (403), so no web page can drive the
 server to Claude Code: `claude mcp add --transport http finops https://<gateway>/v1/mcp --header
 "Authorization: Bearer <key>"`.
 
+## Image generation
+
+`POST /v1/images/generations` takes the OpenAI request (`model`, `prompt`, `n` up to 4, `size`,
+`quality`) and answers with base64 images (`b64_json`; `url` is not offered).
+
+1. The prompt passes the guardrails, as any input does, and then moderation: the built-in rules
+   (`MODERATION_BACKEND=rules`) or an OpenAI-compatible moderation API (`openai_compat`). A
+   flagged prompt is a 400 `content_blocked` that names its categories. With no verdict (the
+   API is down) the request fails closed with a 503. Neither charges anything.
+2. Budgets in the `images` unit hold the images per member and per team, as money budgets hold
+   the price. Both are reserved before the provider is called, so concurrent requests cannot pass
+   a quota together.
+3. Each image costs its catalog price for its size and quality: `capabilities.image_prices`,
+   which the price list carries as `"image_prices": {"1024x1024/hd": 80000}`. A model without a
+   table charges `price_image` for every image. The ledger row counts the images (`kind`
+   `image`).
+4. With the org's response cache on, the same prompt and options from the same caller come back
+   from the cache at no cost (`x-finops-cache: exact`), sealed like cached chat answers.
+
 ## Optimization stages (shadow mode and the eval gate)
 
 Every optimization is a stage with one contract (spec section 4): it may make the request cheaper

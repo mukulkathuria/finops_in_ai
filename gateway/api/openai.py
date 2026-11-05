@@ -23,11 +23,13 @@ from gateway.api.files import Parsing, file_owner
 from gateway.api.projects import Code
 from gateway.domain.errors import InvalidInput, MalformedRequest
 from gateway.domain.idempotency import Idempotency
+from gateway.domain.images import MAX_IMAGES, MAX_PROMPT_CHARS
 from gateway.domain.llm import (
     CanonicalRequest,
     ContentPart,
     EmbedRequest,
     ImagePart,
+    ImageRequest,
     Message,
     TextPart,
     ToolCall,
@@ -104,6 +106,19 @@ class ChatRequest(BaseModel):
     stream_options: dict[str, Any] | None = None
     retrieval: _RetrievalIn | None = None
     code_context: _CodeContextIn | None = None
+
+
+class ImagesRequest(BaseModel):
+    """`POST /v1/images/generations` (OpenAI shape). Images come back as base64 data only."""
+
+    model_config = ConfigDict(extra="ignore")
+    model: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
+    n: int = Field(default=1, ge=1, le=MAX_IMAGES)
+    size: str | None = Field(default=None, pattern=r"^(auto|[0-9]{2,5}x[0-9]{2,5})$")
+    quality: str | None = Field(default=None, pattern=r"^[a-z]{1,20}$")
+    response_format: Literal["b64_json"] = "b64_json"
+    user: str | None = Field(default=None, max_length=256)
 
 
 class EmbeddingsRequest(BaseModel):
@@ -539,6 +554,38 @@ async def embeddings(request: Request, caller: ModelCaller, chat: Chat) -> Respo
     }
     if result.origin.replayed:
         headers["idempotent-replayed"] = "true"
+    return Response(orjson.dumps(payload), media_type="application/json", headers=headers)
+
+
+@router.post("/v1/images/generations", response_model=None)
+async def images_generations(request: Request, caller: ModelCaller, chat: Chat) -> Response:
+    """US-24: moderated, held to the image quotas and priced per image."""
+    body = _validate(ImagesRequest, await _json(request))
+    resolved = await chat.resolve(body.model, "image", caller.org_id)
+    result = await chat.generate_images(
+        _who(caller, request),
+        resolved,
+        ImageRequest(resolved.entry.model, body.prompt, body.n, body.size, body.quality),
+        _idempotency(request, caller, await request.body()),
+    )
+    images = result.response.images
+    revised = [*result.response.revised_prompts, *([None] * len(images))]
+    data = [
+        {"b64_json": image, **({"revised_prompt": revised[i]} if revised[i] else {})}
+        for i, image in enumerate(images)
+    ]
+    payload = {"created": int(result.origin.at.timestamp()), "data": data}
+    headers = {
+        "x-finops-cost-micro-usd": str(result.cost),
+        "x-finops-cost-usd": usd(result.cost),
+        "x-finops-provider": resolved.entry.provider,
+        "x-finops-model": resolved.entry.public_name,
+        "x-finops-images": str(len(images)),
+    }
+    if result.origin.replayed:
+        headers["idempotent-replayed"] = "true"
+    if result.cache_hit != "none":
+        headers["x-finops-cache"] = result.cache_hit
     return Response(orjson.dumps(payload), media_type="application/json", headers=headers)
 
 

@@ -140,6 +140,22 @@ class EmbedResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageRequest:
+    model: str
+    prompt: str
+    n: int = 1
+    size: str | None = None  # "WxH"
+    quality: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageResponse:
+    model: str
+    images: tuple[str, ...]  # base64-encoded image data
+    revised_prompts: tuple[str | None, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ModelCapabilities:
     chat: bool = True
     embeddings: bool = False
