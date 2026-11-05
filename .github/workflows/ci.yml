@@ -73,6 +73,8 @@ jobs:
           uv run alembic downgrade base
           uv run alembic upgrade head
           uv run python scripts/audit_rls.py
+      - name: Restore drill (back up, restore into a new database, compare everything)
+        run: DB_CONTAINER=pg scripts/restore_drill.sh
 
   security:
     name: SAST, dependency and secret scans

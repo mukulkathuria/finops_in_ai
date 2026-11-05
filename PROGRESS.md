@@ -40,6 +40,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-25 a shared workspace for agents: workspaces shared like documents; tasks; facts kept once per content, found by key or by exact vector search as snippets; file summaries; questions between agents deduplicated per task and addressee, with a loop refusal and a 3-hop limit; discovery tokens per task and agent, capped by a per-agent task budget and reported per task; served by the MCP broker (migration 0025) | `feat(US-25)` | `tests/unit/test_workspace.py`, `tests/integration/test_us25_workspace.py` |
 | US-24 image generation with quotas: `POST /v1/images/generations` (OpenAI shape, base64 images); prompts pass the guardrails and moderation (built-in rules or an OpenAI-compatible moderation API, failing closed) before any spend; image budgets per member and team are reserved like money, so concurrent requests cannot pass a quota; each image is priced from the catalog by size and quality (migration 0024, `image_prices` in the price list) and counted in the ledger; the org's exact cache serves a repeat at no cost | `feat(US-24)` | `tests/unit/test_images.py`, `tests/contract/test_llm_contract.py`, `tests/integration/test_us24_images.py` |
 | US-27 SSO login: OpenID Connect per org (the authorization code flow with PKCE; the ID token checked against the provider's published keys, then its issuer, audience, times and nonce); `(issuer, subject)` mapped to an existing user through `identities`, linked at a first sign-in by a verified email in an allowed domain, never a new account; a one-time code traded once for the session, so no token in a URL; local login off per org, admins keep it; client secret sealed; provider fetches to public addresses only (migration 0028) | `feat(US-27)` | `tests/unit/test_sso.py`, `tests/integration/test_us27_sso.py`, `web/src/__tests__/Sso.test.tsx` |
+| US-30 Terraform for dev and staging: one module provisions the whole stack on a Docker host from empty (private network; database; migrations as a one-shot container that must exit 0; gateway, worker, dashboard, mock provider, parser), generates every password and key, and destroys it leaving no container, volume or network behind; a second apply changes nothing; `staging` runs production-like settings | `feat(US-30)`, `fix(US-30)` | `.github/workflows/terraform.yml` (dev and staging: from empty, checked, re-applied with no change, destroyed, nothing left), `infra/terraform/`, `docs/runbooks/deploy.md` |
 | Phase 5 review loop: migration 0026 keeps every chunk when run as `migrator` (FORCE RLS lifted for the copy, keys before rows, counts checked) and data-moving migrations are rehearsed with data; images priced as rendered (a flat price covers the default image only, a table's cheapest option is named to the provider), image price changes guarded per option, renders retried only on a rate limit, big image answers not cached, moderation rules read folded spellings; workspace agent names bound to members per task, writes record their member, reads pass the passage screen, a repeated search runs again after a new fact, workspaces and tasks bounded, the heavy limit on `put_fact`, workspaces deletable (migration 0027) | `fix(phase-4)`, `fix(US-24)`, `fix(US-25)` | `docs/audits/2026-11-05-phase5-review.md`, `docs/adr/0009-agent-workspace-trust-and-accepted-risks.md`, `tests/integration/test_migrations.py`, `tests/integration/test_phase5_review.py`, `tests/unit/test_images.py`, `tests/unit/test_price_sync.py`, `tests/unit/test_mcp.py` |
 | Phase 4 latency gate (spec section 11) at 1M chunks and 1M edges: pack read p95 1.7 ms, 2 and 3 hops 2.4 and 3.4 ms, filtered vector search p95 41.4 ms (482 ms before: `chunks` hash-partitioned by org with HNSW on `halfvec`, then the ordered index scan instead of a sort) | `perf(phase-4)` | `docs/audits/2026-11-05-phase5-review.md` (each tuning step with its numbers), `tests/load/bench_context.py` (`bench` workflow) |
 | Phase 4 review loop: Python parsed in an isolated probe process (deadline, memory cap, two at a time, files over 512,000 characters left out); frame neutralizing linear; text reaching the database one clean line; `code_context` cost-neutral in the ledger; packs cut at a line end, never dropped for size; whole names found first; walks of 2-3 hops from at most 20 vertices; project names unique per owner and edge indexes covering `project_id` (migration 0023); MCP tools screened like chat and not cached; reranker scores held to 0-1; seeded latency benchmark (`bench` workflow) | `fix(phase-4)` | `docs/audits/2026-11-05-phase4-review.md`, `tests/unit/test_code_probe.py`, `tests/load/bench_context.py`, `tests/integration/test_bench_context.py` |
@@ -105,7 +106,14 @@ Plan: `docs/superpowers/plans/2026-11-05-phase6-hardening.md`. Earlier plans:
 
 ## Remaining stories
 
-Phase 6: US-30, the load, race and soak tests, and the release audit (spec section 12, step 7).
+Phase 6 has three items left:
+- the load, race and failure-under-load profiles, which run in the `load` workflow (a soak runs
+  by hand);
+- the `pg_upgrade` rehearsals: PostgreSQL 18 to 19 can be done now; the move from the RC to GA
+  waits for GA;
+- the release audit (spec section 12, step 7).
+
+Runbooks and the restore drill are in `docs/runbooks/` and `scripts/restore_drill.sh`.
 
 ## Findings and deviations from the spec
 
@@ -142,5 +150,9 @@ Phase 6: US-30, the load, race and soak tests, and the release audit (spec secti
 
 ## Blocked
 
-Nothing blocked. Real provider keys, GPUs for OCR sidecars and cloud credentials are not available
-here; those adapters are verified with contract suites against recorded fixtures.
+PostgreSQL 19 GA has not shipped. RC2 is due 2026-11-12 and GA is planned for 2026-11-19
+(postgresql.org, RC1 news). Two spec items wait for it: the re-test on GA, and the RC-to-GA
+upgrade rehearsal. `docs/runbooks/postgres-upgrade.md` holds the steps.
+
+Real provider keys, GPUs for OCR sidecars and cloud credentials are not available here. Those
+adapters are verified with contract suites against recorded fixtures.

@@ -1,6 +1,7 @@
 # Spec section 11 load profiles at CI scale against the compose stack, the mock provider answering
-# in a fixed 50 ms: the baseline, a spike, the budget race and a database restart under load.
-# Weekly, on demand, and on any change to the profiles (tests/load/k6/README.md).
+# in a fixed 50 ms: the baseline, a spike, the budget race and a database restart under load. Then
+# the restore drill on the filled database (docs/runbooks/restore.md; CI also runs it on every
+# push). Weekly, on demand, and on any change to the profiles or this workflow.
 name: load
 
 on:
@@ -55,6 +56,12 @@ jobs:
             docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}'
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Restore drill on the database the profiles filled (writers stopped)
+        shell: bash  # with pipefail, so a failed drill fails the step through the tee
+        run: |
+          docker compose stop gateway worker
+          { echo '### Restore drill'; echo '```'; scripts/restore_drill.sh; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
       - name: Logs of a failed run
         if: failure()
         run: docker compose logs --tail 120 gateway worker db

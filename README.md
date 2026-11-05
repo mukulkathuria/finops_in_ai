@@ -71,6 +71,25 @@ scripts/env.sh down staging    # destroy it; `gone staging` proves nothing is le
 `staging` runs production-like settings. The `terraform` workflow provisions, checks and
 destroys both environments on every change. See `docs/runbooks/deploy.md`.
 
+## Operations (runbooks)
+
+| Runbook | Covers |
+| --- | --- |
+| `docs/runbooks/deploy.md` | Provisioning dev and staging with Terraform |
+| `docs/runbooks/restore.md` | What to back up; restoring next to the live database, then swapping; the restore drill |
+| `docs/runbooks/incident.md` | Provider outage, runaway spend, database down, leaked keys and secrets, disabling a user, JWT and master key rotation |
+| `docs/runbooks/postgres-upgrade.md` | Moving from the PostgreSQL 19 pre-release to GA |
+
+`scripts/restore_drill.sh` backs up the database and restores the backup into a new database.
+It then proves the copy identical:
+
+- schema, grants, row security and policies;
+- every table's rows, by count and by content hash;
+- the ledger totals of every org.
+
+CI runs the drill on every push. The `load` workflow runs it on the database its profiles have
+filled.
+
 ## Development
 
 | Task | Command |
@@ -560,4 +579,7 @@ list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
   `GraphStore` port using indexed joins and recursive CTEs, which run on PG16+ including PG19.
 - **Secrets** live only in `.env` (gitignored) or your secret manager. `.env.example` holds
   placeholders only. Provider keys are stored with envelope encryption and never returned.
+- **Comments in `.env`.** Put a comment after an empty setting on its own line. Compose reads
+  `KEY=   # note` as the value `# note`, while python-dotenv reads it as empty. A unit test keeps
+  `.env.example` free of that shape.
 - This is engineering guidance, not legal advice; have counsel review compliance claims.
