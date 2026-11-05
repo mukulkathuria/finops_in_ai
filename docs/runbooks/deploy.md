@@ -64,3 +64,18 @@ and a failed migration stops the apply before the gateway is replaced. Volumes, 
 the database and the stored files, are kept.
 
 Before an upgrade that changes the database, take a backup (`docs/runbooks/restore.md`).
+
+## Scaling the gateway
+
+- **One process per container.** Run each gateway container with `WEB_CONCURRENCY=1` (the
+  default), and scale with replicas behind a proxy or load balancer that balances requests.
+  Several uvicorn processes in one container share connections, not requests, so a few busy
+  keep-alive connections can pin one process while another idles. The `load` workflow measures
+  this topology: two replicas behind the dashboard's nginx.
+- **Trust the proxy's address.** Add it to `FORWARDED_ALLOW_IPS`. Otherwise per-address limits
+  on sign-in see the proxy as the only client.
+- **Size the pools.** Each replica opens up to `DB_POOL_SIZE` plus `DB_MAX_OVERFLOW` connections
+  (20 + 10 by default). Keep replicas × 30, plus the worker and the migrations, under
+  PostgreSQL's `max_connections` (300 in compose).
+- **One worker is enough** for the janitor and the outbox. A second is safe, because its jobs
+  lock the rows they take (`FOR UPDATE SKIP LOCKED`).

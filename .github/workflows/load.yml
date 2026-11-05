@@ -29,15 +29,20 @@ jobs:
     name: baseline, spike, budget race and failure under load
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    env:
+      # Two gateway replicas behind the dashboard's nginx (tests/load/compose.load.yml); k6 goes
+      # through nginx, as production traffic goes through a proxy.
+      COMPOSE_FILE: docker-compose.yml:tests/load/compose.load.yml
+      BASE_URL: http://127.0.0.1:5173
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Start the stack (open signup; the mock provider answers in 50 ms, embeddings in 10)
+      - name: Start the stack (two gateway replicas; the provider answers in 50 ms, embeddings and the classifier in 10)
         id: stack
         run: |
           python3 scripts/init_env.py
           printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
-            MOCK_EMBED_LATENCY_MS=10 MOCK_CLASSIFIER_LATENCY_MS=10 WEB_CONCURRENCY=2 >> .env
-          docker compose up -d --build --wait --wait-timeout 900
+            MOCK_EMBED_LATENCY_MS=10 MOCK_CLASSIFIER_LATENCY_MS=10 >> .env
+          docker compose up -d --build --wait --wait-timeout 900 --scale gateway=2
       # Each profile runs whenever the stack is up, so one run reports them all; any failure
       # still fails the job.
       - name: Baseline (100 users)
@@ -63,10 +68,10 @@ jobs:
           (sleep 60 && docker compose restart db) &
           tests/load/k6/run.sh failover -e RATE=40
           wait
-      - name: Where the gateway spent its time (average per stage)
+      - name: Where the gateway spent its time (average per stage, the first replica)
         if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
         run: |
-          curl -fsS http://127.0.0.1:8080/metrics | python3 -c '
+          docker compose exec -T gateway python -c "import sys, urllib.request; sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:8080/metrics').read().decode())" | python3 -c '
           import re, sys
           sums, counts = {}, {}
           for line in sys.stdin:

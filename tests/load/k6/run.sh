@@ -11,13 +11,14 @@ image="${K6_IMAGE:-grafana/k6:2.3.0}"
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp)"
 status=0
-docker run --rm --network host -v "$here:/k6:ro" "$image" run "$@" "/k6/$profile.js" 2>&1 |
+docker run --rm --network host -v "$here:/k6:ro" "$image" run \
+  ${BASE_URL:+-e "BASE_URL=$BASE_URL"} "$@" "/k6/$profile.js" 2>&1 |
   tee "$out" || status=$?
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     echo "### $profile (exit $status)"
     echo '```'
-    grep -E "[✓✗]|gateway_overhead_ms|errors|unexpected_answers|http_reqs|iterations|committed" "$out" |
+    grep -E "[✓✗]|gateway_overhead|errors|unexpected_answers|http_reqs|iterations|committed" "$out" |
       tail -40
     echo '```'
   } >>"$GITHUB_STEP_SUMMARY"

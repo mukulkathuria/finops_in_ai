@@ -41,5 +41,19 @@ The `load` workflow runs every profile at CI scale (100 users, 60 requests a sec
 and on any change to these scripts. Each run adds a summary to its job page. A soak needs
 hours, so it runs by hand.
 
+The workflow runs two gateway replicas, one process each, behind the dashboard's nginx
+(`tests/load/compose.load.yml`, `--scale gateway=2`). k6 reaches them through nginx
+(`BASE_URL=http://127.0.0.1:5173`), as production traffic reaches replicas through a proxy. Run
+it the same way by hand:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:tests/load/compose.load.yml BASE_URL=http://127.0.0.1:5173
+docker compose up -d --build --wait --scale gateway=2
+```
+
+Several uvicorn processes in one container share connections, not requests. A few busy
+keep-alive connections can then pin one process while another idles. Scale the gateway with
+replicas behind a balancing proxy instead.
+
 Each profile creates its own org, team and keys through the API. Every user has its own key, so
 the per-credential rate limit is not what is measured.

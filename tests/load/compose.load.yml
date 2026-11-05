@@ -1,0 +1,7 @@
+# The load profiles' topology (.github/workflows/load.yml): gateway replicas, one process each,
+# behind the dashboard's nginx, which spreads requests across them as a production proxy or load
+# balancer does. Several uvicorn processes in one container share connections, not requests, so
+# a few busy keep-alive connections can pin one process while another idles.
+services:
+  gateway:
+    ports: !reset []
