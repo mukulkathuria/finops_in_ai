@@ -323,7 +323,9 @@ class Guardrails:
             self._telemetry.metrics.guardrail_decisions.labels(
                 str(d["stage"]), str(d["check"]), str(d["action"]), str(d["backend"])
             ).inc()
-            log.info(
+            # A pass is counted in the metric above; only what changed a request is an event.
+            log.log(
+                logging.DEBUG if d["action"] == "passed" else logging.INFO,
                 "guardrail decision",
                 extra={
                     "request_id": request_id,

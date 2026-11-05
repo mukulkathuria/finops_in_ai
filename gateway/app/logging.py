@@ -67,3 +67,8 @@ def configure_logging(level: str, service: str) -> None:
         server_logger.handlers.clear()
         server_logger.propagate = True
     logging.getLogger("uvicorn.access").disabled = True  # the gateway writes its own access line
+    if root.level > logging.DEBUG:
+        # A line per outbound HTTP call (provider, embedder, classifier) would double the volume;
+        # the gateway records those calls in its own telemetry. LOG_LEVEL=DEBUG keeps them.
+        for name in ("httpx", "httpx2", "httpcore", "httpcore2"):
+            logging.getLogger(name).setLevel(logging.WARNING)

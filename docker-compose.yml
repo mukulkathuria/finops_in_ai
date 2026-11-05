@@ -112,6 +112,7 @@ services:
       MOCK_LATENCY_MS_MAX: ${MOCK_LATENCY_MS_MAX:-80}
       MOCK_STREAM_CHUNK_DELAY_MS: ${MOCK_STREAM_CHUNK_DELAY_MS:-2}
       MOCK_EMBED_LATENCY_MS: ${MOCK_EMBED_LATENCY_MS:-10}
+      MOCK_CLASSIFIER_LATENCY_MS: ${MOCK_CLASSIFIER_LATENCY_MS:-10}
 
   # Document parsing (US-15, US-16): MarkItDown, PDF text layers, and OCR through an
   # OpenAI-compatible vision model (the mock provider here; vLLM serving GLM-OCR or

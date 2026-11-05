@@ -36,7 +36,7 @@ jobs:
         run: |
           python3 scripts/init_env.py
           printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
-            MOCK_EMBED_LATENCY_MS=10 WEB_CONCURRENCY=2 >> .env
+            MOCK_EMBED_LATENCY_MS=10 MOCK_CLASSIFIER_LATENCY_MS=10 WEB_CONCURRENCY=2 >> .env
           docker compose up -d --build --wait --wait-timeout 900
       # Each profile runs whenever the stack is up, so one run reports them all; any failure
       # still fails the job.

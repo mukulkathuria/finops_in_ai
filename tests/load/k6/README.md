@@ -4,8 +4,10 @@ k6 scripts against the running stack. The mock provider answers in a fixed delay
 gateway's overhead is a request's time beyond it.
 
 That overhead includes the embedding of each question, since the semantic cache embeds it,
-in shadow mode too. The mock answers embeddings in 10 ms, as a GPU embedding server does for a
-short query. The workflow's job summary lists the average time of every gateway stage.
+in shadow mode too. It also includes the injection classifier's answer. The mock answers both in
+10 ms, as a GPU embedding server and a small classifier do for a short text. The workflow's job
+summary lists the average time of every gateway stage, and the CPU of each container halfway
+through the baseline.
 
 | Profile | Script | What it proves |
 | --- | --- | --- |
