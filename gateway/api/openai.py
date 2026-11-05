@@ -289,10 +289,12 @@ def _who(caller: Caller, request: Request) -> Attribution:
 
 
 def _idempotency(request: Request, caller: Caller, body: bytes) -> Idempotency | None:
-    """An Idempotency-Key belongs to one credential: equal keys of two callers never meet."""
+    """An Idempotency-Key belongs to one credential: equal keys of two callers never meet. It
+    also commits to the team the request is charged to (a member of several teams names it)."""
     owner = f"key:{caller.api_key_id}" if caller.api_key_id else f"user:{caller.user_id}"
+    route = f"{request.url.path} team:{caller.team_id}"
     return Idempotency.from_header(
-        request.headers.get("idempotency-key"), caller=owner, route=request.url.path, body=body
+        request.headers.get("idempotency-key"), caller=owner, route=route, body=body
     )
 
 

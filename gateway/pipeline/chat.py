@@ -111,6 +111,9 @@ log = logging.getLogger(__name__)
 _MAX_BACKOFF_S: Final = 4.0
 # A hold must outlive the longest provider call; the janitor returns holds of crashed processes.
 HOLD_TTL: Final = timedelta(minutes=15)
+# A stream ends after this long, before its hold can expire. The margin covers the provider's
+# 120-second read timeout and the settlement.
+MAX_STREAM_S: Final = HOLD_TTL.total_seconds() - 180
 # A dropped connection, a pool or statement timeout or a deadlock: worth another attempt.
 _TRANSIENT: Final = (OperationalError, InterfaceError, PoolTimeoutError)
 
@@ -332,7 +335,14 @@ class _Relay:
     async def __anext__(self) -> CanonicalChunk:
         if self._settled:
             raise StopAsyncIteration
-        if self._started and not self._exhausted:
+        if self._started and not self._exhausted and self._overdue():
+            # Its budget hold expires at HOLD_TTL: end the stream first, as if it had reached
+            # max_tokens, so it settles while the hold still counts and its key is still its own.
+            aclose = getattr(self._upstream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            self._next = CanonicalChunk(finish_reason="length")
+        elif self._started and not self._exhausted:
             try:
                 self._next = await anext(self._upstream, None)
             except asyncio.CancelledError:
@@ -355,6 +365,11 @@ class _Relay:
         chunk = self._filtered(chunk)
         self._track(chunk)
         return chunk
+
+    def _overdue(self) -> bool:
+        if self._finish is not None:  # it already ended (with the length chunk, or upstream)
+            return False
+        return time.perf_counter() - self._call.started > MAX_STREAM_S
 
     def _filtered(self, chunk: CanonicalChunk) -> CanonicalChunk:
         output, text = self._output, self._text
@@ -752,8 +767,10 @@ class ChatService:
         images: int = 0,
         known_baseline: int | None = None,
     ) -> None:
-        """Failure paths: a failed write must not mask the original error. The janitor returns
-        the hold once it expires, and a stale idempotency key can then be taken over."""
+        """A settlement that must not fail the request: a failure path's own error must show, and
+        an answer the provider has given (and billed) must reach the client, or it retries and
+        pays twice. A failed write is logged with the charge, so it can be reconciled; the
+        janitor returns the hold once it expires, and a stale idempotency key can be taken over."""
         try:
             await self._end(
                 call,
@@ -767,7 +784,21 @@ class ChatService:
                 known_baseline=known_baseline,
             )
         except Exception:
-            log.exception("could not settle a request", extra={"request_id": call.who.request_id})
+            who = call.who
+            unrecorded = {
+                "org_id": str(who.org_id),
+                "team_id": str(who.team_id) if who.team_id else None,
+                "model": f"{call.r.entry.provider}/{call.r.entry.model}",
+                "status": status,
+                "cost_micro_usd": cost if charged else 0,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "images": images,
+            }
+            log.exception(
+                "could not settle a request; its charge is not in the ledger",
+                extra={"request_id": who.request_id, "unrecorded": unrecorded},
+            )
 
     async def _settle(self, work: Coroutine[Any, Any, None]) -> None:
         """Run a settlement as its own task and wait for it through a shield: if this request is
@@ -956,7 +987,7 @@ class ChatService:
         except Exception:
             log.exception("scoring a quality check failed", extra={"request_id": of})
         judged.notes["judge"] = {"of": of, "query_tokens": embedded}
-        await self._settle(self._end(judged, usage, cost, "ok", charged=True))
+        await self._settle(self._end_quietly(judged, usage, cost, "ok", charged=True))
         if score is not None:
             await verifier.record(
                 who.org_id,
@@ -1104,7 +1135,7 @@ class ChatService:
             )
         call.decisions.extend(output)
         stored = dump_chat(call.origin, cost, response) if idem is not None else None
-        await self._settle(self._end(call, usage, cost, "ok", charged=True, result=stored))
+        await self._settle(self._end_quietly(call, usage, cost, "ok", charged=True, result=stored))
         await self._remember(call, response, cost)  # so the next identical request hits
         self._verify(call, req, response)
         return ChatResult(response, cost, call.origin)
@@ -1216,7 +1247,9 @@ class ChatService:
             cost = r.entry.cost(response.usage)
             self._telemetry.annotate(span, response.usage, cost, None)
         stored = dump_embed(call.origin, cost, response) if idem is not None else None
-        await self._settle(self._end(call, response.usage, cost, "ok", charged=True, result=stored))
+        await self._settle(
+            self._end_quietly(call, response.usage, cost, "ok", charged=True, result=stored)
+        )
         return EmbedResult(response, cost, call.origin)
 
     async def generate_images(
@@ -1273,7 +1306,7 @@ class ChatService:
             self._telemetry.annotate(span, Usage(), cost, None)
         stored = dump_image(call.origin, cost, response) if idem is not None else None
         await self._settle(
-            self._end(
+            self._end_quietly(
                 call,
                 Usage(),
                 cost,

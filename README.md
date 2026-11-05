@@ -564,6 +564,7 @@ list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
 | Text the input guardrails read per request | 2,000,000 characters (`GUARDRAIL_MAX_INPUT_CHARS`) | 413 `input_too_large` |
 | Chunks in an organisation's retrieval index | 1,000,000 (`MAX_INDEXED_CHUNKS_PER_ORG`) | 403 `index_quota_exceeded` |
 | Sign-in and signup attempts per client address | 30 a minute (`AUTH_RATE_LIMIT_PER_MINUTE`) | 429 `rate_limited` |
+| A streamed answer | 12 minutes, so it settles while its 15-minute budget hold still counts | The stream ends with `finish_reason: "length"`, as at `max_tokens` |
 
 ## Repository layout
 

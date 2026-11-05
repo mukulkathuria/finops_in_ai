@@ -4,6 +4,7 @@ finish still delivers what was held, and the request settles exactly once.
 Key-shaped strings are assembled at runtime so secret scanners never see them in the source."""
 
 import json
+import time
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,7 @@ from gateway.domain.llm import (
     ToolCallDelta,
     Usage,
 )
+from gateway.pipeline import chat
 from gateway.pipeline.chat import _Relay, estimate_tokens
 from gateway.pipeline.guardrails import OutputFilter
 
@@ -31,11 +33,15 @@ def _pieces(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
+def _call(cost: int = 1) -> Any:
+    entry = SimpleNamespace(cost=lambda usage: cost, model="m")
+    return SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None, started=time.perf_counter())
+
+
 async def _run(chunks: list[CanonicalChunk]) -> tuple[list[CanonicalChunk], list[Any], _Relay]:
     """What the client receives, what the request settled with, and the relay."""
     ends: list[Any] = []
-    entry = SimpleNamespace(cost=lambda usage: 1, model="m")
-    call: Any = SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None)
+    call = _call()
 
     async def upstream() -> AsyncIterator[CanonicalChunk]:
         for chunk in chunks[1:]:
@@ -52,6 +58,25 @@ def _never_leaks(released: list[str]) -> str:
         so_far += piece
         assert "AKIA" not in so_far, so_far  # not even the start of the key goes out
     return so_far
+
+
+async def test_a_stream_ends_as_if_at_max_tokens_before_its_hold_can_expire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release review M3: a stream longer than its hold outlived it (the janitor returned the
+    budget mid-stream, and a retry could take its idempotency key)."""
+    monkeypatch.setattr(chat, "MAX_STREAM_S", -1.0)  # every stream is overdue at once
+    ends: list[Any] = []
+
+    async def upstream() -> AsyncIterator[CanonicalChunk]:
+        yield CanonicalChunk(content=" never sent")
+
+    stream = upstream()
+    relay = _Relay(_call(), REQUEST, CanonicalChunk(content="Hello"), stream, [], ends.append)
+    out = [chunk async for chunk in relay]
+    assert [(c.content, c.finish_reason) for c in out] == [("Hello", None), (None, "length")]
+    assert await anext(stream, None) is None  # the provider's stream was closed
+    assert [e.status for e in ends] == ["ok"]
 
 
 async def test_usage_with_every_event_does_not_release_a_held_value() -> None:
@@ -85,8 +110,7 @@ async def test_a_stream_without_a_finish_still_delivers_what_was_held_and_settle
 
 async def test_text_held_back_when_a_stream_fails_still_counts_toward_the_estimate() -> None:
     ends: list[Any] = []
-    entry = SimpleNamespace(cost=lambda usage: 1, model="m")
-    call: Any = SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None)
+    call = _call()
 
     async def upstream() -> AsyncIterator[CanonicalChunk]:
         raise ConnectionError("the provider dropped the stream")
@@ -105,8 +129,7 @@ async def test_text_held_back_when_a_stream_fails_still_counts_toward_the_estima
 
 async def test_a_stream_failing_while_all_its_output_is_held_is_still_charged() -> None:
     ends: list[Any] = []
-    entry = SimpleNamespace(cost=lambda usage: 7, model="m")
-    call: Any = SimpleNamespace(r=SimpleNamespace(entry=entry), idem=None)
+    call = _call(cost=7)
 
     async def upstream() -> AsyncIterator[CanonicalChunk]:
         raise ConnectionError("the provider dropped the stream")

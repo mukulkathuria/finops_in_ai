@@ -12,6 +12,7 @@ import httpx2
 import psycopg
 import pytest
 from fastapi import FastAPI
+from sqlalchemy.exc import OperationalError
 
 from gateway.domain.llm import (
     CanonicalChunk,
@@ -125,3 +126,21 @@ def test_estimates_do_not_undercount_text_outside_ascii() -> None:
     character, four to six times. English text is counted as before."""
     assert estimate_tokens("hello world, how are you") == 6
     assert estimate_tokens("你好世界" * 25) >= 100  # 100 characters, about 100 tokens
+
+
+async def test_m5_an_answer_whose_settlement_fails_still_reaches_the_client(
+    api: Api, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Medium M5: when the ledger could not be written after the provider answered, the client
+    got a 500 and retried, paying twice, and the charge was recorded nowhere."""
+    chat, resolved, held, req, who, _ = await _held_call(api)
+    held.release.set()  # the provider answers at once
+
+    async def unreachable(*args: Any, **kwargs: Any) -> int:
+        raise OperationalError("UPDATE budget_usage", {}, Exception("the database went away"))
+
+    monkeypatch.setattr(chat._budgets, "settle", unreachable)
+    result = await chat.complete(who, resolved, req)
+    assert result.response.usage == Usage(input_tokens=5, output_tokens=7)
+    lost = [r for r in caplog.records if "not in the ledger" in r.getMessage()]
+    assert [r.__dict__["unrecorded"]["output_tokens"] for r in lost] == [7]  # reconcilable
