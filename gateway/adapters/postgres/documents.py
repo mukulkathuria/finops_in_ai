@@ -68,6 +68,11 @@ VALUES (:id, app_current_org(), :document_id, :ordinal, :content, :token_count,
 _TUNE: Final = (
     "SET LOCAL hnsw.iterative_scan = relaxed_order",
     "SET LOCAL hnsw.ef_search = 100",
+    # The ordered index scan, never a sort of every chunk the org has: the planner prices a
+    # distance as cheap, but each one reads a TOASTed 4 KB vector (the seeded bench sorted an
+    # org's 20,000 chunks in 349 ms). An index scan that comes back short falls back to the
+    # exact search, which sorts.
+    "SET LOCAL enable_sort = off",
 )
 # The index is on embedding::halfvec(1024) (migration 0026), so the search orders by that very
 # expression; `org_id = app_current_org()` repeats the row-level security filter so the planner

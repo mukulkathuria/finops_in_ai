@@ -52,6 +52,7 @@ MODEL: Final = "bench-embedder"
 DIMENSIONS: Final = 1024
 CENTROIDS: Final = 256
 CHUNKS_PER_DOCUMENT: Final = 10
+CHUNK_PARTITIONS: Final = 16  # `chunks` is hash-partitioned by org (migration 0026)
 OUT_DEGREE: Final = 4
 BATCH_DOCUMENTS: Final = 5_000
 KINDS: Final = ("calls", "imports")
@@ -398,6 +399,9 @@ def report(
         f" {scale.projects} projects with {scale.vertices * scale.projects:,} vertices,"
         f" {scale.vertices * scale.projects * OUT_DEGREE:,} edges and"
         f" {scale.modules * scale.projects:,} packs. One client, {scale.samples} samples a query.",
+        f"Chunks are spread evenly: {scale.chunks // scale.orgs:,} an org, so each of the"
+        f" {CHUNK_PARTITIONS} partitions of `chunks` holds about"
+        f" {scale.orgs / CHUNK_PARTITIONS:.1f} orgs.",
         "",
         "| Query | Target p95 | p50 | p95 | p99 | Result |",
         "| --- | --- | --- | --- | --- | --- |",
