@@ -341,11 +341,27 @@ Who may act, and how much a workspace holds:
    the price. Both are reserved before the provider is called, so concurrent requests cannot pass
    a quota together.
 3. Each image costs its catalog price for its size and quality: `capabilities.image_prices`,
-   which the price list carries as `"image_prices": {"1024x1024/hd": 80000}`. A model without a
-   table charges `price_image` for every image. The ledger row counts the images (`kind`
-   `image`).
+   which the price list carries as `"image_prices": {"1024x1024/hd": 80000}`. What is rendered
+   is what is priced:
+   - With a table, an option the request leaves out is the cheapest the table offers with the
+     ones named, and the provider is asked for exactly that.
+   - A model without a table charges `price_image` for its default image only (`size` and
+     `quality` left out, or `1024x1024` and `standard`).
+   - Anything else is a 422 `unsupported_image_option`.
+
+   The ledger row counts the images (`kind` `image`). A render that fails after the provider
+   accepted it is not retried, since it may have been made and billed.
 4. With the org's response cache on, the same prompt and options from the same caller come back
-   from the cache at no cost (`x-finops-cache: exact`), sealed like cached chat answers.
+   from the cache at no cost (`x-finops-cache: exact`), sealed like cached chat answers. An
+   answer over 8 MiB is served but not cached.
+
+The built-in moderation rules read a prompt both as written and folded:
+
+- compatibility forms and invisible characters removed;
+- Cyrillic and Greek look-alikes and leetspeak read as Latin letters;
+- letters spelled one at a time joined.
+
+A moderation model (`openai_compat`) is still the stronger choice in production.
 
 ## Optimization stages (shadow mode and the eval gate)
 

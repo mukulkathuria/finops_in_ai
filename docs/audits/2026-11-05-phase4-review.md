@@ -68,3 +68,17 @@ New findings, none Critical or High:
 The `bench` workflow's first runs exposed one harness defect, fixed before any measurement: it
 dropped the index behind the chunks' unique key, which PostgreSQL refuses. Indexes that back a
 constraint now stay during the load.
+
+## Latency gate result
+
+The full-scale run (1M chunks over 50 orgs, 1M edges, 1,000 samples a query) met every section
+11 target once the vector search was tuned.
+
+| Query | p95 | Target |
+| --- | --- | --- |
+| Pack read | 1.7 ms | 10 ms |
+| 2 hops | 2.4 ms | 30 ms |
+| 3 hops | 3.4 ms | 30 ms |
+| Filtered vector search | 41.4 ms (482 ms before) | 50 ms |
+
+Each tuning step and its numbers are in `docs/audits/2026-11-05-phase5-review.md`.
