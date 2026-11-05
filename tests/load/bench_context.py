@@ -57,92 +57,94 @@ BATCH_DOCUMENTS: Final = 5_000
 KINDS: Final = ("calls", "imports")
 GROUPS: Final = frozenset({ORG})
 
-# The seed SQL uses mod(), not the % operator: psycopg reads a bare % as a placeholder. 70% of the
+# The seed SQL uses mod(), not the % operator: psycopg reads a bare % as a placeholder; and
+# casts its counts to int, since psycopg sends small ints as smallint, which leaves
+# generate_series() ambiguous. 70% of the
 # documents are shared with their whole org, 30% with one of three teams of it.
 _SEED_ORGS: Final = """
 INSERT INTO orgs (id, name, slug)
 SELECT md5('bench-org-' || i)::uuid, 'Bench org ' || i, 'bench-org-' || i
-FROM generate_series(1, %(orgs)s) i
+FROM generate_series(1, %(orgs)s::int) i
 """
 _SEED_DOCUMENTS: Final = """
 INSERT INTO documents (id, org_id, title, acl_groups, embedding_model, chunk_count, token_count)
 SELECT md5('bench-doc-' || d)::uuid,
-       md5('bench-org-' || (mod(d - 1, %(orgs)s) + 1))::uuid,
+       md5('bench-org-' || (mod(d - 1, %(orgs)s::int) + 1))::uuid,
        'Document ' || d,
        CASE WHEN mod(d, 10) < 7 THEN ARRAY['org']
-            ELSE ARRAY['team:' || md5('bench-team-' || (mod(d - 1, %(orgs)s) + 1)
+            ELSE ARRAY['team:' || md5('bench-team-' || (mod(d - 1, %(orgs)s::int) + 1)
                                        || '-' || mod(d, 3))::uuid::text]
        END,
        %(model)s, 10, 1200
-FROM generate_series(1, %(documents)s) d
+FROM generate_series(1, %(documents)s::int) d
 """
 _SEED_CENTROIDS: Final = """
 CREATE TABLE bench_centroids AS
 SELECT c,
-       (SELECT array_agg(random() - 0.5)::real[] FROM generate_series(1, %(dims)s)
+       (SELECT array_agg(random() - 0.5)::real[] FROM generate_series(1, %(dims)s::int)
         WHERE c >= 0)::vector AS v
-FROM generate_series(0, %(centroids)s - 1) c
+FROM generate_series(0, %(centroids)s::int - 1) c
 """
 # A chunk lies near one of the centroids; its noise is drawn per row (the subquery is correlated).
 _SEED_CHUNKS: Final = """
 INSERT INTO chunks (id, org_id, document_id, ordinal, content, token_count, acl_groups,
                     embedding_model, embedding)
 SELECT md5('bench-chunk-' || d || '-' || o)::uuid,
-       md5('bench-org-' || (mod(d - 1, %(orgs)s) + 1))::uuid,
+       md5('bench-org-' || (mod(d - 1, %(orgs)s::int) + 1))::uuid,
        md5('bench-doc-' || d)::uuid,
        o,
        'Passage ' || o || ' of document ' || d || '. ' || repeat('lorem ipsum dolor ', 30),
        120,
        CASE WHEN mod(d, 10) < 7 THEN ARRAY['org']
-            ELSE ARRAY['team:' || md5('bench-team-' || (mod(d - 1, %(orgs)s) + 1)
+            ELSE ARRAY['team:' || md5('bench-team-' || (mod(d - 1, %(orgs)s::int) + 1)
                                        || '-' || mod(d, 3))::uuid::text]
        END,
        %(model)s,
        c.v + (SELECT array_agg((random() - 0.5) * 0.25)::real[]
-              FROM generate_series(1, %(dims)s) WHERE d > 0 AND o >= 0)::vector
-FROM generate_series(%(lo)s, %(hi)s) d
+              FROM generate_series(1, %(dims)s::int) WHERE d > 0 AND o >= 0)::vector
+FROM generate_series(%(lo)s::int, %(hi)s::int) d
 CROSS JOIN generate_series(0, 9) o
-JOIN bench_centroids c ON c.c = mod(d * 7 + o, %(centroids)s)
+JOIN bench_centroids c ON c.c = mod(d * 7 + o, %(centroids)s::int)
 """
 _SEED_PROJECTS: Final = """
 INSERT INTO projects (id, org_id, name, acl_groups, indexed_at)
 SELECT md5('bench-project-' || p)::uuid,
-       md5('bench-org-' || (mod(p - 1, %(orgs)s) + 1))::uuid,
+       md5('bench-org-' || (mod(p - 1, %(orgs)s::int) + 1))::uuid,
        'project ' || p, ARRAY['org'], now()
-FROM generate_series(1, %(projects)s) p
+FROM generate_series(1, %(projects)s::int) p
 """
 _SEED_VERTICES: Final = """
 INSERT INTO graph_vertex (id, org_id, project_id, kind, name, path, props)
 SELECT md5('bench-v-' || p || '-' || n)::uuid,
-       md5('bench-org-' || (mod(p - 1, %(orgs)s) + 1))::uuid,
+       md5('bench-org-' || (mod(p - 1, %(orgs)s::int) + 1))::uuid,
        md5('bench-project-' || p)::uuid,
-       CASE WHEN n <= %(modules)s THEN 'module' ELSE 'symbol' END,
-       CASE WHEN n <= %(modules)s THEN 'pkg.mod_' || n ELSE 'Cls_' || n || '.run' END,
-       'pkg/mod_' || (mod(n - 1, %(modules)s) + 1) || '.py',
+       CASE WHEN n <= %(modules)s::int THEN 'module' ELSE 'symbol' END,
+       CASE WHEN n <= %(modules)s::int THEN 'pkg.mod_' || n ELSE 'Cls_' || n || '.run' END,
+       'pkg/mod_' || (mod(n - 1, %(modules)s::int) + 1) || '.py',
        jsonb_build_object('signature', 'def run(self, item: str) -> int')
-FROM generate_series(1, %(projects)s) p CROSS JOIN generate_series(1, %(vertices)s) n
+FROM generate_series(1, %(projects)s::int) p CROSS JOIN generate_series(1, %(vertices)s::int) n
 """
 _SEED_EDGES: Final = """
 INSERT INTO graph_edge (org_id, project_id, src, dst, kind, confidence)
-SELECT md5('bench-org-' || (mod(p - 1, %(orgs)s) + 1))::uuid,
+SELECT md5('bench-org-' || (mod(p - 1, %(orgs)s::int) + 1))::uuid,
        md5('bench-project-' || p)::uuid,
        md5('bench-v-' || p || '-' || n)::uuid,
-       md5('bench-v-' || p || '-' || (mod(n * 7919 + j * 104729, %(vertices)s) + 1))::uuid,
-       CASE WHEN n <= %(modules)s THEN 'imports' ELSE 'calls' END,
+       md5('bench-v-' || p || '-' || (mod(n * 7919 + j * 104729, %(vertices)s::int) + 1))::uuid,
+       CASE WHEN n <= %(modules)s::int THEN 'imports' ELSE 'calls' END,
        CASE WHEN j = 3 THEN 0.6 ELSE 1.0 END
-FROM generate_series(1, %(projects)s) p
-CROSS JOIN generate_series(1, %(vertices)s) n
-CROSS JOIN generate_series(0, %(degree)s - 1) j
+FROM generate_series(1, %(projects)s::int) p
+CROSS JOIN generate_series(1, %(vertices)s::int) n
+CROSS JOIN generate_series(0, %(degree)s::int - 1) j
 """
 _SEED_PACKS: Final = """
 INSERT INTO context_packs (org_id, project_id, module_id, path, pack, token_count, source_tokens)
-SELECT md5('bench-org-' || (mod(p - 1, %(orgs)s) + 1))::uuid,
+SELECT md5('bench-org-' || (mod(p - 1, %(orgs)s::int) + 1))::uuid,
        md5('bench-project-' || p)::uuid,
        md5('bench-v-' || p || '-' || n)::uuid,
        'pkg/mod_' || n || '.py',
        '# pkg/mod_' || n || '.py' || repeat(chr(10) || '- def run(self, item: str) -> int', 40),
        500, 5000
-FROM generate_series(1, %(projects)s) p CROSS JOIN generate_series(1, %(modules)s) n
+FROM generate_series(1, %(projects)s::int) p CROSS JOIN generate_series(1, %(modules)s::int) n
 """
 # Indexes that back a constraint (the primary key, unique keys) stay during the load; the others
 # (HNSW, GIN, the org lookup) are dropped and rebuilt after it.
