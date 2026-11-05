@@ -22,6 +22,7 @@ from control_plane.services.relevance import RelevanceService
 from control_plane.services.routing import RoutingService
 from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
+from control_plane.services.sso import SsoService
 from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
@@ -54,6 +55,7 @@ from gateway.adapters.postgres.relevance import RelevanceRepository, RelevanceSe
 from gateway.adapters.postgres.routing import RoutingRepository, RoutingSettingsCache
 from gateway.adapters.postgres.savings import BaselineModels, SavingsRepository
 from gateway.adapters.postgres.sessions import SessionRepository
+from gateway.adapters.postgres.sso import SsoRepository
 from gateway.adapters.postgres.stages import StageModeCache, StageRepository
 from gateway.adapters.postgres.teams import InvitationRepository, TeamRepository
 from gateway.adapters.postgres.usage import UsageRepository
@@ -63,6 +65,7 @@ from gateway.adapters.rerank.http import HttpReranker
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService, parse_public_keys, private_key_from_seed
+from gateway.adapters.sso.oidc import OidcClient
 from gateway.adapters.storage.local import LocalObjectStore
 from gateway.app.gateway_config import load_gateway_config
 from gateway.app.observability import Observability, build_observability
@@ -97,6 +100,7 @@ class Container:
     api_keys: ApiKeyRepository
     counters: PostgresCounterStore
     session_service: SessionService
+    sso_service: SsoService
     identity_service: IdentityService
     team_service: TeamService
     invitation_service: InvitationService
@@ -309,6 +313,7 @@ def build_container(
         refresh_ttl=timedelta(seconds=settings.refresh_token_ttl_seconds),
         family_ttl=timedelta(seconds=settings.refresh_family_ttl_seconds),
         max_failed_logins=settings.login_max_failures,
+        sso=SsoRepository(),
     )
     graph_store = PostgresGraphStore(db)
     moderator = build_moderator(
@@ -325,6 +330,20 @@ def build_container(
         telemetry=observability.telemetry,
         max_input_chars=settings.guardrail_max_input_chars,
     )
+    public = settings.public_base_url.rstrip("/")
+    sso = SsoService(
+        db=db,
+        repo=SsoRepository(),
+        identity=identity_repo,
+        sessions=sessions,
+        oidc=OidcClient(http, allow_insecure=not settings.is_production_like),
+        envelope=envelope,
+        audit=audit,
+        authz=authz,
+        callback_url=f"{public}/v1/auth/sso/callback" if public else None,
+        web_base_url=settings.web_base_url,
+        allow_insecure=not settings.is_production_like,
+    )
     return Container(
         settings=settings,
         db=db,
@@ -336,6 +355,7 @@ def build_container(
         api_keys=api_keys,
         counters=PostgresCounterStore(db),
         session_service=sessions,
+        sso_service=sso,
         identity_service=IdentityService(
             db=db,
             repo=identity_repo,

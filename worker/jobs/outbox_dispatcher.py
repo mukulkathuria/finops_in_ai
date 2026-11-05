@@ -6,21 +6,19 @@ the `X-FinOps-Delivery` id and verify `X-FinOps-Signature` (see gateway/domain/w
 SSRF guard: every resolved address of the host must be public unless `allow_insecure` (dev).
 """
 
-import asyncio
 import logging
-import socket
 import time
 from dataclasses import dataclass
 from typing import Final
-from urllib.parse import urlsplit
 
 import httpx2
 import orjson
 
+from gateway.adapters.outbound import NotPublic, ensure_public
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.webhooks import OutboxMessage, WebhookRepository, webhook_aad
 from gateway.adapters.security.envelope import DecryptionError, Envelope
-from gateway.domain.webhooks import is_public_address, sign
+from gateway.domain.webhooks import sign
 
 log = logging.getLogger(__name__)
 _LEASE_S: Final = 300.0
@@ -36,11 +34,6 @@ class DispatchReport:
 
 class _Permanent(Exception):
     """A delivery that can never succeed as configured (no retry)."""
-
-
-async def _resolve(host: str, port: int) -> list[str]:
-    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    return [str(info[4][0]) for info in infos]
 
 
 class OutboxDispatcher:
@@ -89,14 +82,10 @@ class OutboxDispatcher:
     async def _check_host(self, url: str) -> None:
         if self._allow_insecure:
             return
-        parts = urlsplit(url)
-        host, port = parts.hostname or "", parts.port or 443
         try:
-            addresses = await _resolve(host, port)
-        except OSError as exc:
-            raise ConnectionError(f"cannot resolve {host}") from exc
-        if not addresses or not all(is_public_address(a) for a in addresses):
-            raise _Permanent(f"{host} resolves to a non-public address")
+            await ensure_public(url)
+        except NotPublic as exc:
+            raise _Permanent(str(exc)) from exc
 
     async def _deliver(self, message: OutboxMessage) -> str:
         try:

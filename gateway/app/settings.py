@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     # Invitations (US-02). Links point at the dashboard; the token travels in the URL fragment.
     invite_ttl_hours: int = Field(default=72, ge=1, le=720)
     web_base_url: str = "http://127.0.0.1:5173"
+    # Single sign-on (US-27): this gateway's public origin. Each org's provider calls back to
+    # `<PUBLIC_BASE_URL>/v1/auth/sso/callback`; unset, single sign-on is off.
+    public_base_url: str = ""
 
     # Worker (US-10): how often the budget janitor returns the holds of requests that died,
     # and how often it rebuilds the current budget counters from the ledger.
@@ -171,4 +174,6 @@ class Settings(BaseSettings):
         master = self.master_key.get_secret_value() if self.master_key else ""
         if not master or "CHANGE_ME" in master:
             raise ValueError("MASTER_KEY is required outside dev and test")
+        if self.public_base_url and not self.public_base_url.startswith("https://"):
+            raise ValueError("PUBLIC_BASE_URL must be an https URL outside dev and test")
         return self

@@ -44,6 +44,11 @@ class AuditAction:
     SETTINGS_CHANGED = "settings.changed"
     STAGE_MODE_SET = "stages.mode_set"
     EVAL_RECORDED = "evals.recorded"
+    SSO_CONFIGURED = "settings.sso_configured"
+    SSO_REMOVED = "settings.sso_removed"
+    SSO_LOGIN_SUCCEEDED = "auth.sso_login_succeeded"
+    SSO_LOGIN_FAILED = "auth.sso_login_failed"
+    SSO_IDENTITY_LINKED = "auth.sso_identity_linked"
 
 
 def _check_details(details: Mapping[str, Any]) -> None:

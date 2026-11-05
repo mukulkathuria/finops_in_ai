@@ -15,6 +15,7 @@ from control_plane.services.relevance import RelevanceService
 from control_plane.services.routing import RoutingService
 from control_plane.services.savings import SavingsService
 from control_plane.services.sessions import SessionService
+from control_plane.services.sso import SsoService
 from control_plane.services.stages import StageAdminService
 from control_plane.services.teams import TeamService
 from control_plane.services.webhooks import WebhookService
@@ -50,6 +51,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def routing_service(self) -> RoutingService: ...
     @property
     def relevance_service(self) -> RelevanceService: ...
+    @property
+    def sso_service(self) -> SsoService: ...
 
 
 def get_control_plane(request: Request) -> ControlPlaneServices:

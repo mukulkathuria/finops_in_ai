@@ -76,6 +76,41 @@ Integration tests create a disposable database per session, apply the same setup
 container bootstrap, migrate it, and connect through the real `app`, `worker` and
 `readonly_analytics` roles, so Row-Level Security is tested exactly as it runs in production.
 
+## Single sign-on (OpenID Connect)
+
+An org admin points the gateway at the org's OpenID Connect provider (Okta, Entra ID, Google,
+Keycloak and the like):
+
+```http
+PUT /v1/admin/sso
+{"issuer": "https://login.example.com", "client_id": "…", "client_secret": "…",
+ "allowed_domains": ["example.com"], "local_login_disabled": false}
+```
+
+Setting up:
+
+- Register the answer's `callback_url`, `<PUBLIC_BASE_URL>/v1/auth/sso/callback`, as the
+  client's redirect URI. Without `PUBLIC_BASE_URL`, single sign-on is off.
+- The client secret is sealed with the org's envelope key and never returned.
+- Outside development, the provider is reached only on public addresses.
+
+Signing in:
+
+1. Members start from the dashboard with their organisation's slug.
+2. The gateway runs the authorization code flow with PKCE.
+3. It checks the ID token's signature against the provider's published keys, then its issuer,
+   audience, times and nonce.
+4. It maps `(issuer, subject)` to a user through `identities`.
+5. The browser comes back to the dashboard with a one-time code. The dashboard trades it once
+   for the usual session (`POST /v1/auth/sso/exchange`), so no token travels in a URL.
+
+Accounts and local login:
+
+- A first sign-in links an existing member through an email the provider has verified, in an
+  allowed domain. Single sign-on never creates an account: invite people first.
+- With `local_login_disabled`, members sign in only through the provider. Admins keep their
+  password, so a broken provider cannot lock the org out.
+
 ## Budgets and spend control
 
 Every model call reserves its worst-case cost against each budget that applies (member, team,

@@ -23,6 +23,7 @@ from control_plane.api import (
     relevance,
     routing,
     savings,
+    sso,
     stages,
     teams,
     webhooks,
@@ -105,6 +106,8 @@ def create_app(
     app.include_router(metrics.router)
     app.include_router(auth.well_known)
     app.include_router(auth.router)
+    app.include_router(sso.router)
+    app.include_router(sso.admin_router)
     app.include_router(audit.router)
     app.include_router(teams.router)
     app.include_router(invitations.router)

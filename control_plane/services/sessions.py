@@ -11,11 +11,13 @@ from gateway.adapters.postgres.audit import AuditRepository
 from gateway.adapters.postgres.database import Database, TenantContext, set_lookup, set_tenant
 from gateway.adapters.postgres.identity import IdentityRepository
 from gateway.adapters.postgres.sessions import SessionRepository
+from gateway.adapters.postgres.sso import SsoRepository
 from gateway.adapters.security.passwords import Argon2PasswordHasher
 from gateway.adapters.security.tokens import TokenService
 from gateway.domain.audit import AuditAction, AuditEvent, RequestMeta
-from gateway.domain.errors import InvalidInput, Unauthenticated
+from gateway.domain.errors import Forbidden, InvalidInput, Unauthenticated
 from gateway.domain.identity import normalize_email
+from gateway.domain.policy import Permission, Principal
 from gateway.domain.secrets import digest, new_secret
 
 REFRESH_PREFIX = "frt_"  # recognisable for log redaction and secret scanners
@@ -49,6 +51,7 @@ class SessionService:
         refresh_ttl: timedelta,
         family_ttl: timedelta,
         max_failed_logins: int,
+        sso: SsoRepository,
     ) -> None:
         self._db = db
         self._sessions = sessions
@@ -59,6 +62,7 @@ class SessionService:
         self._refresh_ttl = refresh_ttl
         self._family_ttl = family_ttl
         self._max_failed = max_failed_logins
+        self._sso = sso
 
     async def issue(
         self,
@@ -139,13 +143,37 @@ class SessionService:
         rehash = None
         if user.password_hash and self._hasher.needs_rehash(user.password_hash):
             rehash = await self._hasher.hash(password)
+        session = None
         async with self._db.transaction(ctx) as conn:
-            await self._sessions.record_success(conn, user.id, rehash)
-            session = await self.issue(conn, user_id=user.id)
-            await self._audit.append(
-                conn, self._event(AuditAction.LOGIN_SUCCEEDED, user.id, meta, {})
+            if await self._sso_required(conn, user.id):
+                refusal = {"reason": "sso_required"}
+                await self._audit.append(
+                    conn, self._event(AuditAction.LOGIN_FAILED, user.id, meta, refusal)
+                )
+            else:
+                await self._sessions.record_success(conn, user.id, rehash)
+                session = await self.issue(conn, user_id=user.id)
+                await self._audit.append(
+                    conn, self._event(AuditAction.LOGIN_SUCCEEDED, user.id, meta, {})
+                )
+        if session is None:  # the password was right: saying so reveals nothing new
+            raise Forbidden(
+                "this organisation signs in through its single sign-on provider",
+                code="sso_required",
             )
         return session
+
+    async def _sso_required(self, conn: AsyncConnection, user_id: UUID) -> bool:
+        """With local login off for the org (US-27), only its admins may still use a
+        password, so a provider that breaks cannot lock everyone out."""
+        if not await self._sso.local_login_disabled(conn):
+            return False
+        user = await self._identity.load_user(conn, user_id)
+        if user is None:
+            return True
+        catalog = await self._identity.load_role_catalog(conn)
+        member = Principal(user.id, user.org_id, user.email, user.grants, catalog)
+        return not member.can(Permission.ORG_MANAGE)
 
     async def refresh(self, *, refresh_token: str, meta: RequestMeta) -> Session:
         token_hash = digest(refresh_token)

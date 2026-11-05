@@ -14,7 +14,7 @@ from pydantic import SecretStr
 
 from gateway.app.main import create_app
 from gateway.app.settings import Settings
-from tests.support import fake_docparse
+from tests.support import fake_docparse, fake_idp
 from tests.support.database import DisposableDatabase
 
 STRONG_PASSWORD = "Correct-Horse-Battery-9!"
@@ -41,6 +41,7 @@ def app_settings(db: DisposableDatabase, **overrides: Any) -> Settings:
         "reranker_base_url": "http://mock-llm:8000/v1",
         "reranker_api_key": SecretStr("test-key"),
         "log_level": "WARNING",
+        "public_base_url": "http://gateway.test",
     }
     values.update(overrides)
     return Settings(**values)
@@ -75,6 +76,7 @@ async def app_client(
                 else httpx2.ASGITransport(app=mock_provider)
             ),
             "http://docparse:8000": httpx2.ASGITransport(app=fake_docparse.app),
+            "https://idp.test": httpx2.ASGITransport(app=fake_idp.app),
         }
     )
     app = create_app(

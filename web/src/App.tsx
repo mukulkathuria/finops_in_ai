@@ -10,6 +10,7 @@ import { Login } from "./pages/Login";
 import { MyUsagePage } from "./pages/MyUsage";
 import { Requests } from "./pages/Requests";
 import { SavingsPage } from "./pages/Savings";
+import { SsoComplete } from "./pages/SsoComplete";
 import { Teams } from "./pages/Teams";
 import { Link, navigate, usePath } from "./router";
 
@@ -30,6 +31,7 @@ export function App() {
   const { session, restoring } = useSession();
   const path = usePath();
   if (path === "/accept-invite") return <AcceptInvite />;
+  if (path === "/login/sso") return <SsoComplete />;
   if (restoring) return <Loading />;
   if (session === null) return <Login />;
 
