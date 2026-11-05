@@ -13,14 +13,18 @@ workflow:
 Keys carry `org_id`, as a partitioned table's keys must. Partitions get no grants: everything
 goes through `chunks`, under its row-level security.
 
-Moving the rows, both ways:
+Moving the rows, both ways (Phase 5 review, S-A1):
 
 - The copy runs as the table's owner with FORCE ROW LEVEL SECURITY lifted. Forced, the tenant
   policy hides every row from a migration session (it has no org), so the copy would move
   nothing before the old table is dropped. The counts are compared before the drop.
+- The new table has its foreign keys before the rows arrive: each row is then checked by the
+  referential checks, which see past row-level security. Added to a filled table, the bulk
+  check would read `orgs` and `documents` under their forced tenant policies, find no org, and
+  refuse every row.
 - `documents` (its writes) and then `chunks` (everything) are locked first, in the order an
-  ingest takes them: no chunk commits between the copy and the drop, and no ingest deadlocks
-  with the foreign keys added afterwards. Ingestion and search wait for the migration.
+  ingest takes them: no chunk commits between the copy and the drop. Ingestion and search wait
+  for the migration.
 
 Revision ID: 0026
 Revises: 0025
@@ -51,6 +55,15 @@ _SECURITY = """
     GRANT SELECT, DELETE ON chunks TO worker;
     ANALYZE chunks;
 """
+
+
+def _references(table: str) -> str:
+    return f"""
+    ALTER TABLE {table} ADD CONSTRAINT chunks_org_id_fkey
+      FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE CASCADE;
+    ALTER TABLE {table} ADD CONSTRAINT chunks_document_id_fkey
+      FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE;
+    """
 
 
 def _move_to(target: str) -> str:
@@ -86,12 +99,11 @@ def upgrade() -> None:
             f" FOR VALUES WITH (MODULUS {PARTITIONS}, REMAINDER {i})"
         )
     op.execute(
-        _move_to("chunks_by_org")
+        _references("chunks_by_org")
+        + _move_to("chunks_by_org")
         + """
     ALTER TABLE chunks ADD PRIMARY KEY (id, org_id);
     ALTER TABLE chunks ADD CONSTRAINT chunks_document_ordinal UNIQUE (document_id, ordinal, org_id);
-    ALTER TABLE chunks ADD FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE CASCADE;
-    ALTER TABLE chunks ADD FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE;
     CREATE INDEX chunks_embedding ON chunks
       USING hnsw ((embedding::halfvec(1024)) halfvec_cosine_ops);
     CREATE INDEX chunks_acl ON chunks USING gin (acl_groups);
@@ -105,12 +117,11 @@ def downgrade() -> None:
     op.execute(_LOCK)
     op.execute(
         "CREATE TABLE chunks_plain (LIKE chunks INCLUDING DEFAULTS INCLUDING CONSTRAINTS);"
+        + _references("chunks_plain")
         + _move_to("chunks_plain")
         + """
     ALTER TABLE chunks ADD PRIMARY KEY (id);
     ALTER TABLE chunks ADD CONSTRAINT chunks_document_id_ordinal_key UNIQUE (document_id, ordinal);
-    ALTER TABLE chunks ADD FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE CASCADE;
-    ALTER TABLE chunks ADD FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE;
     CREATE INDEX chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
     CREATE INDEX chunks_acl ON chunks USING gin (acl_groups);
     CREATE INDEX chunks_org ON chunks (org_id, embedding_model);
