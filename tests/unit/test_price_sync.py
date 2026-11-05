@@ -70,6 +70,50 @@ def test_suspicious_changes_are_refused(changes: dict[str, Any], reason: str) ->
     assert plan.inserts == ()
 
 
+IMAGE = ModelPrice(
+    9,
+    "openai",
+    "dall-e-3",
+    "image",
+    0,
+    0,
+    price_image=40_000,
+    image_prices=(("1024x1024/hd", 80_000), ("1024x1024/standard", 40_000)),
+)
+FLAT = replace(IMAGE, image_prices=())
+
+
+@pytest.mark.parametrize(
+    ("old", "table", "reason"),
+    [
+        (IMAGE, {"1024x1024/hd": 0}, "image option 1024x1024/hd would be free"),
+        (IMAGE, {"1024x1024/hd": 7_999}, "image option 1024x1024/hd would move more than 10x"),
+        (IMAGE, {"4096x4096/hd": 0}, "image option 4096x4096/hd would be free"),
+        # A table in place of a flat price is compared on the default image it priced.
+        (
+            FLAT,
+            {"1024x1024/standard": 400},
+            "image option 1024x1024/standard would move more than 10x",
+        ),
+        (IMAGE, {"1024x1024/hd": 120_000, "1792x1024/hd": 120_000}, None),
+    ],
+)
+def test_each_image_option_is_held_to_the_same_rules(
+    old: ModelPrice, table: dict[str, int], reason: str | None
+) -> None:
+    """Phase 5 review C-I2: a broken list cannot make an image option free or move it tenfold."""
+    prices = dict(old.image_prices) | table
+    new = replace(old, image_prices=tuple(sorted(prices.items())))
+    assert suspicious(old, new) == reason
+
+
+def test_a_new_image_model_priced_by_its_table_alone_is_accepted() -> None:
+    table_only = PriceEntry(
+        replace(IMAGE, catalog_version=0, model="gpt-image-2", price_image=None)
+    )
+    assert plan_sync([table_only], {}, NOW).inserts == (table_only,)
+
+
 def test_dropping_an_optional_price_falls_back_to_the_base_rate() -> None:
     assert suspicious(OPUS, replace(OPUS, price_cached_input=None)) is None
     image = replace(OPUS, kind="image", price_image=40_000)

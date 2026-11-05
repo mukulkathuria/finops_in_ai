@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final
 
+from gateway.domain.images import DEFAULT_QUALITY, DEFAULT_SIZE
 from gateway.domain.pricing import ModelPrice
 
 MAX_FACTOR: Final = 10  # how far one sync may move a price
@@ -72,12 +73,37 @@ def suspicious(old: ModelPrice, new: ModelPrice) -> str | None:
             return f"{name} would drop to zero"
         if max(before, after) > MAX_FACTOR * min(before, after):
             return f"{name} would move more than {MAX_FACTOR}x"
+    return _suspicious_images(old, new)
+
+
+def _image_prices(entry: ModelPrice) -> dict[str, int]:
+    """What each image option costs: the model's table, or its flat price for the default
+    image (`image_option`), so a switch between the two is compared like any change."""
+    if entry.image_prices:
+        return dict(entry.image_prices)
+    if entry.price_image is not None:
+        return {f"{DEFAULT_SIZE}/{DEFAULT_QUALITY}": entry.price_image}
+    return {}
+
+
+def _suspicious_images(old: ModelPrice, new: ModelPrice) -> str | None:
+    """The same rules per image option: a paid option must not become free or move more than
+    tenfold, and a model that charges for images must not gain a free option. An option the
+    list drops is refused to requests, which costs no money."""
+    before = _image_prices(old)
+    paid = any(before.values())
+    for option, after in sorted(_image_prices(new).items()):
+        was = before.get(option)
+        if after == 0 and (was or (was is None and paid)):
+            return f"image option {option} would be free"
+        if was and max(was, after) > MAX_FACTOR * min(was, after):
+            return f"image option {option} would move more than {MAX_FACTOR}x"
     return None
 
 
 def unpriced(new: ModelPrice) -> str | None:
     """Why a model new to the catalog looks like a broken entry; None when it does not."""
-    if not any(getattr(new, name) for name in _PRICES):
+    if not any(getattr(new, name) for name in _PRICES) and not any(_image_prices(new).values()):
         return "a new model would have no price at all"
     return None
 

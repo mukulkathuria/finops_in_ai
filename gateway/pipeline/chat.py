@@ -68,6 +68,7 @@ from gateway.domain.llm import (
     ImageRequest,
     ImageResponse,
     ProviderError,
+    ProviderErrorKind,
     ToolCall,
     ToolCallDelta,
     Usage,
@@ -507,12 +508,20 @@ class ChatService:
         catalog = await self._catalog.get()
         return [m for m in catalog.models() if m.provider in self._adapters and m.kind != "image"]
 
-    async def _with_retries(self, call: Callable[[], Awaitable[T]]) -> T:
+    async def _with_retries(
+        self, call: Callable[[], Awaitable[T]], *, idempotent: bool = True
+    ) -> T:
+        """Retry what may be retried. A call that is not idempotent (an image render, billed per
+        image) is retried only when the provider refused to start it: after a timeout or a
+        server error the render may have been made and billed already."""
         for attempt in range(self._retries + 1):
             try:
                 return await call()
             except ProviderError as exc:
-                if not exc.kind.retryable or attempt == self._retries:
+                retryable = (
+                    exc.kind.retryable if idempotent else exc.kind is ProviderErrorKind.RATE_LIMIT
+                )
+                if not retryable or attempt == self._retries:
                     raise
                 delay = exc.retry_after_s if exc.retry_after_s is not None else 0.25 * 2**attempt
                 await asyncio.sleep(min(delay, _MAX_BACKOFF_S) + random.uniform(0, 0.1))  # noqa: S311  # nosec B311
@@ -967,10 +976,12 @@ class ChatService:
             call = replace(call, r=Resolved(ctx.price, call.r.adapter), requested=call.r.entry)
         return call, ctx.request
 
-    async def _call_provider(self, call: _Call, attempt: Callable[[], Awaitable[T]]) -> T:
+    async def _call_provider(
+        self, call: _Call, attempt: Callable[[], Awaitable[T]], *, idempotent: bool = True
+    ) -> T:
         """Run the provider call with retries; any failure releases the hold and is recorded."""
         try:
-            return await self._with_retries(attempt)
+            return await self._with_retries(attempt, idempotent=idempotent)
         except asyncio.CancelledError:
             self._spawn(self._end_quietly(call, Usage(), 0, "cancelled", charged=False))
             raise
@@ -1158,7 +1169,9 @@ class ChatService:
         if hit is not None:
             return await self._images_served(call, hit[0], option)
         with self._telemetry.provider_call("images", r.entry.provider, r.entry.model) as span:
-            response = await self._call_provider(call, lambda: r.adapter.generate_images(req))
+            response = await self._call_provider(
+                call, lambda: r.adapter.generate_images(req), idempotent=False
+            )
             response = replace(
                 response,
                 images=response.images[: req.n],

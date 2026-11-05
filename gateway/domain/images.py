@@ -33,30 +33,53 @@ class Moderation:
 
 @dataclass(frozen=True, slots=True)
 class ImageOption:
-    size: str
-    quality: str
+    """What the provider is asked to render, and what each image costs. None leaves the option
+    to the provider: only a model priced for its default image does."""
+
+    size: str | None
+    quality: str | None
     price: int  # micro-USD per image
 
 
+def _offers(key: str, size: str | None, quality: str | None) -> bool:
+    offered_size, _, offered_quality = key.partition("/")
+    return size in (None, offered_size) and quality in (None, offered_quality)
+
+
 def image_option(entry: ModelPrice, size: str | None, quality: str | None) -> ImageOption:
-    """The size, quality and per-image price a request gets. A model with an `image_prices`
-    table offers exactly those options; without one, every image costs `price_image`. A model
-    with neither price is refused: an unpriced image would escape the money budgets."""
-    size, quality = size or DEFAULT_SIZE, quality or DEFAULT_QUALITY
+    """The size, quality and per-image price of a request: what is rendered is what is priced.
+
+    - A model with an `image_prices` table offers exactly those options. An option the request
+      leaves out is the cheapest the table offers with the ones it names, and the provider is
+      asked for it by name, so the image made is the image priced.
+    - A model priced per image without a table is priced for its default image: a request may
+      leave size and quality to it or name the defaults, nothing bigger or better.
+    - A model with neither is refused: an unpriced image would escape the money budgets."""
     if entry.image_prices:
-        prices = dict(entry.image_prices)
-        price = prices.get(f"{size}/{quality}")
-        if price is None:
-            offered = ", ".join(sorted(prices))
+        matching = [
+            (price, key) for key, price in entry.image_prices if _offers(key, size, quality)
+        ]
+        if not matching:
+            sizes = {key.partition("/")[0] for key, _ in entry.image_prices}
+            offered = ", ".join(sorted(key for key, _ in entry.image_prices))
             raise InvalidInput(
                 f"{entry.public_name} offers these size/quality options: {offered}",
                 code="unsupported_image_option",
-                param="size",
+                param="size" if size is not None and size not in sizes else "quality",
             )
-        return ImageOption(size, quality, price)
+        price, key = min(matching)
+        chosen_size, _, chosen_quality = key.partition("/")
+        return ImageOption(chosen_size, chosen_quality, price)
     if entry.price_image is None:
         raise InvalidInput(
             f"{entry.public_name} has no image price in the catalog", code="model_not_priced"
+        )
+    if size not in (None, DEFAULT_SIZE) or quality not in (None, DEFAULT_QUALITY):
+        raise InvalidInput(
+            f"{entry.public_name} is priced for its default image only: leave size and quality"
+            f" out, or ask for {DEFAULT_SIZE} at {DEFAULT_QUALITY} quality",
+            code="unsupported_image_option",
+            param="size" if size not in (None, DEFAULT_SIZE) else "quality",
         )
     return ImageOption(size, quality, entry.price_image)
 

@@ -5,7 +5,7 @@ entry's key; spec section 5, "Retention and privacy"); one that cannot be opened
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
 import orjson
@@ -28,6 +28,10 @@ from gateway.domain.parsing import text_tokens
 from gateway.ports.embeddings import Embedder
 
 log = logging.getLogger(__name__)
+
+# The janitor caps entries per org; this caps an image answer's size, so the two bound the bytes
+# an org's cached images take (a chat answer is far smaller).
+MAX_CACHED_IMAGE_BYTES: Final = 8 * 1024 * 1024  # of base64 text
 
 
 def _aad(org_id: UUID, key: bytes) -> bytes:
@@ -194,6 +198,8 @@ class ResponseCache:
     async def store_images(
         self, org_id: UUID, lookup: Lookup, response: ImageResponse, cost: int
     ) -> None:
+        if sum(map(len, response.images)) > MAX_CACHED_IMAGE_BYTES:
+            return  # served, not kept
         record = {
             "model": response.model,
             "images": list(response.images),
