@@ -99,15 +99,15 @@ OpenTofu ≥ 1.8 with kreuzwerker/docker, k6, GitHub Actions.
 - `POST /v1/auth/sso/exchange {code}` → `SessionOut`, the same as password login.
 - `PUT|GET|DELETE /v1/admin/sso` (ORG_MANAGE): the configuration. The secret is write-only.
 
-- [ ] Write the unit tests: PKCE S256 (`code_challenge` = base64url(sha256(verifier))). The claims checks refuse a wrong iss, aud, azp, nonce, exp, nbf or alg.
-- [ ] Write the integration tests:
+- [x] Write the unit tests: PKCE S256 (`code_challenge` = base64url(sha256(verifier))). The claims checks refuse a wrong iss, aud, azp, nonce, exp, nbf or alg.
+- [x] Write the integration tests:
   - the full flow maps a verified email to an existing user and issues a session;
   - a second login uses the stored identity;
   - an unknown user, an unverified email or a foreign domain gets 401;
   - state reuse and an expired state get 401;
   - local login off refuses a member and keeps an admin.
-- [ ] Implement the migration, domain, adapter, repository, service and API; wire them in.
-- [ ] Run the gates. Commit `feat(US-27)`.
+- [x] Implement the migration, domain, adapter, repository, service and API; wire them in.
+- [x] Run the gates. Commit `feat(US-27)`.
 
 ### Task 2: US-30 Terraform environments
 
@@ -119,9 +119,9 @@ OpenTofu ≥ 1.8 with kreuzwerker/docker, k6, GitHub Actions.
   - `scripts/env.sh up|down|status <env>`: the one documented command set.
   - `.github/workflows/terraform.yml`: fmt, validate and tflint; then apply dev, check `/healthz` and `/readyz`, destroy, and assert nothing is left.
   - `docs/runbooks/deploy.md`.
-- [ ] Write the CI job, which fails until the module exists.
-- [ ] Implement the module and envs. Secrets come from `TF_VAR_*`, never from files in the repo.
-- [ ] Commit `feat(US-30)`.
+- [x] Write the CI job, which fails until the module exists.
+- [x] Implement the module and envs. Secrets come from `TF_VAR_*`, never from files in the repo.
+- [x] Commit `feat(US-30)`.
 
 ### Task 3: Load, race and failure under load
 
@@ -129,9 +129,9 @@ OpenTofu ≥ 1.8 with kreuzwerker/docker, k6, GitHub Actions.
 stack with the mock LLM; short baseline and spike; budget race; a DB restart mid-run);
 `docs/load-testing.md`.
 
-- [ ] Overhead = total latency − provider time (the mock's fixed delay, and the gateway's
+- [x] Overhead = total latency − provider time (the mock's fixed delay, and the gateway's
   `server-timing`). Thresholds come from section 11.
-- [ ] Commit `test(phase-6)`.
+- [x] Commit `test(phase-6)`.
 
 ### Task 4: Restore drill and the GA upgrade rehearsal
 

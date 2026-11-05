@@ -75,7 +75,7 @@ destroys both environments on every change. See `docs/runbooks/deploy.md`.
 
 | Runbook | Covers |
 | --- | --- |
-| `docs/runbooks/deploy.md` | Provisioning dev and staging with Terraform |
+| `docs/runbooks/deploy.md` | Provisioning dev and staging with Terraform; scaling the gateway (replicas behind a balancing proxy) |
 | `docs/runbooks/restore.md` | What to back up; restoring next to the live database, then swapping; the restore drill |
 | `docs/runbooks/incident.md` | Provider outage, runaway spend, database down, leaked keys and secrets, disabling a user, JWT and master key rotation |
 | `docs/runbooks/postgres-upgrade.md` | Moving from the PostgreSQL 19 pre-release to GA |
@@ -89,6 +89,9 @@ It then proves the copy identical:
 
 CI runs the drill on every push. The `load` workflow runs it on the database its profiles have
 filled.
+
+`scripts/upgrade_rehearsal.sh` (the `upgrade` workflow) takes a seeded PostgreSQL 18 database to
+19 with `pg_upgrade --link`, then proves it identical and the RLS audit clean.
 
 ## Development
 

@@ -28,6 +28,14 @@ docker stop pg-ga
 
 ## 2. Rehearse on a copy
 
+The `upgrade` workflow already rehearses a major-version `pg_upgrade --link`:
+`scripts/upgrade_rehearsal.sh` takes PostgreSQL 18 to 19, every week and on every change to the
+migrations or the database image. It builds the schema and seeded data, including HNSW indexes,
+on 18. It upgrades, then proves the database identical (`scripts/db_fingerprint.sql`) and the
+RLS audit clean. Its first run took 18.6 to 19rc1: 96 tables and 9,735 rows identical.
+
+For the move from the RC to GA, which is the same major version:
+
 1. Restore last night's backup into a scratch environment. Use `scripts/env.sh up staging` with
    the RC image, then `restore.md`.
 2. Apply the method you picked.
