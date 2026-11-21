@@ -38,8 +38,10 @@ tests/load/k6/run.sh race
 ```
 
 The `load` workflow runs every profile at CI scale (100 users, 60 requests a second) each week
-and on any change to these scripts. Each run adds a summary to its job page. A soak needs
-hours, so it runs by hand.
+and on any change to these scripts. Each run adds a summary to its job page. The `soak`
+workflow holds the baseline for an hour (longer on demand), monthly. It samples every
+container's memory, and fails if a gateway replica more than doubles after warm-up
+(`tests/load/memory_trend.py`).
 
 The workflow runs two gateway replicas, one process each, behind the dashboard's nginx
 (`tests/load/compose.load.yml`, `--scale gateway=2`). k6 reaches them through nginx

@@ -40,6 +40,7 @@ then check the GitHub Actions run (all four jobs, including the image scan).
 | US-25 a shared workspace for agents: workspaces shared like documents; tasks; facts kept once per content, found by key or by exact vector search as snippets; file summaries; questions between agents deduplicated per task and addressee, with a loop refusal and a 3-hop limit; discovery tokens per task and agent, capped by a per-agent task budget and reported per task; served by the MCP broker (migration 0025) | `feat(US-25)` | `tests/unit/test_workspace.py`, `tests/integration/test_us25_workspace.py` |
 | US-24 image generation with quotas: `POST /v1/images/generations` (OpenAI shape, base64 images); prompts pass the guardrails and moderation (built-in rules or an OpenAI-compatible moderation API, failing closed) before any spend; image budgets per member and team are reserved like money, so concurrent requests cannot pass a quota; each image is priced from the catalog by size and quality (migration 0024, `image_prices` in the price list) and counted in the ledger; the org's exact cache serves a repeat at no cost | `feat(US-24)` | `tests/unit/test_images.py`, `tests/contract/test_llm_contract.py`, `tests/integration/test_us24_images.py` |
 | US-27 SSO login: OpenID Connect per org (the authorization code flow with PKCE; the ID token checked against the provider's published keys, then its issuer, audience, times and nonce); `(issuer, subject)` mapped to an existing user through `identities`, linked at a first sign-in by a verified email in an allowed domain, never a new account; a one-time code traded once for the session, so no token in a URL; local login off per org, admins keep it; client secret sealed; provider fetches to public addresses only (migration 0028) | `feat(US-27)` | `tests/unit/test_sso.py`, `tests/integration/test_us27_sso.py`, `web/src/__tests__/Sso.test.tsx` |
+| PostgreSQL 19.0 (released 2026-11-19): the image moved from 19 RC1 to `postgres:19.0-trixie`, pinned by digest, with PGDG's rebuilds of pgvector 0.8.7 and pg_partman 5.5.0. RC1, RC2 and 19.0 share catalog version 202610061, so a data volume made under RC1 starts under 19.0 unchanged. 19.0 ships without SQL/PGQ, so the joins-and-CTE GraphStore stays (ADR 0004 addendum). Re-tested on 19.0: CI (732 tests, the migrations up, down and up, the RLS audit, the restore drill); the latency gate at 1M chunks and 1M edges (pack read p95 1.6 ms, 3 hops 3.1 ms, vector search 15.0 ms); every load profile (baseline p95 98 ms at 100 users, spike 30 ms, failure under load 26 ms, zero overshoot); the `pg_upgrade` rehearsal from 18.7 to 19.0 (96 tables and 9,735 rows identical); Terraform | `build`, `ci` | `docs/adr/0004-postgresql-19-and-graph-store.md`, `docs/runbooks/postgres-upgrade.md`, the `ci`, `bench`, `load`, `upgrade` and `terraform` workflows from `8cd3915` to `655eedb` |
 | Release review (spec section 12, step 7): two independent reviewers covered auth, budgets, cache and tenancy. Fixed: calls whose client left are charged what the provider bills (High); SSO sign-ins bound to their browser, and no email link without an allowed domain; concurrent grant approvals add up; timezone rebuilds before commit; one change per refresh family (also a deadlock CI caught); streams end before their hold; an answered call still reaches its client when the ledger cannot be written; Idempotency-Keys commit to the team; the RLS audit checks every policy; the worker cannot write budgets (migration 0029). Also found: compose read an empty setting's inline comment as its value | `fix(US-03)`, `fix(US-07, US-08)`, `fix(US-10)`, `fix(US-27)`, `fix(phase-6)` | `docs/audits/2026-11-05-release.md`, `tests/integration/test_release_review.py`, `test_us03_sessions.py`, `test_us08_member_limits.py`, `test_us27_sso.py`, `test_schema_rls.py`, `tests/unit/test_relay.py`, `tests/unit/test_audit_rls.py` |
 | Restore drill and runbooks: `scripts/restore_drill.sh` restores a dump into a new database made as the restore runbook makes one. It proves the copy identical: schema, grants, row security, policies, sequences, every table's rows by count and content hash, and the ledger totals per org. It runs in CI on every push, and in the `load` workflow on the filled database. Runbooks: deploy, restore, incident (provider outage, runaway spend, database down, leaked keys, disabling a user, JWT and master key rotation) and the PostgreSQL GA upgrade | `feat(phase-6)`, `fix(phase-6)` | `ci` workflow (restore drill step); `load` workflow at `cb1349d`: 96 tables and 32,042 rows identical; `docs/runbooks/` |
 | Load profiles (spec section 11): k6 baseline, spike, budget race and failure under load against the compose stack, the mock provider answering in a fixed 50 ms; every profile requires served requests. Two gateway replicas, one process each, behind the dashboard's nginx. All pass at `88b3a76`: the baseline (100 users at the target load: overhead p95 82 ms, p99 125 ms, no errors); the spike (p95 30 ms once recovered); the race (zero overshoot, 516 of 560 committed); failure under load (p95 29 ms two minutes after a PostgreSQL restart); and the restore drill on the filled database (106,141 rows and the ledger totals identical) | `test(phase-6)`, `perf(phase-6)` | `tests/load/k6/`, `.github/workflows/load.yml`, section 6 of `docs/audits/2026-11-05-release.md` |
@@ -103,7 +104,7 @@ and found no Critical or High; its Mediums (questions only to agents that joined
 the narrow-filter vector search, now bounded and benchmarked) and Lows are fixed. Accepted
 items are in ADR 0009 (D-28). See `docs/audits/2026-11-05-phase5-review.md`.
 
-## Next: PostgreSQL 19 GA (planned 2026-11-19), then the release
+## Next: the release
 
 Plan: `docs/superpowers/plans/2026-11-05-phase6-hardening.md`. Earlier plans:
 `docs/superpowers/plans/2026-11-05-phase5-agents-images.md`,
@@ -111,15 +112,16 @@ Plan: `docs/superpowers/plans/2026-11-05-phase6-hardening.md`. Earlier plans:
 
 ## Remaining stories
 
-Phase 6 is done except one item: moving to PostgreSQL 19 GA (see Blocked). A soak (hours at
-half the load) runs by hand: `tests/load/k6/README.md`. The release audit is
-`docs/audits/2026-11-05-release.md`.
+None. Every story and phase is done, and the stack runs on PostgreSQL 19.0. The release audit is
+`docs/audits/2026-11-05-release.md`. The `soak` workflow (`655eedb`, monthly) holds the baseline
+for an hour and judges each gateway replica's memory. Its first run had not finished when this
+was written, so its result is not recorded here yet.
 
 ## Findings and deviations from the spec
 
 | Id | Finding | Resolution |
 | --- | --- | --- |
-| D-1 | SQL/PGQ is not in PostgreSQL 19 (present in 19beta1, reverted by beta4; absent in RC1) | ADR 0004: GraphStore with joins and recursive CTEs |
+| D-1 | SQL/PGQ is not in PostgreSQL 19: present in 19beta1, reverted before beta4, and absent from 19.0 (release notes, 2026-11-19); expected in PostgreSQL 20 | ADR 0004: GraphStore with joins and recursive CTEs. A CI test asserts that the probe finds no SQL/PGQ on 19.0 |
 | D-2 | Fourth database role `worker` for cross-tenant jobs | ADR 0002 |
 | D-3 | `httpx2` instead of `httpx` (maintained continuation; OpenAI 3.x, MCP 2.x, anthropic 2.x use it) | ADR 0001 |
 | D-4 | `control-plane/` is `control_plane/` (Python package naming) | ADR 0001 |
@@ -150,9 +152,8 @@ half the load) runs by hand: `tests/load/k6/README.md`. The release audit is
 
 ## Blocked
 
-PostgreSQL 19 GA has not shipped. RC2 is due 2026-11-12 and GA is planned for 2026-11-19
-(postgresql.org, RC1 news). Two spec items wait for it: the re-test on GA, and the RC-to-GA
-upgrade rehearsal. `docs/runbooks/postgres-upgrade.md` holds the steps.
+Nothing. PostgreSQL 19.0 shipped on 2026-11-19, and the stack moved to it on 2026-11-21
+(`8cd3915`).
 
 Real provider keys, GPUs for OCR sidecars and cloud credentials are not available here. Those
 adapters are verified with contract suites against recorded fixtures.
