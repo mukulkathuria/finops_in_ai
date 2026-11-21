@@ -43,9 +43,11 @@ The owner chose AGE now, opt-in, over waiting for an AGE release or returning to
   same transaction. Readers therefore see the old graph or the new one. The function belongs to
   `migrator` and runs with its rights (creating a graph creates a schema). Row security still
   limits it to the caller's org. Context packs and finding vertices by name stay in SQL.
-- **Reads are Cypher, inside PL/pgSQL functions** (migration 0030). The functions quote every
-  value in the database. The project's Semgrep rule forbids building SQL in Python, and AGE needs
-  the graph name as a literal.
+- **Reads are Cypher, inside PL/pgSQL functions** (migrations 0030 and 0031). The functions
+  quote every value in the database. The project's Semgrep rule forbids building SQL in Python,
+  and AGE needs the graph name as a literal and the query as a dollar-quoted constant. AGE
+  resolves its operator class and Cypher's operators by `search_path`, so these functions search
+  `ag_catalog`, which only the extension's superuser owner can write.
   - Fixed depth (1 to 3 hops) is one `MATCH` (`graph_age_hops`).
   - Reachability is breadth first, one `MATCH` per level (`graph_age_reach`). It stops after
     the level that reaches the caller's limit. This avoids `-[*1..n]->`, which enumerates every

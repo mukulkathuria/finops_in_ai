@@ -189,6 +189,8 @@ async def _cypher(db: DisposableDatabase, org: UUID, project: UUID) -> list[tupl
     ).format(sql.Literal("g" + project.hex))
     async with await psycopg.AsyncConnection.connect(db.app_url) as conn, conn.transaction():
         await conn.execute("SELECT set_config('app.org_id', %s, true)", [str(org)])
+        # AGE resolves Cypher's operators by search_path (migration 0031)
+        await conn.execute("SELECT set_config('search_path', 'ag_catalog, public', true)")
         rows = await (await conn.execute(query)).fetchall()
     return sorted(tuple(str(value).strip('"') for value in row) for row in rows)
 

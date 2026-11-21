@@ -346,6 +346,7 @@ Then `/readyz` checks the extension, and graph reads run as Cypher. Any session 
 read its projects' graphs, for example:
 
 ```sql
+SET search_path = ag_catalog, "$user", public;  -- AGE resolves Cypher's operators through it
 SELECT * FROM ag_catalog.cypher('g<project id hex>', $$
   MATCH (a:node)-[e:link {kind: 'calls'}]->(b:node) RETURN a.name, b.name
 $$) AS (caller ag_catalog.agtype, callee ag_catalog.agtype);
