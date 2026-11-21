@@ -17,6 +17,7 @@ from control_plane.services.cache import CacheSettingsService
 from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
+from control_plane.services.knowledge import KnowledgeService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.relevance import RelevanceService
 from control_plane.services.routing import RoutingService
@@ -50,6 +51,7 @@ from gateway.adapters.postgres.files import FileRepository
 from gateway.adapters.postgres.graph import AgeGraphStore, GraphRepository, PostgresGraphStore
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
+from gateway.adapters.postgres.knowledge import KnowledgeRepository
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
 from gateway.adapters.postgres.relevance import RelevanceRepository, RelevanceSettingsCache
 from gateway.adapters.postgres.routing import RoutingRepository, RoutingSettingsCache
@@ -117,6 +119,7 @@ class Container:
     cache_settings_service: CacheSettingsService
     routing_service: RoutingService
     relevance_service: RelevanceService
+    knowledge_service: KnowledgeService
     budget_service: BudgetService
     usage_reporter: UsageReporter
     object_store: ObjectStore
@@ -274,6 +277,7 @@ def build_container(
         if settings.reranker_base_url
         else None
     )
+    knowledge = KnowledgeRepository()
     retrieval_service = RetrievalService(
         db=db,
         repo=DocumentRepository(),
@@ -284,6 +288,8 @@ def build_container(
         reranker=reranker,
         relevance=relevance_settings,
         max_chunks_per_org=settings.max_indexed_chunks_per_org,
+        knowledge=knowledge,
+        graph_extraction=settings.graph_extraction_enabled,
     )
     credentials = CredentialRepository()
     teams = TeamRepository()
@@ -475,6 +481,9 @@ def build_container(
         ),
         relevance_service=RelevanceService(
             db=db, repo=relevance_repo, cache=relevance_settings, audit=audit, authz=authz
+        ),
+        knowledge_service=KnowledgeService(
+            db=db, repo=knowledge, embedder=embedder, audit=audit, authz=authz
         ),
         webhook_service=WebhookService(
             db=db,

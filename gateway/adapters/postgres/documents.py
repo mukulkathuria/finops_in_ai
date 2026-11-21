@@ -27,6 +27,7 @@ class NewDocument:
     embedding_model: str
     chunk_count: int
     token_count: int
+    domain_id: UUID | None = None  # a knowledge domain's document is read into its graph
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,15 +50,18 @@ class DocumentRecord:
     chunk_count: int
     token_count: int
     created_at: datetime
+    domain_id: UUID | None = None
+    graph_status: str = "none"  # none | pending | running | ready | failed (ADR 0011)
 
 
 _INSERT_DOCUMENT: Final = """
 INSERT INTO documents (id, org_id, title, file_id, acl_groups, created_by, api_key_id,
-                       embedding_model, chunk_count, token_count)
+                       embedding_model, chunk_count, token_count, domain_id, graph_status)
 VALUES (:id, app_current_org(), :title, :file_id, CAST(:acl_groups AS text[]), :created_by,
-        :api_key_id, :embedding_model, :chunk_count, :token_count)
+        :api_key_id, :embedding_model, :chunk_count, :token_count, CAST(:domain_id AS uuid),
+        CASE WHEN CAST(:domain_id AS uuid) IS NULL THEN 'none' ELSE 'pending' END)
 RETURNING id, title, file_id, acl_groups, created_by, api_key_id, embedding_model, chunk_count,
-          token_count, created_at
+          token_count, created_at, domain_id, graph_status
 """
 _INSERT_CHUNK: Final = """
 INSERT INTO chunks (id, org_id, document_id, ordinal, content, token_count, acl_groups,
@@ -104,7 +108,7 @@ _SEARCH_EXACT: Final = _SEARCH.replace(
 _COUNT: Final = "SELECT count(*) AS n FROM chunks"
 _LIST: Final = """
 SELECT id, title, file_id, acl_groups, created_by, api_key_id, embedding_model, chunk_count,
-       token_count, created_at
+       token_count, created_at, domain_id, graph_status
 FROM documents
 WHERE acl_groups && CAST(:groups AS text[])
 ORDER BY id DESC
@@ -141,6 +145,7 @@ class DocumentRepository:
                 "embedding_model": document.embedding_model,
                 "chunk_count": document.chunk_count,
                 "token_count": document.token_count,
+                "domain_id": document.domain_id,
             },
         )
         if row is None:

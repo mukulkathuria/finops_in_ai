@@ -127,6 +127,10 @@ async def chat_completions(request: Request) -> Response:
         (_text(m.get("content")) for m in reversed(messages) if m.get("role") == "user"), ""
     )
     reply = f"Mock answer from {model}: {last_user[:160]}"
+    if ((body.get("response_format") or {}).get("json_schema") or {}).get(
+        "name"
+    ) == "graph_extraction":
+        reply = orjson.dumps(_extract(body, last_user)).decode()
     if body.get("logprobs") and any(  # an OCR call (docparse): read the page like a model
         isinstance(part, dict) and part.get("type") == "image_url"
         for m in messages
@@ -192,6 +196,32 @@ async def chat_completions(request: Request) -> Response:
             "usage": usage,
         }
     )
+
+
+def _extract(body: dict[str, Any], text: str) -> dict[str, Any]:
+    """A deterministic stand-in for a relation extraction model (the gateway's ADR 0011). A
+    sentence "<subject> <relation type in words> <a>, <b> and <c>" states that relation from the
+    subject, of the schema's first entity type, to each object, of the entity type that follows
+    the relation's position: has_symptom (first) -> the second type, diagnosed_by -> the third."""
+    item = body["response_format"]["json_schema"]["schema"]["properties"]["relations"]["items"]
+    relation_types: list[str] = item["properties"]["type"]["enum"]
+    entity_types: list[str] = item["properties"]["source"]["properties"]["type"]["enum"]
+    relations: list[dict[str, Any]] = []
+    for sentence in re.split(r"[.\n;]+", text):
+        for i, relation in enumerate(relation_types):
+            words = re.escape(relation.replace("_", " "))
+            found = re.match(rf"\s*(.+?)\s+{words}\s+(.+)", sentence, re.IGNORECASE)
+            if found is None:
+                continue
+            target = entity_types[min(i + 1, len(entity_types) - 1)]
+            source = {"name": found.group(1).strip(), "type": entity_types[0]}
+            relations.extend(
+                {"source": source, "type": relation, "target": {"name": n.strip(), "type": target}}
+                for n in re.split(r",\s*|\s+and\s+", found.group(2))
+                if n.strip()
+            )
+            break
+    return {"relations": relations}
 
 
 def _logprobs(body: dict[str, Any], reply: str) -> dict[str, Any]:

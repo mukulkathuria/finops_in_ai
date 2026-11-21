@@ -19,12 +19,14 @@ from pathlib import Path
 
 import httpx2
 
+from gateway.adapters.extraction.openai_compat import OpenAICompatExtractor
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.security.envelope import Envelope, LocalKeyManager, parse_master_keys
 from gateway.app.logging import configure_logging
 from gateway.app.settings import Settings
 from worker.jobs.budget_janitor import BudgetJanitor
 from worker.jobs.cache_janitor import CacheJanitor
+from worker.jobs.graph_extraction import GraphExtraction
 from worker.jobs.outbox_dispatcher import OutboxDispatcher
 from worker.jobs.price_sync import PriceSync
 
@@ -74,6 +76,44 @@ async def _sync_prices(prices: PriceSync) -> None:
         )
 
 
+def _graph_extraction(
+    settings: Settings, db: Database, http: httpx2.AsyncClient
+) -> GraphExtraction:
+    key = settings.graph_extractor_api_key
+    extractor = OpenAICompatExtractor(
+        settings.graph_extractor_base_url or "",
+        http=http,
+        model=settings.graph_extractor_model or "",
+        api_key=key.get_secret_value() if key is not None else None,
+        timeout_s=settings.graph_extractor_timeout_s,
+    )
+    return GraphExtraction(db, extractor, concurrency=settings.graph_extractor_concurrency)
+
+
+async def _extract_graphs(job: GraphExtraction, stop: asyncio.Event, settings: Settings) -> None:
+    """Knowledge-domain documents into their graphs (ADR 0011): one after another while any
+    waits, then a look every OUTBOX_INTERVAL_SECONDS."""
+    while not stop.is_set():
+        try:
+            report = await job.run_once()
+        except Exception:
+            log.exception("graph extraction failed; retrying next interval")
+            report = None
+        if report is not None:
+            log.info(
+                "graph extraction",
+                extra={
+                    "document_id": str(report.document_id),
+                    "status": report.status,
+                    "relations": report.relations,
+                    "tokens": report.tokens,
+                },
+            )
+            continue
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), settings.outbox_interval_seconds)
+
+
 async def run(settings: Settings, stop: asyncio.Event) -> None:
     if settings.worker_database_url is None:
         raise SystemExit("WORKER_DATABASE_URL is required to run the worker")
@@ -103,6 +143,13 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
                     allow_insecure=not settings.is_production_like,
                 )
                 if settings.price_sync_source
+                else None
+            )
+            extraction = (
+                asyncio.create_task(
+                    _extract_graphs(_graph_extraction(settings, db, http), stop, settings)
+                )
+                if settings.graph_extraction_enabled
                 else None
             )
             while not stop.is_set():
@@ -145,6 +192,10 @@ async def run(settings: Settings, stop: asyncio.Event) -> None:
                     log.exception("worker pass failed; retrying next interval")
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), settings.outbox_interval_seconds)
+            if extraction is not None:  # a document cut short is taken again when its lease ends
+                extraction.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await extraction
     finally:
         await db.dispose()
 

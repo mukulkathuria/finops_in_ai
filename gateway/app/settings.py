@@ -120,6 +120,18 @@ class Settings(BaseSettings):
     # The code graph's engine (ADR 0010): `sql` (joins and recursive CTEs) or `age` (Cypher on
     # Apache AGE, after infra/docker/postgres/sql/age-setup.sql has run on the database).
     graph_engine: Literal["sql", "age"] = "sql"
+    # Graph retrieval (ADR 0011): the chat model that reads documents filed under a knowledge
+    # domain into relations (OpenAI-compatible, JSON schema output). The worker calls it; unset,
+    # documents cannot be filed under a domain.
+    graph_extractor_base_url: str | None = None
+    graph_extractor_model: str | None = None
+    graph_extractor_api_key: SecretStr | None = None
+    graph_extractor_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    graph_extractor_concurrency: int = Field(default=4, ge=1, le=32)
+
+    @property
+    def graph_extraction_enabled(self) -> bool:
+        return bool(self.graph_extractor_base_url and self.graph_extractor_model)
 
     # Savings (US-17): what the gateway's own work costs (micro-USD), subtracted from
     # what the optimizations save.

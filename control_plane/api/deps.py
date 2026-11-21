@@ -10,6 +10,7 @@ from control_plane.services.cache import CacheSettingsService
 from control_plane.services.guardrails import GuardrailService
 from control_plane.services.identity import IdentityService
 from control_plane.services.invitations import InvitationService
+from control_plane.services.knowledge import KnowledgeService
 from control_plane.services.providers import ProviderKeyService
 from control_plane.services.relevance import RelevanceService
 from control_plane.services.routing import RoutingService
@@ -51,6 +52,8 @@ class ControlPlaneServices(GatewayServices, Protocol):
     def routing_service(self) -> RoutingService: ...
     @property
     def relevance_service(self) -> RelevanceService: ...
+    @property
+    def knowledge_service(self) -> KnowledgeService: ...
     @property
     def sso_service(self) -> SsoService: ...
 

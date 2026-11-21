@@ -352,17 +352,19 @@ async def chat_completions(
         question = _last_user_text(body.messages)
         k = body.retrieval.k
         plan = await retrieval.plan(caller.org_id, k)  # US-21: rerank more than k
-        hits = await retrieval.search(
+        found = await retrieval.search_routed(
             file_owner(caller), caller.groups, question, plan.candidates, source="chat"
         )
-        hits, dropped = await chat.passages(caller.org_id, hits)
+        hits, dropped = await chat.passages(caller.org_id, found.hits)
         selection = await retrieval.select(question, hits, k=k, plan=plan)
         req = with_retrieved(req, selection.passages)
         headers["x-finops-retrieved-chunks"] = str(len(selection.passages))
+        headers["x-finops-retrieval-route"] = str(found.route["route"])  # ADR 0011
         retrieved: dict[str, Any] = {
             **retrieval_report(selection.passages),
             "dropped": dropped,
             "query_tokens": text_tokens(question),
+            "route": found.route,
         }
         if (relevance := selection.report) is not None:
             retrieved["relevance"] = relevance

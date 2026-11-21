@@ -19,6 +19,7 @@ from control_plane.api import (
     cache,
     guardrails,
     invitations,
+    knowledge,
     providers,
     relevance,
     routing,
@@ -123,6 +124,7 @@ def create_app(
     app.include_router(cache.router)
     app.include_router(routing.router)
     app.include_router(relevance.router)
+    app.include_router(knowledge.router)
     app.include_router(files.router)
     app.include_router(documents.router)
     app.include_router(projects.router)

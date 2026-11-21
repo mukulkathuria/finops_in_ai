@@ -17,6 +17,7 @@ from gateway.adapters.postgres.documents import DocumentRecord
 from gateway.api.caller import AnyCaller, Caller, HeavyCaller, ModelCaller
 from gateway.api.files import file_owner
 from gateway.domain.errors import NotFound
+from gateway.domain.knowledge import DOMAIN_PATTERN
 from gateway.domain.policy import Permission
 from gateway.domain.retrieval import Access, share_groups, team_group, user_group
 from gateway.pipeline.parsing import file_id_of
@@ -52,6 +53,11 @@ class DocumentIn(BaseModel):
     text: str | None = Field(default=None, max_length=4_000_000)
     file_id: str | None = None
     access: AccessIn = Field(default_factory=AccessIn)
+    knowledge_domain: str | None = Field(
+        default=None,
+        pattern=DOMAIN_PATTERN,
+        description="File it under a knowledge domain: it is then read into the domain's graph.",
+    )
 
 
 class DocumentOut(BaseModel):
@@ -65,6 +71,8 @@ class DocumentOut(BaseModel):
     embedding_model: str
     created_at: int
     warnings: list[str] = Field(default_factory=list)  # what the index left out, and why
+    knowledge_domain_id: UUID | None = None
+    graph_status: str = "none"  # none | pending | running | ready | failed
 
     @classmethod
     def of(cls, d: DocumentRecord, warnings: Sequence[str] = ()) -> DocumentOut:
@@ -78,6 +86,8 @@ class DocumentOut(BaseModel):
             embedding_model=d.embedding_model,
             created_at=int(d.created_at.timestamp()),
             warnings=list(warnings),
+            knowledge_domain_id=d.domain_id,
+            graph_status=d.graph_status,
         )
 
 
@@ -103,6 +113,8 @@ class HitOut(BaseModel):
 class SearchOut(BaseModel):
     object: Literal["list"] = "list"
     data: list[HitOut]
+    route: Literal["graph", "vector"] = "vector"  # ADR 0011: from a domain's graph, or by vector
+    knowledge_domain: str | None = None  # the domain whose graph answered
 
 
 def default_group(caller: Caller) -> str:
@@ -133,7 +145,11 @@ async def create_document(
     )
     file_id = file_id_of(body.file_id) if body.file_id is not None else None
     ingested = await retrieval.ingest(
-        Author(file_owner(caller), groups), body.title, body.text, file_id
+        Author(file_owner(caller), groups),
+        body.title,
+        body.text,
+        file_id,
+        domain=body.knowledge_domain,
     )
     return DocumentOut.of(ingested.record, ingested.warnings)
 
@@ -159,7 +175,8 @@ async def delete_document(
 
 @router.post("/v1/retrieval/search")
 async def search(body: SearchIn, caller: ModelCaller, retrieval: Retrieval) -> SearchOut:
-    hits = await retrieval.search(file_owner(caller), caller.groups, body.query, body.k)
+    found = await retrieval.search_routed(file_owner(caller), caller.groups, body.query, body.k)
+    graph = found.route["route"] == "graph"
     return SearchOut(
         data=[
             HitOut(
@@ -169,6 +186,8 @@ async def search(body: SearchIn, caller: ModelCaller, retrieval: Retrieval) -> S
                 content=h.content,
                 score=round(h.score, 4),
             )
-            for h in hits
-        ]
+            for h in found.hits
+        ],
+        route="graph" if graph else "vector",
+        knowledge_domain=found.route.get("domain") if graph else None,
     )

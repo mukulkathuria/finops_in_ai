@@ -67,6 +67,10 @@ x-app-env: &app-env
   RERANKER_TIMEOUT_S: ${RERANKER_TIMEOUT_S:-10}
   # sql | age (Cypher on Apache AGE, after age-setup.sql; ADR 0010)
   GRAPH_ENGINE: ${GRAPH_ENGINE:-sql}
+  # Graph retrieval (ADR 0011): the model the worker reads knowledge-domain documents with
+  GRAPH_EXTRACTOR_BASE_URL: ${GRAPH_EXTRACTOR_BASE_URL-http://mock-llm:8000/v1}
+  GRAPH_EXTRACTOR_MODEL: ${GRAPH_EXTRACTOR_MODEL-mock-small}
+  GRAPH_EXTRACTOR_API_KEY: ${GRAPH_EXTRACTOR_API_KEY:-dev-only}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 

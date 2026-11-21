@@ -224,14 +224,14 @@ class _Session:
         return tool_result(text, summary)
 
     async def search_documents(self, args: _SearchArgs) -> dict[str, Any]:
-        hits = await self.retrieval.search(
+        found = await self.retrieval.search_routed(
             file_owner(self.caller), self.caller.groups, args.query, args.k, source="mcp"
         )
-        hits, dropped = await self.chat.passages(self.caller.org_id, hits)
+        hits, dropped = await self.chat.passages(self.caller.org_id, found.hits)
         if not hits:
             return tool_result(
                 "No document you may read matches the query.",
-                {"results": [], "dropped": len(dropped)},
+                {"results": [], "dropped": len(dropped), "route": found.route["route"]},
             )
         results = [
             {
@@ -242,7 +242,11 @@ class _Session:
             }
             for h in hits
         ]
-        summary: dict[str, Any] = {"results": results, "dropped": len(dropped)}
+        summary: dict[str, Any] = {
+            "results": results,
+            "dropped": len(dropped),
+            "route": found.route["route"],  # ADR 0011: a domain's graph, or the vector search
+        }
         text = retrieved_context(hits)
         await self._counted(args, text, summary)
         return tool_result(text, summary)

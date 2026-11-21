@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Final
 from uuid import UUID, uuid7
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from gateway.adapters.observability.metrics import GatewayMetrics
 from gateway.adapters.postgres.database import Database, TenantContext
 from gateway.adapters.postgres.documents import (
@@ -21,8 +23,10 @@ from gateway.adapters.postgres.documents import (
     NewChunk,
     NewDocument,
 )
+from gateway.adapters.postgres.knowledge import KnowledgeRepository
 from gateway.adapters.postgres.relevance import RelevanceSettingsCache
 from gateway.domain.errors import Forbidden, InvalidInput, NotFound
+from gateway.domain.knowledge import MAX_CANDIDATES, query_terms
 from gateway.domain.llm import CanonicalRequest, Message, TextPart
 from gateway.domain.parsing import indexable_text, text_tokens
 from gateway.domain.retrieval import (
@@ -71,6 +75,12 @@ class Ingested:
     warnings: tuple[str, ...] = ()  # what was left out of the index, and why
 
 
+@dataclass(frozen=True, slots=True)
+class Retrieved:
+    hits: list[Hit]
+    route: dict[str, Any]  # how the passages were found: graph or vector, and why (ADR 0011)
+
+
 def with_retrieved(req: CanonicalRequest, hits: Sequence[Hit]) -> CanonicalRequest:
     """The request with the retrieved passages before the last user message."""
     return with_reference(req, retrieved_context(hits)) if hits else req
@@ -108,9 +118,13 @@ class RetrievalService:
         relevance: RelevanceSettingsCache | None = None,
         max_k: int = 50,
         max_chunks_per_org: int = 1_000_000,
+        knowledge: KnowledgeRepository | None = None,
+        graph_extraction: bool = False,
     ) -> None:
         self._db = db
         self._repo = repo
+        self._knowledge = knowledge  # graph retrieval for knowledge domains (ADR 0011)
+        self._graph_extraction = graph_extraction  # an extraction model is configured
         self._embedder = embedder
         self._parsing = parsing
         self._metrics = metrics
@@ -124,10 +138,19 @@ class RetrievalService:
         return TenantContext(owner.org_id, owner.user_id)
 
     async def ingest(
-        self, author: Author, title: str, text: str | None, file_id: UUID | None
+        self,
+        author: Author,
+        title: str,
+        text: str | None,
+        file_id: UUID | None,
+        *,
+        domain: str | None = None,
     ) -> Ingested:
+        """Index a document. Filed under a knowledge domain, it is also read into the domain's
+        graph, in the background (ADR 0011)."""
         if (text is None) == (file_id is None):
             raise InvalidInput("send either text or file_id", param="text")
+        domain_id = await self._domain_id(author.owner, domain) if domain is not None else None
         warnings: tuple[str, ...] = ()
         if file_id is not None:
             artifact = (await self._parsing.derive(author.owner, file_id)).artifact
@@ -162,6 +185,7 @@ class RetrievalService:
             embedding_model=self._embedder.model,
             chunk_count=len(chunks),
             token_count=sum(counted),
+            domain_id=domain_id,
         )
         rows = [
             NewChunk(i, chunk, tokens, vector)
@@ -172,19 +196,100 @@ class RetrievalService:
         self._metrics.retrievals.labels("ingest").inc()
         return Ingested(record, warnings)
 
+    async def _domain_id(self, owner: Owner, name: str) -> UUID:
+        if self._knowledge is None or not self._graph_extraction:
+            raise InvalidInput(
+                "graph extraction is not configured: set GRAPH_EXTRACTOR_BASE_URL and"
+                " GRAPH_EXTRACTOR_MODEL",
+                code="graph_extraction_off",
+                param="knowledge_domain",
+            )
+        async with self._db.transaction(self._ctx(owner)) as conn:
+            found = await self._knowledge.by_name(conn, name)
+        if found is None:
+            raise NotFound("no such knowledge domain", code="knowledge_domain_not_found")
+        return found.id
+
     async def search(
         self, owner: Owner, groups: frozenset[str], query: str, k: int, *, source: str = "api"
     ) -> list[Hit]:
+        return (await self.search_routed(owner, groups, query, k, source=source)).hits
+
+    async def search_routed(
+        self, owner: Owner, groups: frozenset[str], query: str, k: int, *, source: str = "api"
+    ) -> Retrieved:
+        """The k passages for a query, and how they were found. A query whose embedding is near
+        a knowledge domain's intent and that names entities of its graph is answered from the
+        graph first (ADR 0011); every other query, and any room the graph leaves, from the
+        vector search."""
         query = query.strip()[:_MAX_QUERY_CHARS]
         if not query:
-            return []
+            return Retrieved([], {"route": "vector"})
+        k = min(k, self._max_k)
         (vector,) = await self._embedder.embed([query])
         async with self._db.transaction(self._ctx(owner)) as conn:
             hits = await self._repo.search(
-                conn, vector, groups=groups, model=self._embedder.model, k=min(k, self._max_k)
+                conn, vector, groups=groups, model=self._embedder.model, k=k
             )
+        route: dict[str, Any] = {"route": "vector"}
+        if self._knowledge is not None and groups:
+            # Its own transaction: the vector search tuned the planner for itself.
+            async with self._db.transaction(self._ctx(owner)) as conn:
+                route, graph = await self._graph(conn, self._knowledge, vector, query, groups, k)
+            if graph:
+                taken = {h.chunk_id for h in graph}
+                hits = [*graph, *(h for h in hits if h.chunk_id not in taken)][:k]
         self._metrics.retrievals.labels(source).inc()
-        return hits
+        return Retrieved(hits, route)
+
+    async def _graph(
+        self,
+        conn: AsyncConnection,
+        knowledge: KnowledgeRepository,
+        vector: Sequence[float],
+        query: str,
+        groups: frozenset[str],
+        k: int,
+    ) -> tuple[dict[str, Any], list[Hit]]:
+        """The intent, then the entities, then the graph's answer: each step can send the query
+        back to the vector search, and the report says which one did."""
+        intent = await knowledge.intent(conn, vector, model=self._embedder.model)
+        if intent is None:
+            return {"route": "vector"}, []
+        report: dict[str, Any] = {
+            "route": "vector",
+            "domain": intent.domain.name,
+            "intent": round(intent.score, 4),
+            "threshold": intent.domain.intent_threshold,
+        }
+        if intent.score < intent.domain.intent_threshold:
+            return {**report, "reason": "intent_below_threshold"}, []
+        named = await knowledge.linked(conn, intent.domain.id, query_terms(query), groups=groups)
+        if not named:
+            return {**report, "reason": "no_entities"}, []
+        candidates = await knowledge.candidates(
+            conn, [e.id for e in named], groups=groups, top=MAX_CANDIDATES
+        )
+        # Several named entities that meet in one (symptoms in a disease) centre the answer there;
+        # otherwise it centres on the named entities themselves.
+        meeting = [c for c in candidates if c.matched >= 2]
+        centre = (
+            [(c.entity.id, c.matched / len(named)) for c in meeting]
+            if meeting
+            else [(e.id, 1.0) for e in named]
+        )
+        hits = await knowledge.evidence(conn, centre, groups=groups, k=k)
+        report = {
+            **report,
+            "entities": [e.name for e in named],
+            "answer": [
+                {"name": c.entity.name, "type": c.entity.type, "matched": c.matched}
+                for c in meeting
+            ],
+        }
+        if not hits:
+            return {**report, "reason": "no_evidence"}, []
+        return {**report, "route": "graph", "passages": len(hits)}, hits
 
     async def plan(self, org_id: UUID, k: int) -> Plan:
         """How this org's retrieval runs: the `rag_relevance` mode (off without a reranker), its

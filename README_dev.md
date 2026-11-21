@@ -296,6 +296,38 @@ Set the threshold, budget and candidates with `PUT /v1/admin/retrieval-settings`
 In shadow the k nearest go out and the report says what the filter would have pruned. If the
 reranker fails, the k nearest go out and the ledger records `rerank: failed`.
 
+### Graph retrieval for knowledge domains (ADR 0011)
+
+Some questions are about how things connect, not about wording: symptoms point to a disease, and
+a disease to the test that confirms it. For those, retrieval walks a knowledge graph. Only where
+it fits, though: every other question uses the vector search.
+
+1. **Declare the domain** (an org admin): `POST /v1/admin/knowledge-domains` with a `name`
+   (`medical`), a `description`, `entity_types` (`disease`, `symptom`, `test`), `relation_types`
+   (`has_symptom`, `diagnosed_by`), a few `examples` (questions the graph should answer) and an
+   `intent_threshold` (0.5 by default). The examples' mean embedding is the domain's intent.
+2. **File documents under it**: `POST /v1/documents` with `"knowledge_domain": "medical"`. Other
+   documents are never extracted. The worker reads each filed document in the background with
+   the extraction model (`GRAPH_EXTRACTOR_*`). Each chunk becomes relations of the domain's
+   types, kept with the chunk they came from. `graph_status` goes `pending`, `running`, then
+   `ready`, or `failed` with the reason.
+3. **Ask as usual** (chat `retrieval`, `POST /v1/retrieval/search`, MCP `search_documents`). For
+   each query, the gateway:
+   - compares its embedding, already made for the vector search, with each domain's intent;
+   - when one is near enough, looks for that domain's entities in the query;
+   - when it finds some, takes the entities they meet in (the disease most of the named
+     symptoms point to);
+   - sends the chunks that state those entities' relations, a second hop included (the test
+     that diagnoses it). The vector search fills any room left.
+
+   The answer says which route it took: `route` in the search response, the
+   `x-finops-retrieval-route` header in chat, and the reason in the ledger notes
+   (`intent_below_threshold`, `no_entities`, `no_evidence`).
+
+Every relation counts only through chunks the caller may read, so the graph never reveals a
+document's content to someone it is not shared with. Deleting a domain deletes its graph; its
+documents stay in the vector index.
+
 ## Code context (the code graph)
 
 A code question needs the modules it names, not whole files. A project holds a code graph and

@@ -105,6 +105,14 @@ accounts, sets the limits, and sees every request, its cost, and what it saved.
   have no text.
 - Documents are indexed in pgvector. Retrieval filters by access-control groups inside the query,
   so a person is never given a passage they may not read, and the model never sees it.
+- Graph retrieval where it fits:
+  - An admin declares a knowledge domain, say `medical`, with its entity types (disease,
+    symptom, test), its relation types and example questions.
+  - Documents filed under it are read into a knowledge graph in PostgreSQL.
+  - A question whose meaning is near the domain's examples, and that names entities of its graph
+    (fever, rash), is answered from the graph: from the disease those symptoms meet in, to the
+    test that diagnoses it.
+  - Every other question uses vector search.
 
 ### 10. A code knowledge graph for coding tasks
 - Code projects are indexed into a graph of modules, symbols, calls and imports, stored in
@@ -347,6 +355,7 @@ empty setting must sit on its own line, because Compose would read it as the val
 | --- | --- |
 | `EMBEDDER_BASE_URL`, `EMBEDDER_MODEL`, `EMBEDDER_API_KEY` | Your bge-m3 embedding server (TEI, vLLM or Infinity); 1024-dimensional vectors |
 | `RERANKER_BASE_URL`, `RERANKER_MODEL`, `RERANKER_API_KEY` | Your reranker (`/rerank` API); empty turns it off |
+| `GRAPH_EXTRACTOR_BASE_URL`, `GRAPH_EXTRACTOR_MODEL`, `GRAPH_EXTRACTOR_API_KEY` | The chat model (OpenAI-compatible, JSON schema output) that reads knowledge-domain documents into the graph; empty turns graph retrieval off |
 | `PARSER_BASE_URL`, `OCR_BACKEND`, `GLM_OCR_*`, `PADDLEOCR_VL_*`, `DOCPARSE_VLM_BASE_URL` | Document parsing and OCR (`glm_ocr` or `paddleocr_vl`, one at a time) |
 | `CLAMAV_ADDRESS` | `host:port` of clamd to scan uploads; empty turns scanning off |
 | `CLASSIFIER_BACKEND` | `rules`, `laya` or `jev`, for prompt-injection detection |
