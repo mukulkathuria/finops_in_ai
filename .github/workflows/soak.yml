@@ -1,0 +1,79 @@
+# Soak (spec section 11): the baseline held for an hour, or `hours`, through the production
+# topology: two gateway replicas behind nginx, the mock provider answering in 50 ms. It watches
+# for what only time shows: memory that keeps growing, latency that drifts, errors that start
+# late. It ends with the restore drill on the fuller database. Monthly, on demand, and when this
+# workflow changes.
+name: soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: How long to hold the load
+        default: "1"
+      users:
+        description: Concurrent users
+        default: "100"
+  schedule:
+    - cron: "23 2 1 * *" # monthly, on the 1st at 02:23 UTC
+  push:
+    branches: [main]
+    paths:
+      - "tests/load/memory_trend.py"
+      - ".github/workflows/soak.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak
+  cancel-in-progress: false # never cut a soak short
+
+env:
+  K6_IMAGE: grafana/k6:2.3.0
+
+jobs:
+  soak:
+    name: the baseline held for hours, memory sampled
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      COMPOSE_FILE: docker-compose.yml:tests/load/compose.load.yml
+      BASE_URL: http://127.0.0.1:5173
+      HOURS: ${{ inputs.hours || '1' }}
+      USERS: ${{ inputs.users || '100' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start the stack (two gateway replicas; the provider answers in 50 ms)
+        id: stack
+        run: |
+          python3 scripts/init_env.py
+          printf '%s\n' SIGNUP_MODE=open MOCK_LATENCY_MS_MIN=50 MOCK_LATENCY_MS_MAX=50 \
+            MOCK_EMBED_LATENCY_MS=10 MOCK_CLASSIFIER_LATENCY_MS=10 >> .env
+          docker compose up -d --build --wait --wait-timeout 900 --scale gateway=2
+      - name: Hold the baseline, sampling memory every five minutes
+        run: |
+          ( while true; do
+              docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' |
+                sed "s/^/$(date +%s) /" >> /tmp/memory.txt
+              sleep 300
+            done ) &
+          sampler=$!
+          status=0
+          tests/load/k6/run.sh baseline -e VUS="$USERS" -e RAMP=2m -e HOLD="${HOURS}h" || status=$?
+          kill "$sampler"
+          exit "$status"
+      - name: Memory over time (a gateway replica may not double after warm-up)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
+        shell: bash # with pipefail, so a leak fails the step through the tee
+        run: python3 tests/load/memory_trend.py /tmp/memory.txt | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Restore drill on the soaked database (writers stopped)
+        if: ${{ !cancelled() && steps.stack.outcome == 'success' }}
+        shell: bash
+        run: |
+          docker compose stop gateway worker
+          { echo '### Restore drill'; echo '```'; scripts/restore_drill.sh; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Logs of a failed run
+        if: failure()
+        run: docker compose logs --tail 120 gateway worker db
