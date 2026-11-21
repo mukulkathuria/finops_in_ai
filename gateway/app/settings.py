@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     moderation_model: str = "omni-moderation-latest"
     moderation_timeout_s: float = Field(default=5.0, gt=0, le=60)
     max_indexed_chunks_per_org: int = Field(default=1_000_000, ge=1, le=1_000_000_000)
+    # The code graph's engine (ADR 0010): `sql` (joins and recursive CTEs) or `age` (Cypher on
+    # Apache AGE, after infra/docker/postgres/sql/age-setup.sql has run on the database).
+    graph_engine: Literal["sql", "age"] = "sql"
 
     # Savings (US-17): what the gateway's own work costs (micro-USD), subtracted from
     # what the optimizations save.

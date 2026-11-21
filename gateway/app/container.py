@@ -47,7 +47,7 @@ from gateway.adapters.postgres.credentials import CredentialRepository, org_key_
 from gateway.adapters.postgres.database import Database
 from gateway.adapters.postgres.documents import DocumentRepository
 from gateway.adapters.postgres.files import FileRepository
-from gateway.adapters.postgres.graph import GraphRepository, PostgresGraphStore
+from gateway.adapters.postgres.graph import AgeGraphStore, GraphRepository, PostgresGraphStore
 from gateway.adapters.postgres.idempotency import IdempotencyRepository
 from gateway.adapters.postgres.identity import IdentityRepository, RoleCatalogCache
 from gateway.adapters.postgres.policies import PolicyCache, PolicyRepository
@@ -315,7 +315,8 @@ def build_container(
         max_failed_logins=settings.login_max_failures,
         sso=SsoRepository(),
     )
-    graph_store = PostgresGraphStore(db)
+    age = settings.graph_engine == "age"
+    graph_store = AgeGraphStore(db) if age else PostgresGraphStore(db)
     moderator = build_moderator(
         settings.moderation_backend,
         http=http,
@@ -435,7 +436,7 @@ def build_container(
         code_service=CodeService(
             db=db,
             graph=graph_store,
-            repo=GraphRepository(),
+            repo=GraphRepository(age=age),
             files=file_service,
             probe=OutlineProbe(),
         ),

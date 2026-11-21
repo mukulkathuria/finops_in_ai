@@ -56,6 +56,9 @@ A minor release keeps the catalog version, so it is always a swap of binaries:
      RLS audit clean. For the next major, re-pin the base image and run the rehearsal with
      `OLD_MAJOR=19 NEW_MAJOR=20`.
    - The fallback is dump and restore (`restore.md`), which the restore drill tests on every push.
+   - With `GRAPH_ENGINE=age`, drop the AGE graphs first, since they are copies of the SQL graph:
+     `SELECT ag_catalog.drop_graph(name, true) FROM ag_catalog.ag_graph; DROP EXTENSION age;`
+     as a superuser. After the upgrade, run `age-setup.sql`, which rebuilds them (ADR 0010).
 3. **Rehearse on a copy.** Restore last night's backup into a scratch environment
    (`scripts/env.sh up staging`, then `restore.md`), apply the method, then run CI, the `bench`
    and the `load` workflows on the new image.

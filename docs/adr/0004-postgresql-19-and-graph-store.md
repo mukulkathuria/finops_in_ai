@@ -59,7 +59,8 @@ stands:
 ## Alternatives considered
 - Develop on `19beta1` to keep SQL/PGQ: rejected, it is an abandoned pre-release behaviour.
 - Apache AGE: a second query language and extension to operate; the spec mandates PostgreSQL-only
-  SQL and an interface we can already satisfy with joins and CTEs.
+  SQL and an interface we can already satisfy with joins and CTEs. Amended on 2026-11-21 by
+  ADR 0010: AGE is now an opt-in engine behind the same port (`GRAPH_ENGINE=age`).
 
 ## Consequences
 - Graph latency depends on the covering indexes on both edge directions and on precomputed

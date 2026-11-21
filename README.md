@@ -112,6 +112,8 @@ accounts, sets the limits, and sees every request, its cost, and what it saved.
 - Coding agents ask for a context pack: the code a task touches, in a fraction of the tokens a
   file dump costs.
 - Walks of two or three hops answer in about 2 ms at a million edges.
+- Optionally, the graph also lives in Apache AGE in the same database, so you can query it with
+  Cypher (`GRAPH_ENGINE=age`).
 - The same context is served to IDEs and agents as MCP tools (`/v1/mcp`).
 
 ### 11. A shared workspace for agents
@@ -347,6 +349,7 @@ empty setting must sit on its own line, because Compose would read it as the val
 | `CLASSIFIER_BACKEND` | `rules`, `laya` or `jev`, for prompt-injection detection |
 | `LAYA_BASE_URL`, `LAYA_API_KEY`, `JEV_API_KEY`, `JEV_BASE_URL`, `JEV_MODEL` | The classifier services. Jev is used only when its key is set |
 | `MODERATION_BACKEND`, `MODERATION_BASE_URL`, `MODERATION_API_KEY` | Image prompt moderation: built-in `rules`, or an OpenAI-compatible moderation API |
+| `GRAPH_ENGINE` | The code graph's engine: `sql` (the default) or `age` (Cypher on Apache AGE; run `age-setup.sql` first, see `README_dev.md`) |
 | `OBJECT_STORE_PATH` | Where uploaded files are kept (a volume, or a shared mount for several replicas) |
 
 ### Limits and tuning (the defaults suit most installations)

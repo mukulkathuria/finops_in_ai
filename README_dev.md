@@ -330,6 +330,32 @@ How the indexers read the code:
 Every graph read checks the project's ACL in the same statement (`GraphStore`, ADR 0004: joins
 for fixed depth, recursive CTEs for reachability).
 
+### Apache AGE (opt-in, ADR 0010)
+
+The database image includes Apache AGE, so the graph can also be read with Cypher. Each project
+is one AGE graph, `g` followed by the project id's hex, with `node` vertices (`uid`, `kind`,
+`name`, `path`) and `link` edges (`kind`, `confidence`). The SQL tables stay the source of truth;
+every re-index rebuilds the project's AGE graph in the same transaction. To turn it on:
+
+```bash
+docker compose exec db psql -U postgres -d finops -f /opt/finops/sql/age-setup.sql
+echo GRAPH_ENGINE=age >> .env && docker compose up -d gateway
+```
+
+Then `/readyz` checks the extension, and graph reads run as Cypher. Any session in the org can
+read its projects' graphs, for example:
+
+```sql
+SELECT * FROM ag_catalog.cypher('g<project id hex>', $$
+  MATCH (a:node)-[e:link {kind: 'calls'}]->(b:node) RETURN a.name, b.name
+$$) AS (caller ag_catalog.agtype, callee ag_catalog.agtype);
+```
+
+AGE has no PostgreSQL 19 release yet, so the image builds the pinned commit of its
+`PG19/v1.8.0-rc0` tag. Prefer fixed-length patterns: in released AGE, variable-length
+(`-[*1..n]->`) walks ignore row-level security. Each graph holds one project only, though, so
+such a walk cannot reach another project's graph.
+
 A chat request asks for the context with `"code_context": {"project_id": "...", "max_tokens":
 4000}` (OpenAI SDK: `extra_body`):
 
@@ -595,7 +621,7 @@ list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
   beta cycle, and 19.0 (2026-11-19) ships without them: its release notes have none, and a CI
   test proves the probe finds none (ADR 0004). They are expected in PostgreSQL 20. Graph reads go
   through the `GraphStore` port using indexed joins and recursive CTEs, which run on PG16+
-  including PG19.
+  including PG19. Cypher on Apache AGE is the opt-in alternative (`GRAPH_ENGINE=age`, ADR 0010).
 - **Secrets** live only in `.env` (gitignored) or your secret manager. `.env.example` holds
   placeholders only. Provider keys are stored with envelope encryption and never returned.
 - **Comments in `.env`.** Put a comment after an empty setting on its own line. Compose reads

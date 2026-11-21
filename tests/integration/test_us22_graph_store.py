@@ -1,13 +1,16 @@
-"""US-22 groundwork: the graph store answers fixed-depth patterns with joins and reachability with
-a recursive CTE, ends cycles, puts deterministic edges first, replaces a graph whole, and returns
-nothing of a project the caller cannot read, or of another org."""
+"""US-22 groundwork: the graph store answers fixed-depth patterns and reachability, ends cycles,
+puts deterministic edges first, replaces a graph whole, and returns nothing of a project the
+caller cannot read, or of another org. Both engines pass the same tests: joins and recursive CTEs
+(`sql`, ADR 0004) and Cypher on Apache AGE (`age`, ADR 0010)."""
 
 import asyncio
 from uuid import UUID, uuid7
 
 import httpx2
+import psycopg
 import pytest
 from fastapi import FastAPI
+from psycopg import sql
 
 from gateway.adapters.postgres.database import TenantContext, fetch_one
 from gateway.adapters.postgres.graph import GraphRepository
@@ -15,11 +18,16 @@ from gateway.domain.code import question_terms, question_words
 from gateway.domain.graph import Edge, Vertex
 from gateway.domain.retrieval import ORG, team_group
 from tests.support.app import signup
+from tests.support.database import DisposableDatabase
 
 Api = tuple[FastAPI, httpx2.AsyncClient]
 
 
-async def test_the_graph_store_reads_within_the_project_acl(api: Api) -> None:
+def _repo(app: FastAPI) -> GraphRepository:
+    return GraphRepository(age=app.state.container.settings.graph_engine == "age")
+
+
+async def _reads_within_the_project_acl(api: Api) -> None:
     app, client = api
     container = app.state.container
     org = UUID((await signup(client))["org"]["id"])
@@ -32,7 +40,7 @@ async def test_the_graph_store_reads_within_the_project_acl(api: Api) -> None:
         Edge(c.id, a.id, "imports"),  # a cycle
         Edge(a.id, d.id, "calls", 0.5),  # inferred
     ]
-    repo = GraphRepository()
+    repo = _repo(app)
     async with container.db.transaction(TenantContext(org)) as conn:
         project = await repo.create_project(
             conn, name="core", groups=[team_group(team)], created_by=None
@@ -65,6 +73,14 @@ async def test_the_graph_store_reads_within_the_project_acl(api: Api) -> None:
         min_confidence=0.9,
     )
     assert {r.vertex.name for r in sure} == {"a", "b", "c"}
+    back = await graph.reachable(
+        org, project_id=project, groups=readers, ids=[d.id], kinds=["calls"], direction="in"
+    )
+    assert [(r.vertex.name, r.depth) for r in back] == [("a", 1)]
+    first = await graph.reachable(
+        org, project_id=project, groups=readers, ids=[a.id], kinds=["imports"], limit=1
+    )
+    assert [(r.vertex.name, r.depth) for r in first] == [("b", 1)]
 
     for org_id, groups in ((org, frozenset({ORG})), (other, readers)):
         read = {"project_id": project, "groups": groups, "ids": [a.id], "kinds": ["imports"]}
@@ -80,10 +96,7 @@ async def test_the_graph_store_reads_within_the_project_acl(api: Api) -> None:
     assert await graph.sql_pgq() is False  # PostgreSQL 19 ships without SQL/PGQ (ADR 0004)
 
 
-async def test_review_best_paths_find_order_indexes_and_concurrent_reindex(api: Api) -> None:
-    """Review C-L10: a vertex reached by two paths keeps the stronger one under LIMIT. C-M6: the
-    names a question gives whole come before part matches under the find limit. C-L7: the edge
-    indexes cover project_id. Two concurrent re-indexes leave one whole graph, never a mix."""
+async def _best_paths_find_order_indexes_and_concurrent_reindex(api: Api) -> None:
     app, client = api
     container = app.state.container
     org = UUID((await signup(client))["org"]["id"])
@@ -96,7 +109,7 @@ async def test_review_best_paths_find_order_indexes_and_concurrent_reindex(api: 
         Edge(a.id, d.id, "calls", 0.9),
         Edge(d.id, c.id, "calls", 0.9),  # a, d, c: 0.9, the best path
     ]
-    repo = GraphRepository()
+    repo = _repo(app)
     async with container.db.transaction(TenantContext(org)) as conn:
         project = await repo.create_project(
             conn, name="diamond", groups=[team_group(team)], created_by=None
@@ -146,3 +159,67 @@ async def test_review_best_paths_find_order_indexes_and_concurrent_reindex(api: 
             limit=10,
         )
     assert [v.name for v in left] in (["first"], ["second"])  # one whole graph, never a mix
+
+
+async def test_the_graph_store_reads_within_the_project_acl(api: Api) -> None:
+    await _reads_within_the_project_acl(api)
+
+
+async def test_the_age_graph_store_reads_within_the_project_acl(age_api: Api) -> None:
+    await _reads_within_the_project_acl(age_api)
+
+
+async def test_review_best_paths_find_order_indexes_and_concurrent_reindex(api: Api) -> None:
+    """Review C-L10: a vertex reached by two paths keeps the stronger one under LIMIT. C-M6: the
+    names a question gives whole come before part matches under the find limit. C-L7: the edge
+    indexes cover project_id. Two concurrent re-indexes leave one whole graph, never a mix."""
+    await _best_paths_find_order_indexes_and_concurrent_reindex(api)
+
+
+async def test_age_best_paths_find_order_indexes_and_concurrent_reindex(age_api: Api) -> None:
+    await _best_paths_find_order_indexes_and_concurrent_reindex(age_api)
+
+
+async def _cypher(db: DisposableDatabase, org: UUID, project: UUID) -> list[tuple[str, ...]]:
+    """`(name)-[kind]->(name)` of the project's AGE graph, read with Cypher as `app` in `org`."""
+    query = sql.SQL(
+        "SELECT CAST(r.x AS text), CAST(r.k AS text), CAST(r.y AS text) FROM ag_catalog.cypher({},"
+        " $$ MATCH (x:node)-[e:link]->(y:node) RETURN x.name, e.kind, y.name $$)"
+        " AS r(x ag_catalog.agtype, k ag_catalog.agtype, y ag_catalog.agtype)"
+    ).format(sql.Literal("g" + project.hex))
+    async with await psycopg.AsyncConnection.connect(db.app_url) as conn, conn.transaction():
+        await conn.execute("SELECT set_config('app.org_id', %s, true)", [str(org)])
+        rows = await (await conn.execute(query)).fetchall()
+    return sorted(tuple(str(value).strip('"') for value in row) for row in rows)
+
+
+async def test_each_project_is_an_age_graph_that_cypher_reads(
+    age_api: Api, age_db: DisposableDatabase
+) -> None:
+    """ADR 0010: one AGE graph per project, kept with the SQL graph in the same transaction.
+    Cypher reads it directly, row security hides it from other orgs, and readiness checks
+    the extension."""
+    app, client = age_api
+    container = app.state.container
+    org = UUID((await signup(client))["org"]["id"])
+    other = UUID((await signup(client))["org"]["id"])
+    module, run = Vertex(uuid7(), "module", "app", "app.py"), Vertex(uuid7(), "symbol", "app.run")
+    defines = [Edge(module.id, run.id, "defines")]
+    repo = _repo(app)
+    async with container.db.transaction(TenantContext(org)) as conn:
+        project = await repo.create_project(
+            conn, name="cypher", groups=[team_group(uuid7())], created_by=None
+        )
+    assert await _cypher(age_db, org, project) == []  # created empty
+    async with container.db.transaction(TenantContext(org)) as conn:
+        await repo.replace_graph(conn, project_id=project, vertices=[module, run], edges=defines)
+    assert await _cypher(age_db, org, project) == [("app", "defines", "app.run")]
+    assert await _cypher(age_db, other, project) == []  # row security
+
+    async with container.db.transaction(TenantContext(org)) as conn:
+        await repo.replace_graph(conn, project_id=project, vertices=[module], edges=[])
+    assert await _cypher(age_db, org, project) == []  # replaced whole
+
+    resp = await client.get("/readyz")
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["graph"] == "ok"

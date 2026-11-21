@@ -65,6 +65,8 @@ x-app-env: &app-env
   RERANKER_MODEL: ${RERANKER_MODEL:-bge-reranker-v2-m3}
   RERANKER_API_KEY: ${RERANKER_API_KEY:-dev-only}
   RERANKER_TIMEOUT_S: ${RERANKER_TIMEOUT_S:-10}
+  # sql | age (Cypher on Apache AGE, after age-setup.sql; ADR 0010)
+  GRAPH_ENGINE: ${GRAPH_ENGINE:-sql}
   # uvicorn trusts X-Forwarded-For only from these addresses (set it to your proxy's).
   FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 

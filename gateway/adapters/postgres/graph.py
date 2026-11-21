@@ -2,7 +2,10 @@
 the SQL/PGQ rewriter produced; PostgreSQL 19 ships without it) and variable depth is a recursive
 CTE whose UNION over (vertex, depth) keeps cycles finite. Every read checks the project's ACL in
 the same statement, under row-level security. The writer replaces a project's graph at once, so
-a reader sees the old graph or the new one, never a mix."""
+a reader sees the old graph or the new one, never a mix.
+
+With GRAPH_ENGINE=age (ADR 0010) the same reads run as Cypher on Apache AGE, one AGE graph per
+project, kept by the writer in the same transaction (migration 0030)."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -192,6 +195,34 @@ ORDER BY lower(split_part(v.name, '.', -1)) = ANY(CAST(:words AS text[])) DESC,
 LIMIT :limit
 """
 _PGQ: Final = "SELECT to_regclass('pg_catalog.pg_propgraph_element') IS NOT NULL AS present"
+# Apache AGE (ADR 0010): the functions return vertex ids; the join to graph_vertex keeps row
+# security and the project, and the ACL check gates the whole statement.
+_AGE_HOPS: Final = """
+SELECT id, kind, name, path, props, confidence FROM (
+  SELECT DISTINCT ON (v.id) v.id, v.kind, v.name, v.path, v.props, h.confidence
+  FROM graph_age_hops(:project, CAST(:ids AS uuid[]), CAST(:kinds AS text[]),
+                      CAST(:direction AS text), CAST(:depth AS int)) h
+  JOIN graph_vertex v ON v.id = h.vertex AND v.project_id = :project
+  WHERE EXISTS (SELECT 1 FROM projects p
+                WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
+  ORDER BY v.id, h.confidence DESC
+) best
+ORDER BY confidence DESC, name, id
+LIMIT :limit
+"""
+_AGE_REACH: Final = """
+SELECT v.id, v.kind, v.name, v.path, v.props, r.depth
+FROM graph_age_reach(:project, CAST(:ids AS uuid[]), CAST(:kinds AS text[]),
+                     CAST(:direction AS text), CAST(:max_depth AS int),
+                     CAST(:floor AS float8), CAST(:limit AS int)) r
+JOIN graph_vertex v ON v.id = r.vertex AND v.project_id = :project
+WHERE EXISTS (SELECT 1 FROM projects p
+              WHERE p.id = :project AND p.acl_groups && CAST(:groups AS text[]))
+ORDER BY r.depth, v.name, v.id
+LIMIT :limit
+"""
+_AGE_SYNC: Final = "SELECT graph_age_sync(:project)"
+_AGE_READY: Final = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'age') AS present"
 
 _PROJECT: Final = """
 INSERT INTO projects (org_id, name, acl_groups, created_by, created_by_team)
@@ -289,7 +320,7 @@ class PostgresGraphStore:
         check_read(kinds, depth, limit, max_depth=MAX_FIXED_DEPTH)
         if depth > 1 and len(ids) > MAX_WALK_IDS:  # the joins multiply paths per hop
             raise ValueError(f"a walk of {depth} hops starts from at most {MAX_WALK_IDS} vertices")
-        sql = _NEIGHBORS.get((direction, depth))
+        sql = self._neighbors_sql(direction, depth)
         if sql is None:
             raise ValueError("direction is out or in")
         if not ids or not groups:
@@ -300,6 +331,8 @@ class PostgresGraphStore:
             "project": project_id,
             "groups": sorted(groups),
             "limit": limit,
+            "direction": direction,
+            "depth": depth,
         }
         async with self._db.transaction(TenantContext(org_id)) as conn:
             rows = await fetch_all(conn, sql, params)
@@ -319,7 +352,7 @@ class PostgresGraphStore:
         limit: int = 500,
     ) -> list[Reached]:
         check_read(kinds, max_depth, limit, max_depth=MAX_DEPTH)
-        sql = _REACH.get(direction)
+        sql = self._reach_sql(direction)
         if sql is None:
             raise ValueError("direction is out or in")
         if not 0.0 <= min_confidence <= 1.0:
@@ -334,10 +367,22 @@ class PostgresGraphStore:
             "limit": limit,
             "max_depth": max_depth,
             "floor": min_confidence,
+            "direction": direction,
         }
         async with self._db.transaction(TenantContext(org_id)) as conn:
             rows = await fetch_all(conn, sql, params)
         return [Reached(_vertex(r), int(r["depth"])) for r in rows]
+
+    def _neighbors_sql(self, direction: Direction, depth: int) -> str | None:
+        return _NEIGHBORS.get((direction, depth))
+
+    def _reach_sql(self, direction: Direction) -> str | None:
+        return _REACH.get(direction)
+
+    async def ready(self) -> bool | None:
+        """Whether the engine's own dependencies answer; None when it needs nothing beyond the
+        database."""
+        return None
 
     async def sql_pgq(self) -> bool | None:
         """Whether the server has SQL/PGQ (ADR 0004 probe), cached once known; None when the
@@ -352,9 +397,34 @@ class PostgresGraphStore:
         return self._pgq
 
 
+class AgeGraphStore(PostgresGraphStore):
+    """The same reads as Cypher on Apache AGE (GRAPH_ENGINE=age, ADR 0010): fixed depth as one
+    MATCH, reachability breadth first with one MATCH per level. Unlike the joins, a Cypher path
+    never reuses an edge. It needs `infra/docker/postgres/sql/age-setup.sql`, and readiness
+    fails until the extension is there."""
+
+    def _neighbors_sql(self, direction: Direction, depth: int) -> str | None:
+        return _AGE_HOPS if direction in ("out", "in") else None
+
+    def _reach_sql(self, direction: Direction) -> str | None:
+        return _AGE_REACH if direction in ("out", "in") else None
+
+    async def ready(self) -> bool | None:
+        try:
+            async with self._db.transaction() as conn:
+                row = await fetch_one(conn, _AGE_READY)
+        except SQLAlchemyError, OSError, TimeoutError:
+            return False
+        return bool(row is not None and row["present"])
+
+
 class GraphRepository:
     """A project, its whole graph and packs replaced in one transaction, and the reads that go
-    with them: each checks the project's ACL in the same statement."""
+    with them: each checks the project's ACL in the same statement. With `age`, each project's
+    AGE graph is rebuilt in the same transaction (ADR 0010)."""
+
+    def __init__(self, *, age: bool = False) -> None:
+        self._age = age
 
     async def project(
         self, conn: AsyncConnection, project_id: UUID, *, groups: frozenset[str]
@@ -437,6 +507,8 @@ class GraphRepository:
         if row is None:
             raise RuntimeError("project insert returned no row")
         project_id: UUID = row["id"]
+        if self._age:  # an empty graph, so reads before the first index find nothing
+            await fetch_one(conn, _AGE_SYNC, {"project": project_id})
         return project_id
 
     async def replace_graph(
@@ -503,3 +575,5 @@ class GraphRepository:
                 ],
             )
         await fetch_one(conn, _INDEXED, {"project": project_id})
+        if self._age:
+            await fetch_one(conn, _AGE_SYNC, {"project": project_id})

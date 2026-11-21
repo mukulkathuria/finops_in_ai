@@ -12,6 +12,11 @@
 Store backups encrypted, in another account or region than the database. A backup that has never
 been restored is not a backup. Run the drill below after every schema change, and at least monthly.
 
+With `GRAPH_ENGINE=age` (ADR 0010), leave Apache AGE out of the dump:
+`pg_dump --format=custom --exclude-extension=age --exclude-schema='g*'`. AGE's catalog keeps
+object ids that a restore cannot carry over, and every AGE graph is a copy of `graph_vertex` and
+`graph_edge`. After the restore, run `age-setup.sql` (`README_dev.md`), which rebuilds them.
+
 ## Restore
 
 Never drop anything until the restored copy has been checked: restore next to the live database,

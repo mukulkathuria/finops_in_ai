@@ -20,6 +20,7 @@ from psycopg import sql
 
 ROOT = Path(__file__).resolve().parents[2]
 SETUP_SQL = ROOT / "infra" / "docker" / "postgres" / "sql" / "database-setup.sql"
+AGE_SQL = SETUP_SQL.with_name("age-setup.sql")
 ROLE_PASSWORD_ENV = {
     "migrator": "FINOPS_MIGRATOR_PASSWORD",
     "app": "FINOPS_APP_PASSWORD",
@@ -71,9 +72,18 @@ def migrate_down(db: DisposableDatabase, revision: str) -> None:
     command.downgrade(_alembic(db.migrator_url), revision)
 
 
-def create_test_database(server_url: str, *, revision: str = "head") -> DisposableDatabase:
+def age_available(server_url: str) -> bool:
+    """Whether the server can install Apache AGE (the project's image builds it in)."""
+    with psycopg.connect(server_url, autocommit=True, connect_timeout=10) as conn:
+        row = conn.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'age'").fetchone()
+    return row is not None
+
+
+def create_test_database(
+    server_url: str, *, revision: str = "head", age: bool = False
+) -> DisposableDatabase:
     """A new database migrated to `revision` (an earlier one lets a test seed data a migration
-    must carry over)."""
+    must carry over). With `age`, also set up Apache AGE as an operator would (ADR 0010)."""
     name = f"finops_test_{os.getpid()}_{secrets.token_hex(3)}"
     ident = sql.Identifier(name)
     with psycopg.connect(server_url, autocommit=True, connect_timeout=10) as conn:
@@ -89,6 +99,9 @@ def create_test_database(server_url: str, *, revision: str = "head") -> Disposab
         conn.execute(SETUP_SQL.read_text(encoding="utf-8"))  # type: ignore[call-overload]
     migrator_url = _role_url(server_url, "migrator", name)
     command.upgrade(_alembic(migrator_url), revision)
+    if age:
+        with psycopg.connect(superuser_url, autocommit=True, connect_timeout=10) as conn:
+            conn.execute(AGE_SQL.read_text(encoding="utf-8"))  # type: ignore[call-overload]
     return DisposableDatabase(
         name=name,
         superuser_url=superuser_url,
