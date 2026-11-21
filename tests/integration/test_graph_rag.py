@@ -178,5 +178,5 @@ async def test_without_an_extraction_model_documents_cannot_be_filed_under_a_dom
     assert made.status_code == 200, made.text
     body = {"title": "Dengue", "text": SHARED[0][1], "knowledge_domain": "medical"}
     resp = await client.post("/v1/documents", json=body, headers=auth)
-    assert resp.status_code == 400
+    assert resp.status_code == 422  # InvalidInput, as every request this gateway cannot serve
     assert resp.json()["error"]["code"] == "graph_extraction_off"
