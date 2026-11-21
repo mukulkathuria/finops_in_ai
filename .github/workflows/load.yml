@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - "tests/load/k6/**"
+      - "infra/docker/postgres/**" # a new database image re-runs the profiles
       - ".github/workflows/load.yml"
 
 permissions:

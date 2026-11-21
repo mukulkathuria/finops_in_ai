@@ -19,6 +19,7 @@ on:
     branches: [main]
     paths:
       - "tests/load/**"
+      - "infra/docker/postgres/**" # a new database image re-runs the latency gate
       - ".github/workflows/bench.yml"
   schedule:
     - cron: "17 3 * * 1" # Mondays, 03:17 UTC
