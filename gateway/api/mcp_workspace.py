@@ -130,6 +130,13 @@ class InboxArgs(BaseModel):
     agent: AgentName
 
 
+class TaskContextArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", title="get_task_context arguments")
+    workspace_id: UUID
+    task_id: UUID
+    agent: AgentName
+
+
 def _owner(session: WorkspaceSession) -> tuple[Any, frozenset[str]]:
     return file_owner(session.caller), session.caller.groups
 
@@ -244,6 +251,21 @@ async def read_inbox(session: WorkspaceSession, args: InboxArgs) -> tuple[str, d
     return text, {"messages": [str(m.id) for m in messages]}
 
 
+async def get_task_context(
+    session: WorkspaceSession, args: TaskContextArgs
+) -> tuple[str, dict[str, Any]]:
+    owner, groups = _owner(session)
+    context = await session.workspace.task_context(
+        owner, groups, args.workspace_id, task_id=args.task_id, agent=args.agent
+    )
+    summary = {
+        "messages": [str(m.id) for m in context.messages],
+        "facts": [str(f.id) for f in context.facts],
+        "tokens": context.tokens,
+    }
+    return context.text, summary
+
+
 Run = Callable[[WorkspaceSession, Any], Awaitable[tuple[str, dict[str, Any]]]]
 TOOLS: Final[dict[str, tuple[str, str, type[BaseModel], Run]]] = {
     "put_fact": (
@@ -297,5 +319,13 @@ TOOLS: Final[dict[str, tuple[str, str, type[BaseModel], Run]]] = {
         "The questions waiting for you in a task, and the answers to the ones you asked.",
         InboxArgs,
         read_inbox,
+    ),
+    "get_task_context": (
+        "Get your task context",
+        "What your conversations in a task connect you to, from the agents' communication"
+        " graph: the threads of the questions you asked or were asked (follow-ups included),"
+        " with their answers, and the facts the agents in those threads recorded in the task.",
+        TaskContextArgs,
+        get_task_context,
     ),
 }

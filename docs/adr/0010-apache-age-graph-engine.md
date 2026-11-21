@@ -61,6 +61,32 @@ The owner chose AGE now, opt-in, over waiting for an AGE release or returning to
 - **AGE is a derived copy.** Backups leave it out, and after a restore or a major upgrade
   `age-setup.sql` rebuilds it (`docs/runbooks/restore.md`, `postgres-upgrade.md`).
 
+### The agents' communication graph (2026-11-21)
+The owner asked for the agents' communication to live in the graph too (migration 0032).
+
+- **What the graph holds.** A workspace is a graph:
+  - vertices are tasks, agents (a name within a task), questions and facts;
+  - edges are `member_of`, `asked`, `asked_of`, `answered`, `replies_to` and `wrote`.
+
+  `agent_messages.reply_to` now keeps the follow-up link, where only the hop count was kept
+  before.
+- **Where it is stored.** The workspace tables stay where their caps, dedup and agent claims are
+  enforced. The graph over them is two security-invoker views, so it is never a second copy that
+  could drift in the `sql` engine.
+- **With AGE.** Each workspace is an AGE graph, `w` followed by its id's hex, with row security
+  like the code graphs.
+  - A workspace is written in small steps, so each write adds only its own vertices and edges,
+    in its transaction (`graph_age_workspace_put`), instead of rebuilding the graph.
+  - A per-graph advisory lock, taken as each write's last statement, serializes writers without
+    deadlocks.
+  - The graph is dropped with its workspace, in the same transaction.
+- **The context provider.** `get_task_context` walks the graph from an agent: the questions it
+  asked or was asked, their threads along `replies_to`, the agents in those threads, and the facts
+  they recorded in the task. In `sql` this is a recursive CTE over the views; in `age`, one Cypher
+  MATCH per hop. Both pass `tests/integration/test_us25_workspace_graph.py`.
+- **What stays out.** Document retrieval (RAG) stays vector search. A graph of entities from
+  documents would need an extraction model per chunk, so it waits for a measured retrieval gap.
+
 ## Consequences
 - Both engines pass the same graph store tests (`tests/integration/test_us22_graph_store.py`).
   CI builds AGE in its database image and fails, rather than skips, if AGE is missing.

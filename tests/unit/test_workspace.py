@@ -55,6 +55,7 @@ def test_the_broker_lists_the_workspace_tools_with_their_schemas() -> None:
         "ask_agent",
         "answer_question",
         "read_inbox",
+        "get_task_context",
     } <= set(tools)
     assert tools["ask_agent"]["inputSchema"]["required"] == [
         "workspace_id",

@@ -431,7 +431,7 @@ def build_container(
         retrieval_service=retrieval_service,
         graph_store=graph_store,
         workspace_service=WorkspaceService(
-            db=db, repo=WorkspaceRepository(), embedder=embedder, guardrails=guardrails
+            db=db, repo=WorkspaceRepository(age=age), embedder=embedder, guardrails=guardrails
         ),
         code_service=CodeService(
             db=db,

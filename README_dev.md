@@ -407,6 +407,25 @@ through the MCP endpoint (`/v1/mcp`):
 | `search_workspace` | The facts nearest a query, as ranked snippets. The same agent repeating a search in a task, with no fact added since, gets the record (the fact ids) instead |
 | `put_file_summary`, `get_file_summary` | One summary per file path, read instead of the file |
 | `ask_agent`, `answer_question`, `read_inbox` | Questions between agents (see below) |
+| `get_task_context` | What your conversations in a task connect you to, from the communication graph (see below) |
+
+The agents' communication is a graph (migration 0032, ADR 0010):
+
+- **Vertices:** tasks, agents (one per name in each task), questions and facts.
+- **Edges:**
+  - `member_of` (agent to task);
+  - `asked` (agent to question) and `asked_of` (question to the agent asked);
+  - `answered` (agent to question);
+  - `replies_to` (a follow-up to its question: `ask_agent` with `reply_to`);
+  - `wrote` (agent to a fact it recorded in a task).
+- **Where it lives:** the views `workspace_graph_vertex` and `workspace_graph_edge` present the
+  graph over the workspace tables, under row security. With `GRAPH_ENGINE=age`, each workspace is
+  also an AGE graph, `w` followed by the workspace id's hex, which every write updates in its own
+  transaction.
+- **Context from the graph:** `get_task_context` walks it for an agent. It returns the threads of
+  the questions the agent asked or was asked (follow-ups either way, with their answers), and the
+  facts the agents in those threads recorded in the task. Like every read, the result is screened
+  and counted as discovery.
 
 Questions between agents:
 

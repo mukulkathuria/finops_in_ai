@@ -233,8 +233,9 @@ WHERE s.workspace_id = :workspace AND s.path = :path
 """
 _ASK: Final = """
 INSERT INTO agent_messages (org_id, task_id, from_agent, to_agent, question, question_hash, hops,
-                            written_by)
-SELECT app_current_org(), :task, :agent, :to, :question, :hash, :hops, :written_by
+                            written_by, reply_to)
+SELECT app_current_org(), :task, :agent, :to, :question, :hash, :hops, :written_by,
+       CAST(:reply_to AS uuid)
 WHERE (SELECT count(*) FROM agent_messages WHERE task_id = :task) < :cap
    OR EXISTS (SELECT 1 FROM agent_messages
               WHERE task_id = :task AND to_agent = :to AND question_hash = :hash)
@@ -265,6 +266,61 @@ WHERE m.task_id = :task
   AND ((m.to_agent = :agent AND m.answer IS NULL)
        OR (m.from_agent = :agent AND m.answer IS NOT NULL))
 ORDER BY m.created_at, m.id
+LIMIT :limit
+"""
+# The communication graph (migration 0032): an agent's context in a task is what its questions
+# connect it to. The questions it asked or was asked, their threads along replies_to (either way,
+# 4 steps cross a thread MAX_HOPS deep), and the facts the agents of those threads recorded there.
+_GRAPH_CONTEXT: Final = """
+WITH RECURSIVE me AS (
+  SELECT workspace_agent_id(:task, CAST(:agent AS text)) AS id
+), first AS (
+  SELECT e.dst AS q FROM workspace_graph_edge e
+  WHERE e.task_id = :task AND e.kind = 'asked' AND e.src = (SELECT id FROM me)
+  UNION
+  SELECT e.src FROM workspace_graph_edge e
+  WHERE e.task_id = :task AND e.kind = 'asked_of' AND e.dst = (SELECT id FROM me)
+), thread (q, steps) AS (
+  SELECT q, 0 FROM first
+  UNION
+  SELECT CASE WHEN e.src = t.q THEN e.dst ELSE e.src END, t.steps + 1
+  FROM thread t
+  JOIN workspace_graph_edge e
+    ON e.task_id = :task AND e.kind = 'replies_to' AND t.q IN (e.src, e.dst)
+  WHERE t.steps < 4
+), questions AS (
+  SELECT DISTINCT q FROM thread
+), peers AS (
+  SELECT id AS a FROM me
+  UNION
+  SELECT CASE e.kind WHEN 'asked' THEN e.src ELSE e.dst END
+  FROM workspace_graph_edge e
+  WHERE e.task_id = :task AND e.kind IN ('asked', 'asked_of')
+    AND CASE e.kind WHEN 'asked' THEN e.dst ELSE e.src END IN (SELECT q FROM questions)
+)
+SELECT 'question' AS kind, q AS id FROM questions
+UNION ALL
+SELECT 'fact', e.dst FROM workspace_graph_edge e
+WHERE e.task_id = :task AND e.kind = 'wrote' AND e.src IN (SELECT a FROM peers)
+"""
+_AGE_CONTEXT: Final = """
+SELECT kind, vertex AS id FROM graph_age_task_context(:workspace, :task, CAST(:agent AS text))
+"""
+_AGE_PUT: Final = "SELECT graph_age_workspace_put(:workspace, CAST(:ids AS uuid[]))"
+_AGE_DROP: Final = "SELECT graph_age_workspace_drop(:workspace)"
+_MESSAGES_BY_ID: Final = """
+SELECT m.id, m.task_id, m.from_agent, m.to_agent, m.question, m.answer, m.hops, m.asked,
+       m.created_at, m.answered_at
+FROM agent_messages m
+WHERE m.task_id = :task AND m.id = ANY(CAST(:ids AS uuid[]))
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT :limit
+"""
+_FACTS_BY_ID: Final = """
+SELECT f.id, f.key, f.content, f.source, f.confidence, f.agent, f.task_id, f.created_at
+FROM facts f
+WHERE f.workspace_id = :workspace AND f.id = ANY(CAST(:ids AS uuid[]))
+ORDER BY f.created_at DESC, f.id DESC
 LIMIT :limit
 """
 
@@ -322,6 +378,56 @@ def _message(row: RowMapping) -> MessageRecord:
 
 
 class WorkspaceRepository:
+    """With `age`, each workspace is also an Apache AGE graph, kept in each write's transaction,
+    and the context walk runs as Cypher (ADR 0010)."""
+
+    def __init__(self, *, age: bool = False) -> None:
+        self._age = age
+
+    async def graph_put(
+        self, conn: AsyncConnection, workspace_id: UUID, ids: Sequence[UUID]
+    ) -> None:
+        """Add a write's vertices to the workspace's AGE graph. The write's last statement: it
+        takes the graph's lock."""
+        if self._age:
+            await fetch_one(conn, _AGE_PUT, {"workspace": workspace_id, "ids": list(ids)})
+
+    async def graph_drop(self, conn: AsyncConnection, workspace_id: UUID) -> None:
+        if self._age:
+            await fetch_one(conn, _AGE_DROP, {"workspace": workspace_id})
+
+    async def context(
+        self,
+        conn: AsyncConnection,
+        workspace_id: UUID,
+        task_id: UUID,
+        agent: str,
+        *,
+        messages: int,
+        facts: int,
+    ) -> tuple[list[MessageRecord], list[FactRecord]]:
+        """The questions (oldest first) and facts (newest first) the agent's conversations in
+        the task connect it to, at most `messages` and `facts` of them."""
+        params = {"workspace": workspace_id, "task": task_id, "agent": agent}
+        rows = await fetch_all(conn, _AGE_CONTEXT if self._age else _GRAPH_CONTEXT, params)
+        questions = [r["id"] for r in rows if r["kind"] == "question"]
+        found = [r["id"] for r in rows if r["kind"] == "fact"]
+        asked = (
+            await fetch_all(
+                conn, _MESSAGES_BY_ID, {"task": task_id, "ids": questions, "limit": messages}
+            )
+            if questions
+            else []
+        )
+        recorded = (
+            await fetch_all(
+                conn, _FACTS_BY_ID, {"workspace": workspace_id, "ids": found, "limit": facts}
+            )
+            if found
+            else []
+        )
+        return [_message(r) for r in reversed(asked)], [_fact(r) for r in recorded]
+
     async def create(
         self,
         conn: AsyncConnection,
@@ -590,10 +696,11 @@ class WorkspaceRepository:
         hops: int,
         written_by: UUID,
         cap: int,
+        reply_to: UUID | None = None,
     ) -> tuple[MessageRecord, bool] | None:
         """The question's message, new or the one already asked (its count raised), and whether
         it is new; None when the task is full. One statement, so two agents asking at once
-        share one message."""
+        share one message. `reply_to` is the message it follows up (the graph's replies_to)."""
         params = {
             "task": task_id,
             "agent": agent,
@@ -603,6 +710,7 @@ class WorkspaceRepository:
             "hops": hops,
             "written_by": written_by,
             "cap": cap,
+            "reply_to": reply_to,
         }
         row = await fetch_one(conn, _ASK, params)
         return (_message(row), bool(row["created"])) if row is not None else None

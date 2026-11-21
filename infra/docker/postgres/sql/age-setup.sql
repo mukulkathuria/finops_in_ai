@@ -16,7 +16,8 @@ DO $$ BEGIN
                  current_database(), 'age');
 END $$;
 
--- Every project's graph, each under its own org's row security.
+-- Every project's code graph and every workspace's communication graph (migration 0032), each
+-- under its own org's row security.
 DO $$
 DECLARE
   r record;
@@ -24,6 +25,10 @@ BEGIN
   FOR r IN SELECT p.id, p.org_id FROM public.projects p ORDER BY p.id LOOP
     PERFORM set_config('app.org_id', r.org_id::text, true);
     PERFORM public.graph_age_sync(r.id);
+  END LOOP;
+  FOR r IN SELECT w.id, w.org_id FROM public.workspaces w ORDER BY w.id LOOP
+    PERFORM set_config('app.org_id', r.org_id::text, true);
+    PERFORM public.graph_age_workspace_put(r.id, NULL);
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
 END $$;

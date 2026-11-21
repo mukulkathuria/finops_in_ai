@@ -121,6 +121,9 @@ accounts, sets the limits, and sees every request, its cost, and what it saved.
   - facts stored once and found by key or by meaning;
   - summaries of files already read;
   - questions between agents, with duplicates merged and loops refused.
+- Their communication is a graph in PostgreSQL, of agents, questions, answers, follow-ups and
+  facts. An agent's context for a task comes from its relations (`get_task_context`), and with
+  `GRAPH_ENGINE=age` you can query the graph with Cypher.
 - Each agent's discovery tokens are counted per task and capped by its budget.
 
 ### 12. Identity, security and operations

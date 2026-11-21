@@ -39,6 +39,7 @@ from gateway.domain.workspace import (
     MAX_FACTS,
     MAX_MESSAGES,
     MAX_QUERIES,
+    MAX_RESULTS,
     MAX_SUMMARIES,
     AgentBudgetExceeded,
     AgentClaimed,
@@ -81,6 +82,14 @@ class SearchResult:
 class AskResult:
     message: MessageRecord
     status: str  # asked | pending | answered
+    text: str
+    tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskContext:
+    messages: tuple[MessageRecord, ...]  # the agent's threads, oldest first
+    facts: tuple[FactRecord, ...]  # recorded by the agents of those threads, newest first
     text: str
     tokens: int
 
@@ -257,13 +266,15 @@ class WorkspaceService:
             return await self._repo.workspaces(conn, groups=groups, limit=limit)
 
     async def delete(self, owner: Owner, workspace_id: UUID, *, admin: bool) -> None:
-        """The workspace and everything in it. Its creator decides, or an admin."""
+        """The workspace and everything in it, its graph included. Its creator decides, or an
+        admin; a refused delete rolls the graph's drop back."""
         async with self._tx(owner) as conn:
+            await self._repo.graph_drop(conn, workspace_id)
             deleted = await self._repo.delete(
                 conn, workspace_id, admin=admin, user_id=owner.user_id, team_id=owner.team_id
             )
-        if not deleted:
-            raise NotFound("no such workspace", code="workspace_not_found")
+            if not deleted:
+                raise NotFound("no such workspace", code="workspace_not_found")
 
     async def create_task(
         self,
@@ -278,6 +289,8 @@ class WorkspaceService:
             task = await self._repo.create_task(
                 conn, workspace_id, groups=groups, title=title, budget=budget
             )
+            if task is not None:
+                await self._repo.graph_put(conn, workspace_id, [task.id])
         if task is None:
             raise NotFound("workspace not found", code="workspace_not_found")
         return task
@@ -343,6 +356,7 @@ class WorkspaceService:
             if stored is not None:
                 if not await self._repo.count_fact(conn, workspace_id, cap=MAX_FACTS):
                     raise _full("facts", MAX_FACTS)  # the fact is rolled back with the count
+                await self._repo.graph_put(conn, workspace_id, [stored])
                 return stored, False
             known = await self._repo.fact_by_hash(  # written meanwhile by another agent
                 conn, workspace_id, groups=groups, content_hash=content_hash
@@ -524,6 +538,7 @@ class WorkspaceService:
                 hops=next_hop(parent_hops),
                 written_by=principal(owner),
                 cap=MAX_MESSAGES,
+                reply_to=reply_to,
             )
             if asked is None:
                 raise Forbidden(f"a task holds at most {MAX_MESSAGES} questions", code="task_full")
@@ -539,6 +554,8 @@ class WorkspaceService:
             status = "asked" if created else "pending" if message.answer is None else "answered"
             text = messages_text([message])
             tokens = await self._charge(conn, owner, Charge(task_id, agent), text)
+            if created:
+                await self._repo.graph_put(conn, workspace_id, [message.id])
         return AskResult(message, status, text, tokens)
 
     async def answer(
@@ -563,6 +580,8 @@ class WorkspaceService:
             answered = await self._repo.answer(
                 conn, message_id, answer, answered_by=principal(owner)
             )
+            if answered is not None:
+                await self._repo.graph_put(conn, workspace_id, [message_id])
         if answered is None:
             raise Conflict("the question is answered already", code="already_answered")
         return answered
@@ -583,6 +602,36 @@ class WorkspaceService:
             text = messages_text(messages) if messages else "Nothing waits for you in this task."
             await self._charge(conn, owner, Charge(task_id, agent), text)
         return messages, text
+
+    async def task_context(
+        self, owner: Owner, groups: frozenset[str], workspace_id: UUID, *, task_id: UUID, agent: str
+    ) -> TaskContext:
+        """What an agent's conversations in a task connect it to, read from the communication
+        graph: the threads of the questions it asked or was asked, and the facts the agents of
+        those threads (itself included) recorded in the task. Screened and counted like any
+        other read."""
+        policy = await self._guardrails.policy(owner.org_id)
+        async with self._tx(owner) as conn:
+            await self._task(conn, workspace_id, groups, task_id)
+            await self._claim(conn, owner, task_id, agent)
+            found, recorded = await self._repo.context(
+                conn, workspace_id, task_id, agent, messages=_INBOX_LIMIT, facts=MAX_RESULTS
+            )
+            kept = await self._kept(
+                policy,
+                workspace_id,
+                [(m.id, _message_text(m)) for m in found]
+                + [(f.id, _fact_text(f)) for f in recorded],
+            )
+            messages = tuple(m for m in found if m.id in kept)
+            facts = tuple(f for f in recorded if f.id in kept)
+            parts = [messages_text(messages)] if messages else []
+            parts += [facts_text(facts, whole=False)] if facts else []
+            text = "\n\n".join(parts) or (
+                "Nothing in this task connects to you yet: ask an agent, or record a fact."
+            )
+            tokens = await self._charge(conn, owner, Charge(task_id, agent), text)
+        return TaskContext(messages, facts, text, tokens)
 
     async def charge_read(
         self, owner: Owner, groups: frozenset[str], workspace_id: UUID, charge: Charge, text: str
