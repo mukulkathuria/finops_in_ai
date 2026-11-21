@@ -1,4 +1,4 @@
-# ADR 0004: PostgreSQL 19 RC, and the graph store without SQL/PGQ
+# ADR 0004: PostgreSQL 19, and the graph store without SQL/PGQ
 
 - Status: accepted
 - Date: 2026-11-03
@@ -42,6 +42,19 @@ it is expected back in PostgreSQL 20. A January 2026 hackers report of `GRAPH_TA
 row-level security" turned out to be table inheritance (a child table's policies do not apply
 through its parent), which our graph tables do not use; the cross-tenant graph tests still run
 against every `GraphStore`.
+
+### PostgreSQL 19.0 (2026-11-21)
+PostgreSQL 19 was released on 2026-11-19 (<https://www.postgresql.org/about/news/postgresql-19-released-3449/>).
+Its release notes (<https://www.postgresql.org/docs/19/release-19.html>) do not mention SQL/PGQ,
+property graphs or `GRAPH_TABLE`, so 19.0 ships without them, as this ADR expected. The decision
+stands:
+- The image is re-pinned to `postgres:19.0-trixie` (`sha256:bb6e70ad...`), with the PGDG
+  rebuilds of the same pgvector 0.8.7 and pg_partman 5.5.0.
+- RC1, RC2 and 19.0 share catalog version `202610061`, so environments created on RC1 move by a
+  swap of binaries (`docs/runbooks/postgres-upgrade.md`).
+- `test_the_graph_store_reads_within_the_project_acl` (`tests/integration/test_us22_graph_store.py`)
+  now runs on 19.0 and asserts the probe finds no SQL/PGQ. When a release ships it, that test fails first, and a
+  `SqlPgqGraphStore` can then be added behind the port, gated by the contract suite.
 
 ## Alternatives considered
 - Develop on `19beta1` to keep SQL/PGQ: rejected, it is an abandoned pre-release behaviour.

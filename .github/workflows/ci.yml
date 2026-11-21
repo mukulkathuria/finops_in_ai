@@ -51,7 +51,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
       - run: uv sync --extra litellm  # the contract and switch tests cover the extra
-      - name: Start PostgreSQL 19 (pinned RC image + pgvector + pg_partman)
+      - name: Start PostgreSQL 19.0 (pinned image + pgvector + pg_partman)
         run: |
           docker build -t finops-postgres:ci infra/docker/postgres
           docker run -d --name pg -p 127.0.0.1:5432:5432 \

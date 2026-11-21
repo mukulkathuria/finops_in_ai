@@ -1,56 +1,70 @@
-# Runbook: PostgreSQL 19 pre-release to GA
+# Runbook: upgrading PostgreSQL
 
-The stack runs PostgreSQL 19 RC1, pinned by digest in `infra/docker/postgres/Dockerfile`. GA is
-planned for 2026-11-19, after RC2 on 2026-11-12. Rehearse the move on a copy, then make it.
+The stack runs PostgreSQL 19.0, released 2026-11-19 and pinned by digest in
+`infra/docker/postgres/Dockerfile`, with pgvector 0.8.7 and pg_partman 5.5.0 from PGDG.
 
-## 1. Pick the method
+## From the 19 release candidate to 19.0 (done)
 
-Compare the catalog versions:
+The stack was built on 19 RC1. RC1, RC2 and 19.0 share one catalog version (`202610061`), so
+the move was a swap of binaries: a data volume created under RC1 starts under 19.0 as it is,
+with no dump, restore or `pg_upgrade`. To move an environment still on the RC image:
 
-```bash
-docker compose exec -T db psql -U postgres -Atc "SELECT catalog_version_no FROM pg_control_system()"
-docker run -d --rm --name pg-ga -e POSTGRES_PASSWORD=throwaway <GA image>
-docker exec pg-ga pg_isready -U postgres -t 30
-docker exec pg-ga psql -U postgres -Atc "SELECT catalog_version_no FROM pg_control_system()"
-docker stop pg-ga
-```
+1. Take a backup (`restore.md`).
+2. Rebuild the database image and restart it on the same volume: `docker compose up -d --build db`,
+   or `scripts/env.sh up <env>` for a Terraform environment.
+3. Check the server and the extensions:
 
-- **Same catalog version** (usual from the last RC to GA): swap the binaries.
-  1. Re-pin `FROM`, `PGVECTOR_VERSION` and the pg_partman package together, then rebuild.
-  2. Stop the cluster and start the new image on the same volume.
-  3. Run `ALTER EXTENSION vector UPDATE; ALTER EXTENSION pg_partman UPDATE;` in `finops`.
-- **Different catalog version**: dump and restore. Take a backup with the RC's `pg_dump`, start the
-  GA image on a new volume, and follow `restore.md`. The weekly restore drill keeps that path
-  tested.
-  - `pg_upgrade --link` is faster on a large database, but it needs both builds' binaries in one
-    container. No published image has that for one major version: install the GA packages, then
-    copy the RC's `/usr/lib/postgresql/19` to another path.
+   ```bash
+   docker compose exec -T db psql -U postgres -d finops -Atc "SHOW server_version" \
+     -c "ALTER EXTENSION vector UPDATE" -c "ALTER EXTENSION pg_partman UPDATE"
+   ```
 
-## 2. Rehearse on a copy
+   The extension updates change nothing at 19.0: pgvector and pg_partman keep the versions they
+   had on the RC.
+4. Check `/readyz`.
 
-The `upgrade` workflow already rehearses a major-version `pg_upgrade --link`:
-`scripts/upgrade_rehearsal.sh` takes PostgreSQL 18 to 19, every week and on every change to the
-migrations or the database image. It builds the schema and seeded data, including HNSW indexes,
-on 18. It upgrades, then proves the database identical (`scripts/db_fingerprint.sql`) and the
-RLS audit clean. Its first run took 18.6 to 19rc1: 96 tables and 9,735 rows identical.
+PostgreSQL 19.0 ships without SQL/PGQ: no `CREATE PROPERTY GRAPH` and no `GRAPH_TABLE`. The
+feature was reverted before beta 4 and is expected in PostgreSQL 20. The code graph keeps the
+`GraphStore` built on joins and recursive CTEs (ADR 0004). `/readyz` and a CI test report whether
+the server has SQL/PGQ.
 
-For the move from the RC to GA, which is the same major version:
+## Minor releases (19.x)
 
-1. Restore last night's backup into a scratch environment. Use `scripts/env.sh up staging` with
-   the RC image, then `restore.md`.
-2. Apply the method you picked.
-3. Push the re-pinned Dockerfile to a branch. The whole CI suite must pass on GA: migrations from
-   empty, the RLS audit and the integration tests.
-4. Run the `bench` workflow (the latency gates of spec section 11) and the `load` workflow, which
-   ends with the restore drill. Compare their numbers with the RC runs in `docs/audits/`.
+A minor release keeps the catalog version, so it is always a swap of binaries:
 
-## 3. Upgrade production
+1. Re-pin `FROM` by digest, together with `PGVECTOR_VERSION` and `PARTMAN_VERSION` (the PGDG
+   builds for the new minor).
+2. Push to a branch, so CI, the restore drill and the `upgrade` rehearsal run on the new image.
+3. Run the `bench` and `load` workflows. Compare their numbers with `docs/audits/`.
+4. Upgrade production as below, with the image swap as the method.
 
-1. Take a fresh backup. Run the restore drill on it.
-2. Announce a maintenance window. A binaries swap takes one restart; a dump and restore takes as
-   long as the drill took on this database.
+## Major releases (for example 19 to 20)
+
+1. **Read the release notes' "Migration" section.** In 19, the notes that matter for an upgrade
+   are these:
+   - pg_trgm and full-text indexes under non-libc locale providers need a `REINDEX`. This stack
+     uses the libc provider and has no such index.
+   - `pg_upgrade` refuses btree_gist `inet`/`cidr` indexes. There are none here.
+   - The default of `max_locks_per_transaction` doubled to 128. Settings copied from an older
+     release need doubling too.
+   - JIT is off by default, and `standard_conforming_strings` is always on.
+2. **Pick the method.**
+   - `pg_upgrade --link` takes minutes. `scripts/upgrade_rehearsal.sh` rehearses it every week:
+     the database image with the older major installed beside it
+     (`infra/docker/postgres/upgrade.Dockerfile`), every migration, seeded data with HNSW
+     indexes, the upgrade, then the copy proved identical (`scripts/db_fingerprint.sql`) and the
+     RLS audit clean. For the next major, re-pin the base image and run the rehearsal with
+     `OLD_MAJOR=19 NEW_MAJOR=20`.
+   - The fallback is dump and restore (`restore.md`), which the restore drill tests on every push.
+3. **Rehearse on a copy.** Restore last night's backup into a scratch environment
+   (`scripts/env.sh up staging`, then `restore.md`), apply the method, then run CI, the `bench`
+   and the `load` workflows on the new image.
+
+## Upgrade production
+
+1. Take a fresh backup, and run the restore drill on it.
+2. Announce a maintenance window. A swap of binaries takes one restart; `pg_upgrade --link` takes
+   minutes; a dump and restore takes as long as the drill took on this database.
 3. Stop the writers (gateway, worker). Upgrade, start them again, and check `/readyz`.
-4. Watch the error rate and latency for an hour. To roll back, restore the step 1 backup on the RC
-   image.
-
-Status: blocked until GA ships. PROGRESS tracks it.
+4. Watch the error rate and latency for an hour. To roll back, restore the step 1 backup on the
+   previous image.

@@ -5,7 +5,7 @@
 # 2. moves the cluster to 19 with pg_upgrade --link;
 # 3. proves the database the same afterwards: scripts/db_fingerprint.sql before and after, and
 #    the RLS audit.
-# docs/runbooks/postgres-upgrade.md uses the same steps to move from the 19 pre-release to GA.
+# docs/runbooks/postgres-upgrade.md uses the same steps for the next major (OLD_MAJOR=19 NEW_MAJOR=20).
 #
 #   scripts/upgrade_rehearsal.sh        needs Docker and uv; uses 127.0.0.1:5433
 set -euo pipefail

@@ -50,7 +50,7 @@ automatically), Node 24+ for the dashboard.
 ```bash
 uv sync                                # Python dependencies (locked in uv.lock)
 uv run python scripts/init_env.py      # writes .env with fresh random secrets (never overwrites)
-docker compose up -d --build           # PostgreSQL 19 RC1, mock LLM, migrations, gateway
+docker compose up -d --build           # PostgreSQL 19.0, mock LLM, migrations, gateway
 curl http://127.0.0.1:8080/readyz      # {"status":"ok","checks":{"database":"ok","objects":"ok"}}
 open http://127.0.0.1:5173            # dashboard (sign in with the bootstrap admin)
 ```
@@ -81,7 +81,7 @@ destroys both environments on every change. See `docs/runbooks/deploy.md`.
 | `docs/runbooks/deploy.md` | Provisioning dev and staging with Terraform; scaling the gateway (replicas behind a balancing proxy) |
 | `docs/runbooks/restore.md` | What to back up; restoring next to the live database, then swapping; the restore drill |
 | `docs/runbooks/incident.md` | Provider outage, runaway spend, database down, leaked keys and secrets, disabling a user, JWT and master key rotation |
-| `docs/runbooks/postgres-upgrade.md` | Moving from the PostgreSQL 19 pre-release to GA |
+| `docs/runbooks/postgres-upgrade.md` | Upgrading PostgreSQL: minor releases, the next major release (rehearsed weekly), and how 19 RC1 became 19.0 |
 
 `scripts/restore_drill.sh` backs up the database and restores the backup into a new database.
 It then proves the copy identical:
@@ -592,8 +592,10 @@ list, `PRICE_SYNC_SOURCE` (default `config/prices.json`, or an https URL), every
 ## Important notes
 
 - **PostgreSQL 19 and SQL/PGQ.** SQL/PGQ property graphs were reverted during the PostgreSQL 19
-  beta cycle and are absent from 19 RC1 (verified, see ADR 0004). Graph reads go through the
-  `GraphStore` port using indexed joins and recursive CTEs, which run on PG16+ including PG19.
+  beta cycle, and 19.0 (2026-11-19) ships without them: its release notes have none, and a CI
+  test proves the probe finds none (ADR 0004). They are expected in PostgreSQL 20. Graph reads go
+  through the `GraphStore` port using indexed joins and recursive CTEs, which run on PG16+
+  including PG19.
 - **Secrets** live only in `.env` (gitignored) or your secret manager. `.env.example` holds
   placeholders only. Provider keys are stored with envelope encryption and never returned.
 - **Comments in `.env`.** Put a comment after an empty setting on its own line. Compose reads
